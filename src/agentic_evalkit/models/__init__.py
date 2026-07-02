@@ -25,6 +25,7 @@ from agentic_evalkit.models.runs import (
     DatasetSelection,
     EvalRunManifest,
     EvalRunResult,
+    RunSummary,
     SampleResult,
     SamplingPolicy,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "GraderSpec",
     "NormalizedExecutionResult",
     "ResolvedDataset",
+    "RunSummary",
     "SamplePage",
     "SampleResult",
     "SamplingPolicy",

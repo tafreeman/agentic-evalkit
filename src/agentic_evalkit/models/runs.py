@@ -66,20 +66,14 @@ class SampleResult(FrozenModel):
     grade: GradeResult | None = None
 
 
-class EvalRunResult(FrozenModel):
-    """The complete, provenance-carrying outcome of an evaluation run (design §5.6).
+class RunSummary(FrozenModel):
+    """Separated outcome counts for a run (design §10).
 
-    ``sample_results`` is a tuple, so growing a run's results over time
-    (e.g. a streaming or resumed run) is expressed by building a new
-    ``EvalRunResult`` via ``model_copy(update=...)`` with an extended tuple
-    and updated summary counts, not by mutating this instance. No field on
-    this model hard-codes finality.
+    Every outcome category is counted independently so operational
+    failures (errors, timeouts, cancellations, unavailable capabilities)
+    can never masquerade as task failures.
     """
 
-    run_id: str
-    manifest: EvalRunManifest
-    resolved_dataset: ResolvedDataset
-    sample_results: tuple[SampleResult, ...] = ()
     total: int = 0
     passed: int = 0
     failed: int = 0
@@ -89,5 +83,22 @@ class EvalRunResult(FrozenModel):
     cancelled: int = 0
     abstained: int = 0
     unavailable: int = 0
+
+
+class EvalRunResult(FrozenModel):
+    """The complete, provenance-carrying outcome of an evaluation run (design §5.6).
+
+    ``samples`` is a tuple, so growing a run's results over time (e.g. a
+    streaming or resumed run) is expressed by building a new
+    ``EvalRunResult`` via ``model_copy(update=...)`` with an extended tuple
+    and an updated ``summary``, not by mutating this instance. No field on
+    this model hard-codes finality.
+    """
+
+    run_id: str
+    manifest: EvalRunManifest
+    resolved_dataset: ResolvedDataset
+    samples: tuple[SampleResult, ...] = ()
+    summary: RunSummary = Field(default_factory=RunSummary)
     started_at: datetime
     finished_at: datetime | None = None

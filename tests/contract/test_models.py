@@ -16,6 +16,7 @@ from agentic_evalkit.models import (
     GradeStatus,
     NormalizedExecutionResult,
     ResolvedDataset,
+    RunSummary,
     SamplePage,
     SampleResult,
     SamplingPolicy,
@@ -350,16 +351,8 @@ def test_eval_run_result_round_trips() -> None:
             config="main",
             split="test",
         ),
-        sample_results=(sample_result,),
-        total=1,
-        passed=1,
-        failed=0,
-        partial=0,
-        errors=0,
-        timeouts=0,
-        cancelled=0,
-        abstained=0,
-        unavailable=0,
+        samples=(sample_result,),
+        summary=RunSummary(total=1, passed=1),
         started_at=now,
         finished_at=now,
     )
@@ -382,16 +375,8 @@ def test_eval_run_result_supports_appending_sample_results() -> None:
         resolved_dataset=ResolvedDataset(
             dataset_id="openai/gsm8k", revision="sha256:deadbeef", config="main", split="test"
         ),
-        sample_results=(),
-        total=0,
-        passed=0,
-        failed=0,
-        partial=0,
-        errors=0,
-        timeouts=0,
-        cancelled=0,
-        abstained=0,
-        unavailable=0,
+        samples=(),
+        summary=RunSummary(),
         started_at=now,
         finished_at=None,
     )
@@ -413,11 +398,11 @@ def test_eval_run_result_supports_appending_sample_results() -> None:
     )
     appended = initial.model_copy(
         update={
-            "sample_results": (*initial.sample_results, new_sample_result),
-            "total": initial.total + 1,
+            "samples": (*initial.samples, new_sample_result),
+            "summary": initial.summary.model_copy(update={"total": initial.summary.total + 1}),
         }
     )
-    assert appended.sample_results == (new_sample_result,)
-    assert appended.total == 1
+    assert appended.samples == (new_sample_result,)
+    assert appended.summary.total == 1
     # The original is untouched, proving immutability was preserved.
-    assert initial.sample_results == ()
+    assert initial.samples == ()
