@@ -1,6 +1,6 @@
 # agentic-evalkit Standalone Evaluation Framework Design
 
-**Status:** Draft for user review
+**Status:** Approved; revised after five-model plan review
 
 **Date:** 2026-07-02
 
@@ -16,6 +16,8 @@
 
 Build a standalone, host-neutral evaluation toolkit for agentic systems. A developer must be able to install one package and immediately discover, inspect, preview, and use suitable public datasets without manually finding files or writing importer code.
 
+Existing evaluation frameworks often couple dataset access, grading, and reporting to a particular agent platform or model-provider SDK. `agentic-evalkit` separates evaluation from the system under test through a neutral `ExecutionTarget` protocol, making any callable, subprocess, or HTTP system evaluable without framework lock-in. Its objective-first grading policy ensures deterministic checks gate releases before model judges are consulted.
+
 The framework must produce accurate, reproducible, and inspectable evaluation evidence. It separates dataset transport, sample projection, system execution, authoritative verification, grading, statistics, and reporting so each layer can evolve without invalidating the others.
 
 The initial release must:
@@ -27,7 +29,7 @@ The initial release must:
 - grade with deterministic or authoritative checks before model judges;
 - calibrate any model judge used for gating;
 - report uncertainty, errors, timeouts, abstentions, and repeated-trial reliability;
-- provide a polished Python API, CLI, and portable JSON/JSONL/Markdown/HTML reports;
+- provide a polished Python API and CLI; Slice 4a emits canonical JSON, while full Slice 4b adds JSONL/Markdown/HTML reports;
 - run independently of Agentic Runtime Platform (ARP) and ExecutionKit (EK);
 - design the official containerized SWE-bench verifier as an optional follow-on capability that does not require contract changes.
 
@@ -41,7 +43,7 @@ The initial release must:
 - benchmark adapters and harness protocols;
 - callable, subprocess, and HTTP execution-target protocols;
 - objective graders, calibrated judge interfaces, and composite grading policy;
-- aggregation, confidence intervals, paired comparisons, `pass@k`, and `pass^k`;
+- aggregation, confidence intervals, paired comparisons, `pass@k`, and all-attempt consistency estimates;
 - run provenance, artifacts, reports, CLI, and extension interfaces.
 
 It does not own:
@@ -296,7 +298,7 @@ Every report retains sample-level outcomes and reports:
 - failure, error, timeout, abstention, cancellation, and unavailable-capability rates;
 - paired deltas and paired intervals for compatible runs;
 - `pass@k` when any successful attempt is useful;
-- `pass^k` when consistent success is required;
+- all-attempt consistency at `k` when every one of `k` attempts must succeed;
 - attempt counts, seed policy, and model sampling policy;
 - latency, token, and cost distributions;
 - predeclared subgroup slices with adequate sample sizes.
@@ -378,7 +380,7 @@ Implementation follows test-first red/green/refactor cycles. Required evidence i
 - wheel build/install, import, quickstart, and CLI smoke tests in a clean environment outside all three repositories;
 - Ruff, format, strict mypy, pytest coverage, and strict documentation gates.
 
-Mocks prove local behavior but not live source integration. The initial release requires live Hugging Face evidence. The optional SWE-bench feature additionally requires authoritative Docker smoke evidence.
+Mocks prove local behavior but not live source integration. Development requires live Hugging Face evidence before the provider task is complete, and the scheduled provider workflow preserves ongoing evidence. A classified transient provider outage at release time is recorded as a known issue rather than blocking an otherwise verified release. The optional SWE-bench feature additionally requires authoritative Docker smoke evidence.
 
 ## 15. Delivery Slices
 
@@ -401,11 +403,21 @@ Mocks prove local behavior but not live source integration. The initial release 
 - Normalized results, objective graders, composite hard gates, manifests, and artifacts.
 - GSM8K end-to-end quickstart.
 
-### Slice 4: Calibration, statistics, and reports
+### Slice 4a: Required objective-only runnable release
+
+- Objective exact/schema/composite graders and atomic rubrics.
+- Reproducible runner with separated outcome counts.
+- Canonical JSON report.
+- `doctor`, dataset, `init`, `validate`, and `run` CLI commands.
+- GSM8K end-to-end checkpoint with no importer code or heavyweight dataset dependencies.
+
+At this checkpoint, the project may release v0.1 or continue directly into Slice 4b for the fuller v1 surface.
+
+### Slice 4b: Deferred full evaluation analytics
 
 - Judge protocol and calibration artifacts.
-- Confidence intervals, paired comparison, `pass@k`, and `pass^k`.
-- JSON/JSONL/Markdown/HTML reporting and comparison workflow.
+- Confidence intervals, paired comparison, `pass@k`, and all-attempt consistency.
+- JSONL/Markdown/HTML reporting and `compare`/rich `report` workflows.
 
 ### Slice 5: Optional SWE-bench harness
 
@@ -437,9 +449,9 @@ The initial release is complete when:
 1. A clean environment installs the wheel and runs the CLI outside ARP and EK checkouts.
 2. Static dependency checks prove there are no ARP, `agentic-tools`, or EK imports.
 3. A developer can list curated datasets and search Hugging Face immediately after installation.
-4. GSM8K and SWE-bench Verified configs/splits resolve from live Dataset Viewer metadata.
+4. GSM8K and SWE-bench Verified configs/splits have recorded live Dataset Viewer evidence from Task 6 or the scheduled provider workflow; a classified transient outage during final release verification is recorded as a known issue rather than misreported as a product failure.
 5. Search, inspection, preview, and supported retrieval work without `datasets`, `pyarrow`, Docker, or manual imports.
-6. Every run pins immutable dataset and code provenance.
+6. Every successfully resolved run pins immutable dataset and code provenance; provider outages fail before execution with a classified error and no partial “latest” resolution.
 7. Provider failures remain typed and cannot appear as empty datasets.
 8. GSM8K completes through a target and objective grader using one manifest across Python and CLI.
 9. SWE-bench Verified can preview, project, and export official predictions without Docker.
@@ -449,7 +461,10 @@ The initial release is complete when:
 13. Reports separate task failure from infrastructure, timeout, abstention, cancellation, and unavailable capability.
 14. Compatible runs produce paired comparisons with uncertainty; incompatible runs are rejected with reasons.
 15. All required ADRs are accepted and consistent with code and documentation.
-16. The clean-wheel, live-provider, CLI, typing, test, coverage, and documentation gates pass.
+16. The clean-wheel, CLI, typing, test, coverage, and documentation gates pass; live-provider evidence either passes during release verification or has a classified transient-outage record plus prior scheduled/on-demand success.
+17. From a clean install, `agentic-evalkit init --preset gsm8k` followed by `agentic-evalkit run` against the packaged demo target succeeds without importer code, manual dataset file-hunting, or installing `datasets`, `pyarrow`, or Docker; provider/network failures surface a stable error code and remediation rather than a traceback.
+
+An objective-only v0.1 may ship after the Slice 4a checkpoint when criteria 1-11, 13, and 15-17 pass for canonical JSON output. A full v1 additionally requires calibrated-judge criterion 12, paired-comparison criterion 14, and the Slice 4b rich reporting surface.
 
 The optional SWE-bench feature is complete when a gold patch resolves and an invalid patch fails through the pinned official Docker path without changing initial public contracts.
 
@@ -469,7 +484,7 @@ The design is informed by:
 - [OpenAI Evals](https://github.com/openai/evals), [Frontier Evals](https://github.com/openai/frontier-evals), and [simple-evals](https://github.com/openai/simple-evals);
 - [Langfuse experiments](https://langfuse.com/docs/evaluation/experiments/experiments-via-ui);
 - [Hamelsmu eval skills](https://github.com/hamelsmu/evals-skills/tree/main/skills);
-- [DeepResearch Bench](https://arxiv.org/abs/2506.11763), [DeepResearch Bench II](https://arxiv.org/abs/2601.08536), and [RetroSearch](https://arxiv.org/abs/2506.06287).
+- [DeepResearch Bench](https://arxiv.org/abs/2506.11763), [DeepResearch Bench II](https://arxiv.org/abs/2601.08536), and [FutureSearch Deep Research Bench, whose RetroSearch environment freezes the web](https://arxiv.org/abs/2506.06287).
 
 Primary benchmark methodology and framework documentation take precedence over secondary summaries.
 

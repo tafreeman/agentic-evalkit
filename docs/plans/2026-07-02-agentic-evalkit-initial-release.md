@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver an independently installable Python library and CLI that discovers Hugging Face and local datasets, evaluates callable/subprocess/HTTP targets with valid graders, and emits reproducible statistical reports.
+**Goal:** Deliver an independently installable Python library and CLI that discovers Hugging Face and local datasets, evaluates callable/subprocess/HTTP targets with objective-first graders, and can ship an objective-only v0.1 before adding the deferred full-analytics surface.
 
 **Architecture:** `agentic-evalkit` is a host-neutral pipeline with explicit provider, adapter, target, grader, aggregation, and reporter boundaries. Immutable Pydantic contracts connect those boundaries; Python entry points provide extensions; ARP and ExecutionKit remain outside the dependency graph. The initial release includes SWE-bench dataset projection and harness contracts, while the official Docker executor receives its own follow-on implementation plan.
 
@@ -12,7 +12,26 @@
 
 ## Scope and sequencing
 
-This plan implements design Slices 1-4. Slice 5, the official containerized SWE-bench executor, is deliberately excluded from the initial release. Tasks 8 and 9 establish `HarnessRequest`, `HarnessResult`, and `HarnessExecutor`, prediction export, capability reporting, and deterministic contract tests so the later executor does not change public schemas.
+This plan implements design Slices 1-4a, pauses at a formal working-product checkpoint, and then implements Slice 4b only if the checkpoint decision selects a full v1 rather than an objective-only v0.1. Slice 5, the official containerized SWE-bench executor, is deliberately excluded. Task 8 establishes `HarnessRequest`, `HarnessResult`, and `HarnessExecutor`, prediction export, capability reporting, and deterministic contract tests so the later executor does not change public schemas.
+
+The canonical identity is `agentic-evalkit` / `agentic_evalkit` / `agentic-evalkit`. A legacy ARP-local draft uses `agentic-v2-eval`, but this standalone repository supersedes that name and does not require an ARP change or import integration. ARP and EK are systems under test, reachable only through public target boundaries.
+
+Dependency decisions verified before execution:
+
+- both companion repositories use MIT, so this public package uses MIT;
+- PyPI lists HTTPX 0.28.1 as stable and 1.0 only as a development prerelease, so pin `httpx>=0.28.1,<1`;
+- pin `typer>=0.12,<1` rather than an unbounded pre-1 range;
+- begin with an 80% branch-aware coverage floor and report the achieved percentage at release rather than forcing 90% before the CLI/report surface exists.
+
+### Milestone delivery
+
+| Milestone | Scope | Merge/release boundary |
+|---|---|---|
+| A | Tasks 1-7: repository, contracts, plugins, cache, providers, catalog | Merge as the dataset-foundation PR |
+| B | Tasks 8-11, Task 13 Steps 1-4, and Task 14 Steps 1-9: benchmark contracts, targets, objective graders, runner, JSON report, runnable CLI | Merge as the objective-evaluation PR and execute the v0.1 checkpoint |
+| C | Task 10 Steps 6-9, Task 12, Task 13 Steps 5-7, Task 14 Steps 10-11, and Tasks 15-16 | Execute deferred analytics only after `CONTINUE_FULL_V1`; for `SHIP_V0_1`, move them to the v0.2 plan and run Tasks 15-16 in objective-only mode |
+
+Each milestone starts from updated `main`, uses its own branch/worktree, runs its complete verification matrix, and lands independently. Do not carry one 16-task branch through all milestones.
 
 Every ADR is committed before the production code it governs:
 
@@ -38,8 +57,8 @@ agentic-evalkit/
     guides/quickstart.md                  # install-to-first-report workflow
     guides/providers.md                   # provider and dataset authoring
     guides/graders.md                     # objective and judge policy
-    superpowers/specs/...                 # approved design
-    superpowers/plans/...                 # this implementation plan
+    specs/...                             # approved design
+    plans/...                             # this implementation plan and review record
   src/agentic_evalkit/
     __init__.py                            # intentionally small public surface
     errors.py                              # typed framework failures
@@ -63,6 +82,10 @@ agentic-evalkit/
     fixtures/                              # captured source responses and manifests
   pyproject.toml
   mkdocs.yml
+  LICENSE                                 # MIT terms
+  CHANGELOG.md                            # release history
+  CONTRIBUTING.md                         # local development and review workflow
+  SECURITY.md                             # private vulnerability reporting policy
 ```
 
 Files stay focused: models do not perform I/O, providers do not grade, targets do not know benchmark types, graders do not execute targets, and reporters consume completed run models only.
@@ -72,6 +95,10 @@ Files stay focused: models do not perform I/O, providers do not grade, targets d
 **Files:**
 - Create: `.gitignore`
 - Create: `.github/workflows/ci.yml`
+- Create: `LICENSE`
+- Create: `CHANGELOG.md`
+- Create: `CONTRIBUTING.md`
+- Create: `SECURITY.md`
 - Create: `pyproject.toml`
 - Create: `src/agentic_evalkit/__init__.py`
 - Create: `src/agentic_evalkit/cli/__init__.py`
@@ -90,6 +117,8 @@ Create `docs/adr/0001-standalone-boundary.md` with status `Accepted`, the decisi
 Create `docs/adr/0009-optional-dependencies-and-plugins.md` with status `Accepted`. Record that the base install contains Hugging Face discovery, while `parquet`, `judges`, and `swebench` are capability extras; extension points use versioned `agentic_evalkit.*` entry-point groups; plugin load failures are reported rather than ignored.
 
 - [ ] **Step 3: Write the failing package metadata test**
+
+Before the test, add the MIT license using the standard MIT text and copyright `2026 agentic-evalkit contributors`. Add `CHANGELOG.md` with an `Unreleased` section, `CONTRIBUTING.md` with uv setup and the offline verification matrix, and `SECURITY.md` directing vulnerability reports to private GitHub security advisories rather than public issues. Reference all four files from `pyproject.toml`/README metadata.
 
 ```python
 # tests/unit/test_package.py
@@ -110,7 +139,7 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'age
 
 - [ ] **Step 5: Add build, runtime, development, and CLI metadata**
 
-Create `pyproject.toml` with Hatchling build metadata, Python `>=3.11`, package discovery under `src`, and script entry point `agentic-evalkit = "agentic_evalkit.cli:app"`. Use these base dependencies with compatible upper bounds: Pydantic 2, Typer below 1, Rich below 15, PyYAML below 7, huggingface-hub below 2, HTTPX below 1, and Jinja2 below 4. Add `parquet`, `judges`, and `swebench` as empty capability groups until their implementation plans select concrete packages. Add a `dev` dependency group containing pytest, pytest-asyncio, pytest-cov, Ruff, mypy, build, MkDocs, and MkDocs Material.
+Create `pyproject.toml` with Hatchling build metadata, Python `>=3.11`, MIT license metadata, package discovery under `src`, and script entry point `agentic-evalkit = "agentic_evalkit.cli:app"`. Use compatible base ranges: Pydantic 2, `typer>=0.12,<1`, Rich below 15, PyYAML below 7, huggingface-hub below 2, `httpx>=0.28.1,<1`, and Jinja2 below 4. Add `parquet`, `judges`, and `swebench` as empty capability groups until their implementation plans select concrete packages. Add a `dev` dependency group containing pytest, pytest-asyncio, pytest-cov, Ruff, mypy, build, MkDocs, and MkDocs Material.
 
 Configure:
 
@@ -128,7 +157,7 @@ branch = true
 source = ["agentic_evalkit"]
 
 [tool.coverage.report]
-fail_under = 90
+fail_under = 80
 show_missing = true
 
 [tool.ruff]
@@ -205,7 +234,7 @@ Expected: package test PASS and all quality commands exit 0.
 - [ ] **Step 8: Commit the foundation**
 
 ```powershell
-git add .gitignore .github pyproject.toml src tests/unit/test_package.py docs/adr/0001-standalone-boundary.md docs/adr/0009-optional-dependencies-and-plugins.md
+git add .gitignore .github LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md pyproject.toml src tests/unit/test_package.py docs/adr/0001-standalone-boundary.md docs/adr/0009-optional-dependencies-and-plugins.md
 git commit -m "build: establish standalone package foundation"
 ```
 
@@ -406,7 +435,7 @@ Expected: tests and quality checks PASS; commit succeeds.
 
 - [ ] **Step 1: Accept ADR-0004**
 
-Record canonical JSON hashing, SHA-256 object IDs, separate page/full-dataset record types, atomic replace, checksums, platform user-cache default, exact offline lookup, and lock-scoped concurrent writes.
+Record canonical JSON hashing, SHA-256 object IDs, separate page/full-dataset record types, replace-based publication, checksums, platform user-cache default, exact offline lookup, and lock-scoped concurrent writes. Explicitly document that `Path.replace()` atomicity depends on the local Windows filesystem; correctness therefore relies on checksum validation and mandatory Windows CI cache tests rather than an unconditional cross-filesystem atomicity claim.
 
 - [ ] **Step 2: Write failing cache identity and corruption tests**
 
@@ -471,6 +500,8 @@ Implement frozen `CacheKey` with all fields in the test plus projection/filter/d
 - [ ] **Step 5: Add concurrency and exact-page tests**
 
 Use a `ThreadPoolExecutor` to write the same key concurrently and assert one valid final entry. Write two page keys with different offsets and assert both payloads remain addressable. Run the test module repeatedly with `pytest -x --count=5` after adding `pytest-repeat` to the dev group.
+
+The Windows CI matrix from Task 1 must run these cache tests; do not mark Task 4 complete from a Linux-only result.
 
 - [ ] **Step 6: Run and commit**
 
@@ -647,6 +678,8 @@ Use `/rows` with URL-encoded `dataset`, `config`, `split`, `offset`, and `length
 Map HTTP 401/403 to `DatasetAccessDenied`, 404 to `DatasetNotFound`, 422 config errors to `DatasetConfigRequired`, 429 to `DatasetRateLimited` with retry metadata, and transport/5xx failures to `DatasetProviderUnavailable`.
 
 `healthcheck()` calls `/is-valid` for `openai/gsm8k` with a short timeout and reports latency and rate-limit metadata. Use default `HfApi` authentication so public access needs no token and private/gated access honors `HF_TOKEN` or the standard Hugging Face credential store.
+
+Add a bounded retry policy for connection failures, 429, and 502/503/504. Honor `Retry-After`, otherwise use jittered exponential backoff with at most three retries and a caller-injected sleep function for deterministic tests. Add tests proving 429-then-200 succeeds, repeated 429 raises `DatasetRateLimited`, and nonretryable 4xx responses are attempted once.
 
 - [ ] **Step 5: Add opt-in live tests**
 
@@ -972,7 +1005,7 @@ Define async `ExecutionTarget.execute(sample, *, attempt, timeout_seconds)`. `Ca
 
 - [ ] **Step 6: Implement bounded subprocess JSONL**
 
-`SubprocessTarget` uses `asyncio.create_subprocess_exec` with an argument tuple and no shell. Send one compact JSON line, close standard input, and use `communicate()` under a timeout. Kill and await the process on timeout. Reject output larger than configured limits before parsing. Require exactly one JSON object with matching sample ID. Record command executable name and configured protocol version, but not environment secret values.
+`SubprocessTarget` uses `asyncio.create_subprocess_exec` with an argument tuple and no shell. Send one compact UTF-8 JSON line and close standard input. Read standard output with `StreamReader.readline()` so chunks are reassembled into complete lines on Windows, strip both `\r` and `\n`, enforce the configured byte bound, and parse exactly one JSON object with matching sample ID. Drain bounded standard error concurrently. Kill and await the process on timeout. Record command executable name and configured protocol version, but not environment secret values. Add a fixture that emits CRLF and a response split across writes; it must parse identically on Windows and Linux.
 
 - [ ] **Step 7: Implement HTTP execution**
 
@@ -987,7 +1020,7 @@ git add docs/adr/0006-execution-target-boundary.md src/agentic_evalkit/targets t
 git commit -m "feat: add host-neutral execution targets"
 ```
 
-### Task 10: Objective graders, composite gates, and calibrated judges
+### Task 10: Objective graders first; calibrated judges after the checkpoint
 
 **Files:**
 - Create: `docs/adr/0007-objective-first-grading.md`
@@ -1032,7 +1065,34 @@ async def test_failed_hard_gate_cannot_be_averaged_away() -> None:
 
 Define `_StaticGrader`, `_sample`, and `_execution` in the test module using the Task 2 public models.
 
-- [ ] **Step 3: Write failing calibration enforcement tests**
+- [ ] **Step 3: Run objective tests and confirm grader modules are absent**
+
+Run: `uv run pytest tests/unit/graders/test_exact.py tests/unit/graders/test_composite.py -v`
+
+Expected: FAIL with import errors for objective grader modules.
+
+- [ ] **Step 4: Implement objective and composite graders**
+
+Define async `Grader.grade(sample, execution)`. Implement:
+
+- `ExactMatchGrader` with Unicode normalization, optional case folding, whitespace normalization, numeric canonicalization, and an injected extractor;
+- `SchemaGrader` that validates structured output against a supplied Pydantic `TypeAdapter`;
+- `CompositeGrader` that runs components, preserves every child result, calculates the weighted score over available numeric results, fails when any hard gate fails, and returns error/unavailable rather than treating missing graders as zero.
+
+Add immutable `RubricCriterion` and `Rubric` models. Every criterion requires a stable ID, binary or bounded scale, evidence requirement, weight, and hard-gate flag. Reject duplicate IDs, negative weights, broad criteria without evidence requirements, and rubrics whose numeric weights sum to zero. Use `extract_final_answer` from the GSM8K adapter to configure its normalized exact grader.
+
+- [ ] **Step 5: Verify and commit the Slice 4a objective graders**
+
+```powershell
+uv run pytest tests/unit/graders/test_exact.py tests/unit/graders/test_composite.py -v
+uv run mypy
+git add docs/adr/0007-objective-first-grading.md src/agentic_evalkit/graders tests/unit/graders/test_exact.py tests/unit/graders/test_composite.py
+git commit -m "feat: add objective-first grading"
+```
+
+Expected: objective and hard-gate tests PASS. Do not implement model judges before the runnable-v0.1 checkpoint.
+
+- [ ] **Step 6 (Slice 4b): Write failing calibration enforcement tests**
 
 ```python
 # tests/unit/graders/test_judge.py
@@ -1062,39 +1122,21 @@ async def test_expired_calibration_cannot_gate() -> None:
     assert "expired" in result.evidence["reason"]
 ```
 
-- [ ] **Step 4: Run tests and confirm grader modules are absent**
-
-Run: `uv run pytest tests/unit/graders -v`
-
-Expected: FAIL with import errors for grader modules.
-
-- [ ] **Step 5: Implement objective and composite graders**
-
-Define async `Grader.grade(sample, execution)`. Implement:
-
-- `ExactMatchGrader` with Unicode normalization, optional case folding, whitespace normalization, numeric canonicalization, and an injected extractor;
-- `SchemaGrader` that validates structured output against a supplied Pydantic `TypeAdapter`;
-- `CompositeGrader` that runs components, preserves every child result, calculates the weighted score over available numeric results, fails when any hard gate fails, and returns error/unavailable rather than treating missing graders as zero.
-
-Add immutable `RubricCriterion` and `Rubric` models. Every criterion requires a stable ID, binary or bounded scale, evidence requirement, weight, and hard-gate flag. Reject duplicate IDs, negative weights, broad criteria without evidence requirements, and rubrics whose numeric weights sum to zero.
-
-Use `extract_final_answer` from the GSM8K adapter to configure its normalized exact grader.
-
-- [ ] **Step 6: Implement calibrated judge contracts**
+- [ ] **Step 7 (Slice 4b): Implement calibrated judge contracts**
 
 Define `JudgeClient` with a provider-neutral async `judge(request) -> JudgeResponse`. Add immutable `JudgeRequest`, `JudgeResponse`, and `CalibrationArtifact`. Calculate TPR/TNR from confusion counts. `JudgeGrader` must verify fingerprint equality, nonexpired calibration, minimum 30 positive and 30 negative held-out labels, TPR and TNR each at least the manifest threshold, and structured response validity. It reports parse errors and abstentions explicitly and retries malformed responses at most twice.
 
-- [ ] **Step 7: Add position-bias and fingerprint tests**
+- [ ] **Step 8 (Slice 4b): Add position-bias and fingerprint tests**
 
 Test mismatched model/prompt fingerprints, insufficient calibration sample counts, reversed answer ordering, malformed structured output, and an explicit judge abstention. Assert none can produce a release-gating pass.
 
-- [ ] **Step 8: Run and commit**
+- [ ] **Step 9 (Slice 4b): Run and commit calibrated judges**
 
 ```powershell
-uv run pytest tests/unit/graders -v
+uv run pytest tests/unit/graders/test_judge.py -v
 uv run mypy
-git add docs/adr/0007-objective-first-grading.md src/agentic_evalkit/graders tests/unit/graders
-git commit -m "feat: add objective and calibrated grading"
+git add src/agentic_evalkit/graders/judge.py src/agentic_evalkit/graders/__init__.py tests/unit/graders/test_judge.py
+git commit -m "feat: add calibrated model judges"
 ```
 
 ### Task 11: Artifact store and evaluation runner
@@ -1195,7 +1237,9 @@ git add src/agentic_evalkit/artifacts.py src/agentic_evalkit/events.py src/agent
 git commit -m "feat: add reproducible evaluation runner"
 ```
 
-### Task 12: Aggregation, reliability, and run compatibility
+### Task 12 (Slice 4b): Advanced statistics, reliability, and run compatibility
+
+Do not execute this task until the runnable-v0.1 checkpoint after Task 14 Part A selects the full-v1 path.
 
 **Files:**
 - Create: `docs/adr/0008-statistical-comparability.md`
@@ -1209,7 +1253,7 @@ git commit -m "feat: add reproducible evaluation runner"
 
 - [ ] **Step 1: Accept ADR-0008**
 
-Record sample-level retention, Wilson 95% intervals for binary rates, deterministic seeded bootstrap for paired deltas, exact attempt accounting, `pass@k`/`pass^k`, separated operational outcomes, and rejection of comparisons with incompatible provenance.
+Record sample-level retention, Wilson 95% intervals for binary rates, deterministic seeded bootstrap for paired deltas, exact attempt accounting, `pass@k`, all-attempt consistency at `k`, separated operational outcomes, and rejection of comparisons with incompatible provenance.
 
 - [ ] **Step 2: Write failing known-value tests**
 
@@ -1217,7 +1261,7 @@ Record sample-level retention, Wilson 95% intervals for binary rates, determinis
 # tests/unit/stats/test_reliability.py
 import pytest
 
-from agentic_evalkit.stats.reliability import pass_at_k, pass_power_k
+from agentic_evalkit.stats.reliability import consistency_at_k, pass_at_k
 
 
 def test_pass_at_k_known_values() -> None:
@@ -1225,8 +1269,8 @@ def test_pass_at_k_known_values() -> None:
     assert pass_at_k(total_attempts=4, successful_attempts=1, k=4) == pytest.approx(1.0)
 
 
-def test_pass_power_k_requires_consistency() -> None:
-    assert pass_power_k(success_probability=0.8, k=3) == pytest.approx(0.512)
+def test_consistency_at_k_requires_every_attempt_to_pass() -> None:
+    assert consistency_at_k(success_probability=0.8, k=3) == pytest.approx(0.512)
 ```
 
 ```python
@@ -1254,15 +1298,15 @@ Expected: FAIL with import errors for `agentic_evalkit.stats`.
 
 - [ ] **Step 4: Implement aggregation and intervals**
 
-Implement Wilson bounds using `statistics.NormalDist().inv_cdf(0.975)`. `aggregate_run()` counts pass/fail/partial/error/timeout/cancelled/abstain/unavailable separately, reports exact numerator/denominator, score mean only over defined numeric scores, and latency/token/cost count/mean/p50/p95 where data exists. Empty denominators return `None` bounds, never zero confidence. Compute subgroup aggregates only for manifest-predeclared sample tags and include subgroup sample counts so small slices remain visible rather than overinterpreted.
+Implement Wilson bounds using `statistics.NormalDist().inv_cdf(0.975)`. `aggregate_run()` counts pass/fail/partial/error/timeout/cancelled/abstain/unavailable separately, reports exact numerator/denominator, score mean only over defined numeric scores, and latency/token/cost count/mean/p50/p95 where data exists. Empty denominators return `None` bounds, never zero confidence. Detailed subgroup manifest syntax and minimum-sample warnings are deferred past v1.
 
 - [ ] **Step 5: Implement repeated-trial metrics**
 
-`pass_at_k(total_attempts, successful_attempts, k)` uses `1 - comb(n-c, k) / comb(n, k)` with validation `0 <= c <= n` and `1 <= k <= n`. `pass_power_k(success_probability, k)` uses `p**k` with `0 <= p <= 1`. Group attempts by sample ID and report attempt coverage so missing attempts cannot inflate results.
+`pass_at_k(total_attempts, successful_attempts, k)` computes `1 - C(n-c,k)/C(n,k)` with validation `0 <= c <= n` and `1 <= k <= n`; use `math.lgamma` in log space for large `n` rather than constructing huge integers. `consistency_at_k(success_probability, k)` uses `p**k` with `0 <= p <= 1` and is described as “all k attempts pass,” not as a second `pass@k` metric. Group attempts by sample ID and report attempt coverage so missing attempts cannot inflate results.
 
 - [ ] **Step 6: Implement compatibility and paired bootstrap**
 
-Compare dataset ID/revision/config/split, adapter, harness, grader, target policy, sampling temperature/seed policy, and attempt count. Return all mismatches in `IncompatibleRuns`. For compatible runs, pair by sample and attempt ID, calculate the success-rate delta, and bootstrap paired differences with a local `random.Random(seed)` instance. Return estimate, 2.5/97.5 percentiles, paired count, and seed.
+Compare dataset ID/revision/config/split, adapter, harness, grader, target policy, sampling temperature/seed policy, and attempt count. Return all mismatches in `IncompatibleRuns`. For compatible runs, pair by sample and attempt ID, calculate the success-rate delta, and bootstrap paired differences with a local `random.Random(seed)` instance. Default to 1,000 bootstrap samples; accept an API/CLI override from 100 through 10,000. Return estimate, 2.5/97.5 percentiles, paired count, sample count, and seed.
 
 - [ ] **Step 7: Run and commit**
 
@@ -1273,7 +1317,7 @@ git add docs/adr/0008-statistical-comparability.md src/agentic_evalkit/stats tes
 git commit -m "feat: add statistically valid aggregation"
 ```
 
-### Task 13: Portable JSON, JSONL, Markdown, and HTML reports
+### Task 13: Canonical JSON first; rich reports after the checkpoint
 
 **Files:**
 - Create: `src/agentic_evalkit/reporters/base.py`
@@ -1293,57 +1337,66 @@ git commit -m "feat: add statistically valid aggregation"
 # tests/unit/reporters/test_json.py
 import json
 
-from agentic_evalkit.reporters import JsonReporter, JsonlReporter
+from agentic_evalkit.reporters import JsonReporter
 
 
 def test_json_and_jsonl_retain_sample_evidence(tmp_path) -> None:
     run = _run_with_pass_error_timeout_and_provenance()
     json_path = JsonReporter().write(run, tmp_path / "run.json")
-    jsonl_path = JsonlReporter().write(run, tmp_path / "samples.jsonl")
     payload = json.loads(json_path.read_text(encoding="utf-8"))
-    lines = [json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()]
     assert payload["provenance"]["dataset_revision"] == "abc"
-    assert {item["execution"]["status"] for item in lines} == {
+    assert {item["execution"]["status"] for item in payload["samples"]} == {
         "completed",
         "error",
         "timeout",
     }
 ```
 
-Add tests that Markdown contains exact numerator/denominator and compatibility details, and HTML escapes `<script>` in model output while containing embedded JSON data and no external asset URLs.
-
 Define `_run_with_pass_error_timeout_and_provenance()` in the test package as a frozen three-sample `EvalRunResult` fixture shared by all reporter tests.
 
 - [ ] **Step 2: Run tests and confirm reporters are absent**
 
-Run: `uv run pytest tests/unit/reporters -v`
+Run: `uv run pytest tests/unit/reporters/test_json.py -v`
 
 Expected: FAIL with import errors for `agentic_evalkit.reporters`.
 
-- [ ] **Step 3: Implement reporter protocol and machine formats**
+- [ ] **Step 3: Implement the reporter protocol and canonical JSON**
 
-Define `Reporter.write(run, destination) -> Path`. `JsonReporter` writes the complete versioned `EvalRunResult` with deterministic indentation and sorted keys. `JsonlReporter` writes one header record with manifest/provenance/summary, one sample record per result, and one trailer record with aggregate statistics. Use temporary files plus atomic replacement and UTF-8 newlines.
+Define `Reporter.write(run, destination) -> Path`. `JsonReporter` writes the complete versioned `EvalRunResult` with deterministic indentation and sorted keys. Use a temporary file plus atomic replacement and UTF-8 newlines.
 
-- [ ] **Step 4: Implement human-readable formats**
+- [ ] **Step 4: Verify and commit the Slice 4a JSON reporter**
+
+```powershell
+uv run pytest tests/unit/reporters/test_json.py -v
+uv run mypy
+git add src/agentic_evalkit/reporters/base.py src/agentic_evalkit/reporters/json.py src/agentic_evalkit/reporters/__init__.py tests/unit/reporters/test_json.py
+git commit -m "feat: add canonical JSON reports"
+```
+
+- [ ] **Step 5 (Slice 4b): Implement JSONL and human-readable formats**
+
+`JsonlReporter` writes one header record with manifest/provenance/summary, one sample record per result, and one trailer record with aggregate statistics.
 
 `MarkdownReporter` renders identity, provenance, compatibility, outcome counts, confidence intervals, reliability, resource distributions, and a sample table with evidence/artifact references.
 
 `HtmlReporter` uses Jinja2 autoescape, embeds CSS and escaped JSON in one self-contained file, provides filter buttons for outcome categories, and includes a no-JavaScript summary. It must not load remote scripts, fonts, analytics, or styles.
 
-- [ ] **Step 5: Add redaction and deterministic-output tests**
+- [ ] **Step 6 (Slice 4b): Add redaction and deterministic-output tests**
 
 Provide a redaction policy that removes configured evidence keys and replaces matching secret strings with `[REDACTED]` before any reporter sees the model. Render the same frozen run twice and assert byte-identical output after injecting a fixed generated-at timestamp.
 
-- [ ] **Step 6: Run and commit**
+Add tests that Markdown contains exact numerator/denominator and compatibility details, and HTML escapes `<script>` in model output while containing embedded JSON data and no external asset URLs.
+
+- [ ] **Step 7 (Slice 4b): Run and commit rich reports**
 
 ```powershell
-uv run pytest tests/unit/reporters -v
+uv run pytest tests/unit/reporters/test_markdown.py tests/unit/reporters/test_html.py -v
 uv run mypy
-git add src/agentic_evalkit/reporters tests/unit/reporters
-git commit -m "feat: add portable evaluation reports"
+git add src/agentic_evalkit/reporters/jsonl.py src/agentic_evalkit/reporters/markdown.py src/agentic_evalkit/reporters/html.py src/agentic_evalkit/reporters/templates tests/unit/reporters/test_markdown.py tests/unit/reporters/test_html.py
+git commit -m "feat: add rich portable reports"
 ```
 
-### Task 14: Manifest loading and complete CLI workflow
+### Task 14: Runnable CLI first; comparison commands after the checkpoint
 
 **Files:**
 - Create: `src/agentic_evalkit/manifest.py`
@@ -1352,9 +1405,12 @@ git commit -m "feat: add portable evaluation reports"
 - Create: `src/agentic_evalkit/cli/datasets.py`
 - Create: `src/agentic_evalkit/cli/runs.py`
 - Create: `src/agentic_evalkit/cli/doctor.py`
+- Create: `src/agentic_evalkit/examples/__init__.py`
+- Create: `src/agentic_evalkit/examples/zero_target.py`
 - Create: `tests/fixtures/manifests/gsm8k.yaml`
 - Create: `tests/unit/test_manifest.py`
 - Create: `tests/integration/test_cli.py`
+- Create: `docs/release/v0.1-checkpoint.md`
 - Modify: `src/agentic_evalkit/__init__.py`
 
 - [ ] **Step 1: Write failing manifest and CLI tests**
@@ -1404,9 +1460,7 @@ Create one root `Typer(no_args_is_help=True)` application with commands and subc
 - `doctor`;
 - `datasets curated/search/inspect/preview/pull`;
 - `init` and `validate`;
-- `run`;
-- `compare`;
-- `report`.
+- `run`.
 
 Use exit codes: 0 success, 2 invalid input/manifest, 3 missing capability, 4 provider/target unavailable, 5 evaluation completed with infrastructure errors, and 130 cancelled. Catch only `AgenticEvalkitError` at the command boundary, print its stable code and actionable message, and allow unexpected exceptions to produce a traceback under `--debug`.
 
@@ -1414,9 +1468,9 @@ Use exit codes: 0 success, 2 invalid input/manifest, 3 missing capability, 4 pro
 
 `curated` works offline. `search`, `inspect`, and `preview` use the same catalog services as Python callers and display resolved revisions/configs/splits. `pull` records an immutable cache entry and manifest; it never means “latest” after resolution. Support `--format table|json` and `--offline` consistently.
 
-- [ ] **Step 6: Implement run, compare, and report commands**
+- [ ] **Step 6: Implement the objective-only run command**
 
-`run` loads a manifest, performs a preflight summary, requires `--yes` only when the command is noninteractive, streams Rich progress from runner events, stores canonical run JSON under the selected output directory, and prints outcome counts plus the report path. `compare` loads two canonical run files and uses Task 12 compatibility checks. `report` regenerates a selected portable format from canonical JSON.
+`run` loads a manifest, performs a preflight summary, requires `--yes` only when the command is noninteractive, streams Rich progress from runner events, stores canonical run JSON under the selected output directory, and prints separated outcome counts plus the JSON report path.
 
 The initial CLI target configuration supports:
 
@@ -1428,7 +1482,7 @@ The initial CLI target configuration supports:
 
 `doctor` checks Python version, cache read/write, Hugging Face health, configured target health, optional capability availability, and judge calibration. Each check returns `ok`, `warning`, or `error` with remediation.
 
-Create a fixture manifest using local GSM8K-shaped rows and the echo subprocess target. Run `agentic-evalkit run` through `CliRunner` and assert canonical JSON and HTML reports are created with a passing objective grade.
+Create a packaged `agentic_evalkit.examples.zero_target` callable that always returns `"0"`; it is a transport/evaluation smoke target, not a benchmark baseline. `agentic-evalkit init --preset gsm8k` uses this demo target only when the developer does not provide a callable/subprocess/HTTP target. Run `agentic-evalkit run` through `CliRunner` and assert canonical JSON is created with completed objective grades, regardless of whether individual GSM8K samples pass.
 
 - [ ] **Step 8: Run and commit**
 
@@ -1437,14 +1491,51 @@ uv run pytest tests/unit/test_manifest.py tests/integration/test_cli.py -v
 uv run agentic-evalkit --help
 uv run agentic-evalkit datasets curated
 uv run mypy
-git add src/agentic_evalkit/manifest.py src/agentic_evalkit/cli src/agentic_evalkit/__init__.py tests/fixtures/manifests tests/unit/test_manifest.py tests/integration/test_cli.py
-git commit -m "feat: add complete evaluation CLI workflow"
+git add src/agentic_evalkit/manifest.py src/agentic_evalkit/cli src/agentic_evalkit/examples src/agentic_evalkit/__init__.py tests/fixtures/manifests tests/unit/test_manifest.py tests/integration/test_cli.py
+git commit -m "feat: add runnable objective evaluation CLI"
+```
+
+- [ ] **Step 9: Execute and record the formal v0.1 checkpoint**
+
+Build and install the wheel in a clean temporary environment, then run:
+
+```powershell
+agentic-evalkit doctor
+agentic-evalkit init --preset gsm8k --output eval.yaml
+agentic-evalkit run eval.yaml --limit 5 --yes
+```
+
+Verify that the commands require no importer code, manual dataset download, `datasets`, `pyarrow`, or Docker; that a canonical JSON report is produced; and that a simulated provider outage prints a stable code/remediation without a traceback. Record commands, artifacts, test results, known issues, and one explicit decision in `docs/release/v0.1-checkpoint.md`:
+
+- `SHIP_V0_1`: complete Tasks 15-16 in objective-only mode, move Task 10 Steps 6-9, Task 12, Task 13 Steps 5-7, and Task 14 Steps 10-11 to the v0.2 plan; or
+- `CONTINUE_FULL_V1`: execute those deferred parts, then complete Tasks 15-16.
+
+Commit the checkpoint record before continuing.
+
+```powershell
+git add docs/release/v0.1-checkpoint.md
+git commit -m "docs: record runnable v0.1 checkpoint"
+```
+
+- [ ] **Step 10 (Slice 4b): Implement compare and rich report commands**
+
+Only for `CONTINUE_FULL_V1`, add `compare` and `report`. `compare` loads two canonical run files, uses Task 12 compatibility checks, and accepts `--bootstrap-samples` from 100 through 10,000 with a default of 1,000. `report` regenerates JSONL, Markdown, or self-contained HTML from canonical JSON.
+
+- [ ] **Step 11 (Slice 4b): Verify and commit advanced CLI commands**
+
+```powershell
+uv run pytest tests/unit/stats tests/unit/reporters tests/integration/test_cli.py -v
+uv run agentic-evalkit compare --help
+uv run agentic-evalkit report --help
+git add src/agentic_evalkit/cli tests/integration/test_cli.py
+git commit -m "feat: add comparison and rich report commands"
 ```
 
 ### Task 15: Documentation, ADR consistency, clean-wheel, and release gates
 
 **Files:**
 - Create: `.github/workflows/live-provider.yml`
+- Create: `.github/workflows/publish.yml`
 - Create: `mkdocs.yml`
 - Create: `docs/index.md`
 - Create: `docs/guides/quickstart.md`
@@ -1452,10 +1543,16 @@ git commit -m "feat: add complete evaluation CLI workflow"
 - Create: `docs/guides/graders.md`
 - Create: `docs/guides/targets.md`
 - Create: `docs/guides/swebench.md`
+- Create: `docs/guides/http-agent-example.md`
+- Create: `examples/http_agent/README.md`
 - Create: `tests/contract/test_dependency_boundary.py`
 - Create: `tests/contract/test_adrs.py`
+- Create: `tests/contract/test_public_docs.py`
 - Create: `tests/integration/test_clean_wheel.py`
 - Modify: `README.md`
+- Modify: `CHANGELOG.md`
+- Modify: `CONTRIBUTING.md`
+- Modify: `SECURITY.md`
 
 - [ ] **Step 1: Write failing dependency-boundary and ADR tests**
 
@@ -1485,6 +1582,8 @@ def test_package_does_not_import_arp_tools_or_executionkit() -> None:
 
 `test_adrs.py` must assert ADR files 0001 through 0009 exist, contain `Status: Accepted`, include Context/Decision/Alternatives/Consequences/Validation/Supersession headings, and do not contradict the dependency and baseline Hugging Face decisions.
 
+Add a public-document hygiene test that scans README, guides, examples, CLI help snapshots, and error-message fixtures for internal codenames `agentic_v2`, `agentic-v2-eval`, `tools.agents`, and `executionkit`. The dependency-boundary test may contain forbidden names as test data; public user-facing artifacts may not.
+
 - [ ] **Step 2: Run tests and verify documentation gaps**
 
 Run: `uv run pytest tests/contract/test_dependency_boundary.py tests/contract/test_adrs.py -v`
@@ -1497,13 +1596,19 @@ Update each ADR to the required six-section template and add links from `docs/in
 
 Write guides with executable commands:
 
-- quickstart: install, `doctor`, curated list, GSM8K init/run/report;
+- quickstart: install, `doctor`, curated list, GSM8K init/run, and the canonical JSON produced by `run`; add the standalone rich `report` command only for `CONTINUE_FULL_V1`;
 - providers: local formats, Hugging Face auth, cache/offline, plugin entry points;
 - graders: objective order, hard gates, calibration, abstention/error semantics;
 - targets: callable, subprocess JSONL, HTTP mappings, credential hooks;
-- SWE-bench: initial preview/prediction workflow, typed unavailable result, and later Docker capability boundary.
+- SWE-bench: initial preview/prediction workflow, typed unavailable result, and later Docker capability boundary;
+- providers: document the `parquet` extra as the explicit fallback when Dataset Viewer cannot serve a dataset;
+- HTTP agent example: evaluate a real tool-using agent endpoint with request/response mapping, authentication hook, timeout, objective schema grader, and canonical report. The example must not import ARP or EK and need not be an automated release test.
 
-Create `.github/workflows/live-provider.yml` with `workflow_dispatch` and a weekly schedule. It installs the locked environment and runs only `uv run pytest tests/live/test_huggingface_live.py -m live -v`. Provider outages fail visibly with classified diagnostics; the workflow does not retry indefinitely or convert failures to success.
+Update README and `docs/index.md` with the approved positioning statement: `agentic-evalkit` separates datasets, grading, and reporting from the system under test through callable/subprocess/HTTP targets, and objective checks gate before judges. Add a coexistence note: legacy evaluation code may remain in host repositories, but this package neither imports nor migrates it.
+
+Create `.github/workflows/live-provider.yml` with `workflow_dispatch` and a weekly schedule. It installs the locked environment and runs only `uv run pytest tests/live/test_huggingface_live.py -m live -v`. The provider client applies Task 6's bounded backoff. Provider outages fail visibly with classified diagnostics; the workflow does not retry indefinitely or convert failures to success.
+
+Create `.github/workflows/publish.yml` using PyPI trusted publishing with GitHub OIDC (`id-token: write`), an environment named `pypi`, artifact build/verification before upload, and a release-only trigger. Store no PyPI API token. Publishing remains inert until the repository/environment is configured and a GitHub release is intentionally created.
 
 - [ ] **Step 4: Implement the clean-wheel integration test**
 
@@ -1528,7 +1633,7 @@ uv run mkdocs build --strict
 uv build
 ```
 
-Expected: every command exits 0, pytest reports at least 90% branch-aware coverage, strict docs contain no warnings, and both sdist and wheel are created.
+Expected: every command exits 0, pytest reports at least 80% branch-aware coverage, strict docs contain no warnings, and both sdist and wheel are created. Record the achieved coverage; raising the gate to 90% is a later evidence-based decision, not an initial-release requirement.
 
 - [ ] **Step 6: Run live Hugging Face and clean-wheel gates**
 
@@ -1537,16 +1642,16 @@ uv run pytest tests/live/test_huggingface_live.py -m live -v
 uv run pytest tests/integration/test_clean_wheel.py -v
 ```
 
-Expected: both verified presets resolve and preview from live Hugging Face; the isolated wheel imports and CLI commands pass with no ARP/EK repositories on `sys.path`.
+Expected when Hugging Face is available: both verified presets resolve and preview; the isolated wheel imports and CLI commands pass with no host repositories on `sys.path`. If bounded retries still end in a classified transient provider outage, preserve the failed live evidence, confirm the latest scheduled/on-demand successful evidence, record a release known issue, and continue only if every offline provider contract and clean-wheel test passes.
 
 - [ ] **Step 7: Execute the documented quickstart exactly**
 
-Create a temporary directory, follow `docs/guides/quickstart.md` without using repository-relative paths, run a five-sample GSM8K evaluation against the documented deterministic fixture target, and verify canonical JSON plus self-contained HTML output. Record the command transcript in the release verification section of the quickstart.
+Create a temporary directory, follow `docs/guides/quickstart.md` without using repository-relative paths, run a five-sample GSM8K evaluation against the packaged demo target, and verify canonical JSON output. For `CONTINUE_FULL_V1`, additionally verify self-contained HTML. Record the command transcript in the release verification section of the quickstart.
 
 - [ ] **Step 8: Commit release documentation and gates**
 
 ```powershell
-git add README.md .github/workflows/live-provider.yml mkdocs.yml docs tests/contract/test_dependency_boundary.py tests/contract/test_adrs.py tests/integration/test_clean_wheel.py
+git add README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md .github/workflows/live-provider.yml .github/workflows/publish.yml examples mkdocs.yml docs tests/contract/test_dependency_boundary.py tests/contract/test_adrs.py tests/integration/test_clean_wheel.py
 git commit -m "docs: complete initial release verification"
 ```
 
@@ -1554,19 +1659,19 @@ git commit -m "docs: complete initial release verification"
 
 **Files:**
 - Create: `docs/release/initial-release-acceptance.md`
-- Create: `docs/superpowers/plans/README.md`
+- Create: `docs/plans/README.md`
 
 - [ ] **Step 1: Audit every design acceptance criterion**
 
-Create `initial-release-acceptance.md` with a table containing all 16 initial-release criteria from the approved design, the exact test/command that proves each criterion, the resulting artifact or test name, and pass/fail status. Do not mark a criterion passed from code inspection alone when the design requires live or clean-wheel evidence.
+Create `initial-release-acceptance.md` with a table containing all 17 criteria from the approved design, the exact test/command that proves each criterion, the resulting artifact or test name, and pass/fail status. For `SHIP_V0_1`, identify the approved Slice 4b criteria as deferred to v0.2 rather than falsely passing them. Do not mark a criterion passed from code inspection alone when the design requires live or clean-wheel evidence.
 
 - [ ] **Step 2: Reconcile ADRs, code, and package metadata**
 
-Verify package dependencies match ADR-0003/0009, cache identity matches ADR-0004, harness status semantics match ADR-0005, forbidden imports match ADR-0001/0006, judge gates match ADR-0007, and report compatibility matches ADR-0008. Record any mismatch as failed acceptance and fix it in the owning task before continuing.
+Verify package dependencies match ADR-0003/0009, cache identity matches ADR-0004, harness status semantics match ADR-0005, forbidden imports match ADR-0001/0006, and objective hard gates match ADR-0007. For `CONTINUE_FULL_V1`, also verify judge gates match ADR-0007 and report compatibility matches ADR-0008. For `SHIP_V0_1`, record those checks as deferred rather than passed. Record any implemented-scope mismatch as failed acceptance and fix it in the owning task before continuing.
 
 - [ ] **Step 3: Document the separate SWE-bench implementation plan gate**
 
-In `docs/superpowers/plans/README.md`, state that the Docker executor requires a new plan based on the accepted harness contracts. That plan may begin only after the initial acceptance audit passes and must include pinned upstream `swebench` compatibility, Docker/image resource preflight, gold/invalid patch tests, cancellation, log capture, and no public contract changes.
+In `docs/plans/README.md`, state that the Docker executor requires a new plan based on the accepted harness contracts. That plan may begin only after the initial acceptance audit passes and must include pinned upstream `swebench` compatibility, Docker/image resource preflight, gold/invalid patch tests, cancellation, log capture, and no public contract changes. Also list deferred v0.2 work: run resumption, async-first ADR-0010, performance/eviction targets, subgroup syntax, framework observability, and any Slice 4b work deferred at the checkpoint.
 
 - [ ] **Step 4: Re-run release evidence from a clean checkout state**
 
@@ -1583,12 +1688,12 @@ uv run mkdocs build --strict
 uv build
 ```
 
-Expected before the final commit: `git status --short` lists only the acceptance and plan-index files; every quality, test, live-provider, docs, and build command exits 0.
+Expected before the final commit: `git status --short` lists only the acceptance and plan-index files; every offline quality, test, docs, and build command exits 0. The live-provider command either passes or ends in a classified outage that is documented with the latest prior successful workflow evidence and a release known issue.
 
 - [ ] **Step 5: Commit the accepted initial-release evidence**
 
 ```powershell
-git add docs/release/initial-release-acceptance.md docs/superpowers/plans/README.md
+git add docs/release/initial-release-acceptance.md docs/plans/README.md
 git commit -m "docs: record initial release acceptance"
 ```
 
@@ -1598,10 +1703,10 @@ Run:
 
 ```powershell
 git status --short --branch
-git log --oneline --decorate -16
+git log --oneline --decorate -25
 ```
 
-Expected: clean `main` working tree and one focused commit per task, with every governing ADR committed before its production implementation.
+Expected: clean `main` working tree, focused milestone commits, and every governing ADR committed before its production implementation.
 
 ## Design coverage matrix
 
@@ -1616,11 +1721,12 @@ Expected: clean `main` working tree and one focused commit per task, with every 
 | Curated GSM8K and SWE-bench presets | Tasks 7, 8, 14 |
 | Benchmark adapter and optional harness separation | Task 8 |
 | Callable, subprocess, and HTTP targets | Task 9 |
-| Objective grading, atomic rubrics, composite gates, calibrated judges | Task 10 |
+| Objective grading, atomic rubrics, composite gates | Task 10 Steps 1-5 |
+| Calibrated judges | Task 10 Steps 6-9 after the checkpoint |
 | Reproducible orchestration and artifacts | Task 11 |
-| Confidence intervals, repeated trials, subgroups, paired comparison | Task 12 |
-| Portable machine and human reports | Task 13 |
-| Complete Python-backed CLI workflow | Task 14 |
+| Confidence intervals, repeated trials, paired comparison | Task 12 after the checkpoint |
+| Canonical JSON and deferred rich reports | Task 13 Parts 4a/4b |
+| Runnable CLI and deferred compare/report commands | Task 14 Parts 4a/4b |
 | Security, clean-wheel, live-provider, docs, and ADR gates | Tasks 15, 16 |
 | Follow-on SWE-bench Docker boundary | Tasks 8, 15, 16 |
 
@@ -1629,6 +1735,6 @@ Expected: clean `main` working tree and one focused commit per task, with every 
 - Do not modify Agentic Runtime Platform or ExecutionKit while executing this plan.
 - Use a dedicated worktree or isolated clone before implementation begins.
 - Apply test-driven development to each production change: failing test, observed failure, minimal implementation, passing test, refactor, focused commit.
-- Never weaken live-provider, clean-wheel, dependency-boundary, calibration, or authoritative-harness gates to make CI green.
+- Never hide live-provider failures or weaken clean-wheel, dependency-boundary, calibration, or authoritative-harness gates to make CI green; use the classified transient-outage release policy exactly as documented.
 - Preserve sample-level evidence; no aggregate metric may discard the underlying statuses or provenance.
 - Generate the official SWE-bench Docker executor plan only after Task 16 passes.
