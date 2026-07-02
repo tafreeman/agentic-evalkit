@@ -217,7 +217,7 @@ Create an empty `src/agentic_evalkit/py.typed` marker and a `.gitignore` coverin
 
 - [ ] **Step 6: Add the CI matrix**
 
-Create `.github/workflows/ci.yml` with Python 3.11, 3.12, and 3.13 jobs on Ubuntu and Windows. Each job installs uv, runs `uv sync --all-groups`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy`, and `uv run pytest -m "not live" --cov --cov-report=term-missing`. Add one Ubuntu packaging job that runs `uv build` and installs the wheel into a temporary virtual environment before executing `agentic-evalkit --help`.
+Create `.github/workflows/ci.yml` with Python 3.11, 3.12, 3.13, and 3.14 jobs on Ubuntu and Windows. Each job installs uv, runs `uv sync --all-groups`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy`, and `uv run pytest -m "not live" --cov --cov-report=term-missing`. Add one Ubuntu packaging job that runs `uv build` and installs the wheel into a temporary virtual environment before executing `agentic-evalkit --help`.
 
 - [ ] **Step 7: Run foundation checks**
 
@@ -919,7 +919,7 @@ Define `BenchmarkAdapter` with `api_version = "1"`, `name`, `prepare`, `validate
 
 `Gsm8kAdapter` validates `question` and `answer`, extracts the text after the final `####`, normalizes integer-equivalent decimals and comma separators, and emits `EvalSample` with `normalized-exact@1`.
 
-`SweBenchVerifiedAdapter` validates all required fields, parses fail/pass lists from JSON strings or arrays, preserves issue/repository/base/test metadata, never checks out code, and exports only the official prediction keys. Its oracle validation checks row completeness and prediction identity, not patch correctness.
+`SweBenchVerifiedAdapter` validates all required fields, parses fail/pass lists from JSON strings or arrays, preserves issue/repository/base/test metadata, never checks out code, and exports only the official prediction keys. `export_prediction` accepts an optional `model_name_or_path` argument (default `"agentic-evalkit-target"`) so real leaderboard submissions can carry the actual system name; only the three official keys ever appear in the export. Its oracle validation checks row completeness and prediction identity, not patch correctness.
 
 - [ ] **Step 7: Add contract serialization and discrimination tests**
 
@@ -1567,6 +1567,7 @@ git commit -m "feat: add comparison and rich report commands"
 import ast
 from pathlib import Path
 
+# "tools" is the import root of the agentic-tools companion package.
 FORBIDDEN_ROOTS = {"agentic_v2", "tools", "executionkit"}
 
 

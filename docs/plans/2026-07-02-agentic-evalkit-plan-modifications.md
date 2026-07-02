@@ -28,6 +28,7 @@ All five analyses independently reached **GO / Execute**. None found an architec
 - **Risk mitigations:** Windows JSONL framing, Dataset Viewer retries, Windows cache caveat, 1,000-sample bootstrap default with a 10,000 cap, precise Typer pin, and log-space `pass@k` are incorporated.
 - **Terminology:** `pass^k` was replaced by an explicitly named all-attempt consistency metric, and the FutureSearch/RetroSearch citation label was corrected.
 - **Deferred items:** ADR-0010, run resumption, performance/eviction targets, detailed subgroup syntax, and framework observability remain post-v1 work and are listed in the plan index/acceptance task.
+- **README positioning (correction):** the §11 row for `README.md` was not applied in the original application commit; the positioning statement and spec-link fix landed in the follow-up hardening commit on 2026-07-02.
 
 ---
 

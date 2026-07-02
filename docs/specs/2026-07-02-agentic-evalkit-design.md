@@ -411,7 +411,7 @@ Mocks prove local behavior but not live source integration. Development requires
 - `doctor`, dataset, `init`, `validate`, and `run` CLI commands.
 - GSM8K end-to-end checkpoint with no importer code or heavyweight dataset dependencies.
 
-At this checkpoint, the project may release v0.1 or continue directly into Slice 4b for the fuller v1 surface.
+At this checkpoint, the project may release v0.1 or continue directly into Slice 4b for the fuller v1 surface. Selecting v0.1 fixes the release scope; the release itself still passes the Slice 1-4a-relevant documentation, clean-wheel, and acceptance gates (Tasks 15-16 in objective-only mode) before shipping.
 
 ### Slice 4b: Deferred full evaluation analytics
 
