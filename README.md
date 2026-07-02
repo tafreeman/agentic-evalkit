@@ -2,7 +2,9 @@
 
 `agentic-evalkit` is a standalone evaluation toolkit for agentic systems. It combines dynamic dataset discovery, typed evaluation contracts, benchmark-valid grading, calibrated judges, statistical reporting, and a developer-friendly Python API and CLI.
 
-The repository is currently in design. See [the architecture specification](docs/superpowers/specs/2026-07-02-agentic-evalkit-design.md).
+Existing evaluation frameworks couple dataset access, grading, and reporting to specific agent platforms or model-provider SDKs. `agentic-evalkit` separates evaluation from the system under test through a neutral `ExecutionTarget` protocol, making any callable, subprocess, or HTTP system evaluable without framework lock-in. Its objective-first grading policy ensures deterministic checks gate releases before model judges are consulted.
+
+The repository is currently in design. See [the architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md).
 
 ## Identity
 

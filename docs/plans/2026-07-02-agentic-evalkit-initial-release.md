@@ -1,6 +1,8 @@
 # agentic-evalkit Initial Release Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> Every task executor must read `docs/specs/2026-07-02-agentic-evalkit-design.md` (especially §5-§10) before starting its task. Task text such as "matching the approved spec" refers to that document; do not infer contract fields from memory.
 
 **Goal:** Deliver an independently installable Python library and CLI that discovers Hugging Face and local datasets, evaluates callable/subprocess/HTTP targets with objective-first graders, and can ship an objective-only v0.1 before adding the deferred full-analytics surface.
 
@@ -28,7 +30,7 @@ Dependency decisions verified before execution:
 | Milestone | Scope | Merge/release boundary |
 |---|---|---|
 | A | Tasks 1-7: repository, contracts, plugins, cache, providers, catalog | Merge as the dataset-foundation PR |
-| B | Tasks 8-11, Task 13 Steps 1-4, and Task 14 Steps 1-9: benchmark contracts, targets, objective graders, runner, JSON report, runnable CLI | Merge as the objective-evaluation PR and execute the v0.1 checkpoint |
+| B | Tasks 8-9, Task 10 Steps 1-5, Task 11, Task 13 Steps 1-4, and Task 14 Steps 1-9: benchmark contracts, targets, objective graders, runner, JSON report, runnable CLI | Merge as the objective-evaluation PR and execute the v0.1 checkpoint |
 | C | Task 10 Steps 6-9, Task 12, Task 13 Steps 5-7, Task 14 Steps 10-11, and Tasks 15-16 | Execute deferred analytics only after `CONTINUE_FULL_V1`; for `SHIP_V0_1`, move them to the v0.2 plan and run Tasks 15-16 in objective-only mode |
 
 Each milestone starts from updated `main`, uses its own branch/worktree, runs its complete verification matrix, and lands independently. Do not carry one 16-task branch through all milestones.
@@ -651,6 +653,8 @@ async def test_preview_always_sends_resolved_config_and_split() -> None:
 
 Define `_FakeHub` in the test with `dataset_info()` and `list_datasets()` methods returning frozen fixture objects.
 
+Populate the `tests/fixtures/huggingface/*.json` files with real captured responses from the live Dataset Viewer endpoints for the two presets rather than hand-written approximations, and make the mock transport serve the correct shape for every endpoint `resolve()` calls (`/is-valid`, `/splits`, `/size`, `/statistics`, `/parquet`, and `/rows`).
+
 - [ ] **Step 2: Run the test and confirm the provider is absent**
 
 Run: `uv run pytest tests/unit/datasets/test_huggingface_provider.py -v`
@@ -668,6 +672,8 @@ Use injected `huggingface_hub.HfApi` and `httpx.AsyncClient`. Run synchronous Hu
 5. raises `DatasetConfigRequired` for ambiguous configs;
 6. calls `/size`, `/statistics`, and `/parquet` for the selected config/split;
 7. stores license, citation, card, gated access, schema/statistics, size, Parquet-file metadata, and selected files in `ResolvedDataset`.
+
+Only `/is-valid`, `dataset_info`, and `/splits` are load-bearing for resolution. Treat `/size`, `/statistics`, and `/parquet` as best-effort metadata: on failure, record the absence in `ResolvedDataset` metadata and continue rather than failing the resolve. Many valid datasets legitimately lack statistics or Parquet conversions.
 
 Never import `datasets` or `pyarrow`, and never set `trust_remote_code=True`.
 
@@ -1462,7 +1468,7 @@ Create one root `Typer(no_args_is_help=True)` application with commands and subc
 - `init` and `validate`;
 - `run`.
 
-Use exit codes: 0 success, 2 invalid input/manifest, 3 missing capability, 4 provider/target unavailable, 5 evaluation completed with infrastructure errors, and 130 cancelled. Catch only `AgenticEvalkitError` at the command boundary, print its stable code and actionable message, and allow unexpected exceptions to produce a traceback under `--debug`.
+Use exit codes: 0 success, 2 invalid input/manifest, 3 missing capability, 4 provider/dataset resolution or availability errors (including dataset not found), 5 evaluation completed with infrastructure errors, and 130 cancelled. Catch only `AgenticEvalkitError` at the command boundary, print its stable code and actionable message, and allow unexpected exceptions to produce a traceback under `--debug`.
 
 - [ ] **Step 5: Implement dataset commands**
 
