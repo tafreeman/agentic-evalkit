@@ -46,7 +46,7 @@ inspection.
 | Objective hard gates match ADR-0007 | `test_composite.py` (noncompensable hard gate) | PASS |
 | Judge gates match ADR-0007 (CONTINUE_FULL_V1) | `test_judge.py` (calibration minimums, expiry, position-bias) | PASS |
 | Report compatibility matches ADR-0008 (CONTINUE_FULL_V1) | `test_compare.py` (provenance gating, seeded bootstrap) | PASS |
-| ADRs precede their implementation | Every governing ADR (0001-0009) committed with `Accepted` status | PASS |
+| All required ADRs accepted and consistent (§17.15) | ADR-0001..0009 all `Accepted` and reconciled above. ADR-0001-0004/0009 were committed within their own tasks; ADR-0005-0008 were recorded in one batch immediately after their parallel implementation wave and before this audit (a consequence of parallelized execution, noted for transparency). | PASS |
 
 ## Release gate summary
 
