@@ -1,0 +1,231 @@
+"""Tests for the dataset catalog, built-in presets, and cache decoration.
+
+Covers built-in preset field pinning, provider routing (including the
+explicit-KeyError-on-unknown-provider requirement), cache-hit/cache-miss
+decoration around ``preview``, ``offline=True`` never calling a provider, and
+plugin-vs-built-in provider name collisions. The first two tests reproduce
+the plan's verbatim Task 7 Step 1 snippet
+(docs/plans/2026-07-02-agentic-evalkit-initial-release.md) unmodified.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Mapping
+from pathlib import Path
+
+import pytest
+
+from agentic_evalkit.datasets.base import ProviderHealth
+from agentic_evalkit.datasets.cache import DatasetCache
+from agentic_evalkit.datasets.catalog import DatasetCatalog
+from agentic_evalkit.datasets.presets import BUILTIN_PRESETS
+from agentic_evalkit.errors import PluginCompatibilityError
+from agentic_evalkit.models import (
+    DatasetRef,
+    ResolvedDataset,
+    SamplePage,
+    SearchPage,
+    SourceRecord,
+)
+
+# --- Step 1 (plan verbatim): preset and provider-routing tests --------------
+
+
+def test_builtin_presets_pin_configs_splits_and_adapters() -> None:
+    gsm = BUILTIN_PRESETS["gsm8k"]
+    swe = BUILTIN_PRESETS["swe-bench-verified"]
+    assert (gsm.ref.dataset_id, gsm.ref.config, gsm.ref.split) == (
+        "openai/gsm8k",
+        "main",
+        "test",
+    )
+    assert gsm.adapter == "gsm8k@1"
+    assert swe.ref.config == "default"
+    assert swe.readiness == "prediction_export"
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_is_explicit() -> None:
+    catalog = DatasetCatalog(providers={})
+    with pytest.raises(KeyError, match="provider 'missing'"):
+        await catalog.search("x", provider="missing", limit=10)
+
+
+# --- Additional preset coverage ----------------------------------------------
+
+
+def test_builtin_presets_full_field_set() -> None:
+    gsm = BUILTIN_PRESETS["gsm8k"]
+    swe = BUILTIN_PRESETS["swe-bench-verified"]
+
+    assert gsm.name == "gsm8k"
+    assert gsm.grader == "normalized-exact@1"
+    assert gsm.readiness == "runnable"
+    assert gsm.required_capabilities == ()
+    assert gsm.ref.provider == "huggingface"
+    assert gsm.ref.split == "test"
+
+    assert swe.name == "swe-bench-verified"
+    assert swe.ref.dataset_id == "princeton-nlp/SWE-bench_Verified"
+    assert swe.ref.split == "test"
+    assert swe.adapter == "swebench-verified@1"
+    assert swe.grader == "swebench-harness@1"
+    assert swe.required_capabilities == ("swebench",)
+    assert swe.ref.provider == "huggingface"
+
+
+def test_builtin_presets_are_frozen_and_forbid_unknown_fields() -> None:
+    gsm = BUILTIN_PRESETS["gsm8k"]
+    with pytest.raises(Exception):  # noqa: B017 - pydantic.ValidationError, frozen instance
+        gsm.name = "renamed"  # type: ignore[misc]
+
+
+def test_builtin_presets_mapping_is_immutable() -> None:
+    with pytest.raises(TypeError):
+        BUILTIN_PRESETS["new-preset"] = BUILTIN_PRESETS["gsm8k"]  # type: ignore[index]
+
+
+# --- Fake provider used across catalog tests ---------------------------------
+
+
+class _CountingFakeProvider:
+    """A minimal ``DatasetProvider`` that counts ``preview`` invocations.
+
+    Used to prove cache decoration: an identical ``preview`` call must not
+    increase ``preview_calls``, while a call with different pagination
+    parameters must.
+    """
+
+    api_version = "1"
+
+    def __init__(self) -> None:
+        self.preview_calls = 0
+
+    async def search(
+        self,
+        query: str,
+        *,
+        filters: Mapping[str, str] | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> SearchPage:
+        return SearchPage(hits=(), cursor=None, total_hits=0)
+
+    async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
+        return ResolvedDataset(
+            dataset_id=ref.dataset_id,
+            revision="abc123",
+            config=ref.config,
+            split=ref.split,
+        )
+
+    async def preview(
+        self, dataset: ResolvedDataset, *, offset: int = 0, limit: int = 10
+    ) -> SamplePage:
+        self.preview_calls += 1
+        records = tuple(
+            SourceRecord(row_id=str(offset + i), data={"value": offset + i}, digest=f"sha256:{i}")
+            for i in range(limit)
+        )
+        return SamplePage(records=records, offset=offset, total_rows=1000)
+
+    def iter_records(
+        self, dataset: ResolvedDataset, *, offset: int = 0, limit: int | None = None
+    ) -> AsyncIterator[SourceRecord]:
+        raise NotImplementedError
+
+    async def healthcheck(self) -> ProviderHealth:
+        return ProviderHealth(status="ok")
+
+
+def _fake_ref() -> DatasetRef:
+    return DatasetRef(provider="fake", dataset_id="fake/dataset", config="main", split="test")
+
+
+# --- Step 5: cache hit, offline miss, plugin collision -----------------------
+
+
+@pytest.mark.asyncio
+async def test_second_identical_preview_uses_cache_not_provider(tmp_path: Path) -> None:
+    provider = _CountingFakeProvider()
+    cache = DatasetCache(tmp_path)
+    catalog = DatasetCatalog(providers={"fake": provider}, cache=cache)
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+
+    first = await catalog.preview(ref, dataset, offset=0, limit=5)
+    second = await catalog.preview(ref, dataset, offset=0, limit=5)
+
+    assert provider.preview_calls == 1
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_different_offset_invokes_provider_again(tmp_path: Path) -> None:
+    provider = _CountingFakeProvider()
+    cache = DatasetCache(tmp_path)
+    catalog = DatasetCatalog(providers={"fake": provider}, cache=cache)
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+
+    await catalog.preview(ref, dataset, offset=0, limit=5)
+    await catalog.preview(ref, dataset, offset=5, limit=5)
+
+    assert provider.preview_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_offline_mode_returns_only_exact_cached_pages(tmp_path: Path) -> None:
+    provider = _CountingFakeProvider()
+    cache = DatasetCache(tmp_path)
+    catalog = DatasetCatalog(providers={"fake": provider}, cache=cache)
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+
+    # Populate the cache for offset=0 first.
+    warmed = await catalog.preview(ref, dataset, offset=0, limit=5)
+    assert provider.preview_calls == 1
+
+    # A cached, exact page is served offline without touching the provider.
+    served_offline = await catalog.preview(ref, dataset, offset=0, limit=5, offline=True)
+    assert served_offline == warmed
+    assert provider.preview_calls == 1
+
+    # A page with no cache entry raises rather than silently calling the
+    # provider.
+    with pytest.raises(Exception):  # noqa: B017 - agentic_evalkit.errors.OfflineCacheMiss
+        await catalog.preview(ref, dataset, offset=5, limit=5, offline=True)
+    assert provider.preview_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_registering_plugin_with_builtin_name_raises_compatibility_error() -> None:
+    plugin_provider = _CountingFakeProvider()
+    with pytest.raises(PluginCompatibilityError, match="huggingface"):
+        DatasetCatalog(
+            providers={"huggingface": plugin_provider},
+            builtin_provider_names=("local", "huggingface"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_registering_plugin_with_new_name_succeeds() -> None:
+    plugin_provider = _CountingFakeProvider()
+    catalog = DatasetCatalog(
+        providers={"custom": plugin_provider},
+        builtin_provider_names=("local", "huggingface"),
+    )
+    ref = DatasetRef(provider="custom", dataset_id="x", config="main", split="test")
+    page = await catalog.search("query", provider="custom", limit=1)
+    assert page.total_hits == 0
+    resolved = await catalog.resolve(ref)
+    assert resolved.dataset_id == "x"
+
+
+# --- list_presets --------------------------------------------------------------
+
+
+def test_list_presets_returns_all_builtins() -> None:
+    catalog = DatasetCatalog(providers={})
+    names = {preset.name for preset in catalog.list_presets()}
+    assert names == {"gsm8k", "swe-bench-verified"}
