@@ -1,4 +1,9 @@
-from agentic_evalkit.cli import datasets, doctor, runs  # noqa: F401  (mount subcommands onto app)
+from agentic_evalkit.cli import (  # noqa: F401  (import mounts subcommands onto app)
+    datasets,
+    doctor,
+    reports,
+    runs,
+)
 from agentic_evalkit.cli.app import app
 
 __all__ = ["app"]

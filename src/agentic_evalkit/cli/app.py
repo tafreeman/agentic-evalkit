@@ -44,6 +44,7 @@ from agentic_evalkit.errors import (
     DatasetRateLimited,
     DatasetSchemaMismatch,
     DatasetSplitNotFound,
+    IncompatibleRuns,
     ManifestValidationError,
     OfflineCacheMiss,
     PluginCompatibilityError,
@@ -103,6 +104,11 @@ _ERROR_EXIT_CODES: dict[type[AgenticEvalkitError], ExitCode] = {
     ManifestValidationError: ExitCode.INVALID_INPUT,
     DatasetSchemaMismatch: ExitCode.INVALID_INPUT,
     UnsafeCodeRequired: ExitCode.INVALID_INPUT,
+    # A comparison of two incompatible runs is an invalid *choice of inputs*
+    # by the user (they picked two runs that cannot be meaningfully
+    # compared), not a provider or infrastructure failure -- so it exits 2
+    # (invalid input) with every mismatch listed, per Task 14 Step 10.
+    IncompatibleRuns: ExitCode.INVALID_INPUT,
     PluginCompatibilityError: ExitCode.MISSING_CAPABILITY,
     DatasetNotFound: ExitCode.PROVIDER_ERROR,
     DatasetConfigRequired: ExitCode.PROVIDER_ERROR,

@@ -19,13 +19,106 @@ provider error code is surfaced, not a specific one. This module is not marked
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from agentic_evalkit.cli import app
+from agentic_evalkit.models import (
+    DatasetRef,
+    EvalRunManifest,
+    EvalRunResult,
+    EvalSample,
+    ExecutionStatus,
+    GradeResult,
+    GradeStatus,
+    NormalizedExecutionResult,
+    ResolvedDataset,
+    RunSummary,
+    SampleResult,
+    SamplingPolicy,
+)
+from agentic_evalkit.reporters.json import JsonReporter
 
 runner = CliRunner()
+
+# --- Deterministic run fixtures for compare/report (no network) -------------
+
+_STARTED_AT = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
+_FINISHED_AT = datetime(2026, 7, 3, 12, 5, 0, tzinfo=UTC)
+
+
+def _sample_result(sample_id: str, *, passed: bool) -> SampleResult:
+    grade_status = GradeStatus.PASS if passed else GradeStatus.FAIL
+    return SampleResult(
+        sample=EvalSample(
+            sample_id=sample_id,
+            input={"question": f"q-{sample_id}"},
+            reference="42",
+            source_digest=f"sha256:{sample_id}",
+            adapter="gsm8k@1",
+        ),
+        execution=NormalizedExecutionResult(
+            sample_id=sample_id,
+            attempt=1,
+            output={"answer": "42" if passed else "0"},
+            status=ExecutionStatus.COMPLETED,
+            started_at=_STARTED_AT,
+            finished_at=_FINISHED_AT,
+        ),
+        grade=GradeResult(
+            sample_id=sample_id,
+            grader="normalized-exact@1",
+            status=grade_status,
+            score=1.0 if passed else 0.0,
+            created_at=_FINISHED_AT,
+        ),
+    )
+
+
+def _run_result(
+    *,
+    run_id: str,
+    dataset_revision: str = "rev-abc",
+    passed_flags: tuple[bool, ...] = (True, False),
+) -> EvalRunResult:
+    samples = tuple(
+        _sample_result(f"gsm8k:{index}", passed=flag) for index, flag in enumerate(passed_flags)
+    )
+    manifest = EvalRunManifest(
+        run_name=f"{run_id}-fixture",
+        dataset_ref=DatasetRef(
+            provider="huggingface", dataset_id="openai/gsm8k", config="main", split="test"
+        ),
+        adapter="gsm8k@1",
+        grader="normalized-exact@1",
+        target_name="cli-target",
+        sampling=SamplingPolicy(seed=7, temperature=0.0, attempts=1),
+        attempts=1,
+    )
+    resolved = ResolvedDataset(
+        dataset_id="openai/gsm8k",
+        revision=dataset_revision,
+        config="main",
+        split="test",
+    )
+    passed = sum(passed_flags)
+    return EvalRunResult(
+        run_id=run_id,
+        manifest=manifest,
+        resolved_dataset=resolved,
+        samples=samples,
+        summary=RunSummary(total=len(samples), passed=passed, failed=len(samples) - passed),
+        started_at=_STARTED_AT,
+        finished_at=_FINISHED_AT,
+    )
+
+
+def _write_run(tmp_path: Path, name: str, run: EvalRunResult) -> Path:
+    destination = tmp_path / f"{name}.json"
+    JsonReporter().write(run, destination, generated_at="2026-07-03T12:05:00+00:00")
+    return destination
 
 
 def test_curated_and_init_work_without_manual_import(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -163,3 +256,140 @@ def test_datasets_search_supports_json_format() -> None:
     payload = json.loads(result.stdout)
     assert isinstance(payload, dict)
     assert "hits" in payload
+
+
+# --- compare (plan Task 14 Step 10) -----------------------------------------
+
+
+def test_compare_two_compatible_runs_reports_estimate_and_seed(tmp_path: Path) -> None:
+    left = _write_run(tmp_path, "left", _run_result(run_id="run-a", passed_flags=(True, False)))
+    right = _write_run(tmp_path, "right", _run_result(run_id="run-b", passed_flags=(True, True)))
+
+    result = runner.invoke(
+        app,
+        ["compare", str(left), str(right), "--bootstrap-samples", "200", "--seed", "13"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "estimate" in result.stdout.lower()
+    assert "seed" in result.stdout.lower()
+    assert "13" in result.stdout
+
+
+def test_compare_json_format_carries_percentiles_and_paired_count(tmp_path: Path) -> None:
+    left = _write_run(tmp_path, "left", _run_result(run_id="run-a"))
+    right = _write_run(tmp_path, "right", _run_result(run_id="run-b"))
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            str(left),
+            str(right),
+            "--bootstrap-samples",
+            "200",
+            "--seed",
+            "5",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["seed"] == 5
+    assert payload["paired_count"] == 2
+    assert "estimate" in payload
+    assert "lower_percentile" in payload
+    assert "upper_percentile" in payload
+
+
+def test_compare_incompatible_runs_lists_every_mismatch_and_exits_two(tmp_path: Path) -> None:
+    left = _write_run(tmp_path, "left", _run_result(run_id="run-a", dataset_revision="rev-abc"))
+    right = _write_run(tmp_path, "right", _run_result(run_id="run-b", dataset_revision="rev-def"))
+
+    result = runner.invoke(app, ["compare", str(left), str(right), "--seed", "1"])
+    assert result.exit_code == 2
+    assert "incompatible_runs" in result.stdout
+    assert "dataset revision" in result.stdout
+    assert "rev-abc" in result.stdout
+    assert "rev-def" in result.stdout
+
+
+def test_compare_rejects_bootstrap_samples_out_of_range(tmp_path: Path) -> None:
+    left = _write_run(tmp_path, "left", _run_result(run_id="run-a"))
+    right = _write_run(tmp_path, "right", _run_result(run_id="run-b"))
+
+    too_low = runner.invoke(
+        app, ["compare", str(left), str(right), "--bootstrap-samples", "50", "--seed", "1"]
+    )
+    assert too_low.exit_code == 2
+
+    too_high = runner.invoke(
+        app, ["compare", str(left), str(right), "--bootstrap-samples", "20000", "--seed", "1"]
+    )
+    assert too_high.exit_code == 2
+
+
+def test_compare_missing_run_file_is_invalid_input(tmp_path: Path) -> None:
+    right = _write_run(tmp_path, "right", _run_result(run_id="run-b"))
+    result = runner.invoke(app, ["compare", str(tmp_path / "nope.json"), str(right), "--seed", "1"])
+    assert result.exit_code == 2
+
+
+# --- report (plan Task 14 Step 10) ------------------------------------------
+
+
+def test_report_regenerates_jsonl(tmp_path: Path) -> None:
+    source = _write_run(tmp_path, "run", _run_result(run_id="run-a"))
+    destination = tmp_path / "out.jsonl"
+    result = runner.invoke(
+        app, ["report", str(source), "--format", "jsonl", "--output", str(destination)]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert destination.exists()
+    lines = destination.read_text(encoding="utf-8").strip().splitlines()
+    # header + one record per sample + trailer
+    assert len(lines) == 4
+    header = json.loads(lines[0])
+    assert header["record_type"] == "header"
+    assert header["run_id"] == "run-a"
+
+
+def test_report_regenerates_markdown(tmp_path: Path) -> None:
+    source = _write_run(tmp_path, "run", _run_result(run_id="run-a"))
+    destination = tmp_path / "out.md"
+    result = runner.invoke(
+        app, ["report", str(source), "--format", "markdown", "--output", str(destination)]
+    )
+    assert result.exit_code == 0, result.stdout
+    content = destination.read_text(encoding="utf-8")
+    assert "# Evaluation Run" in content
+    assert "run-a" in content
+
+
+def test_report_regenerates_self_contained_html(tmp_path: Path) -> None:
+    source = _write_run(tmp_path, "run", _run_result(run_id="run-a"))
+    destination = tmp_path / "out.html"
+    result = runner.invoke(
+        app, ["report", str(source), "--format", "html", "--output", str(destination)]
+    )
+    assert result.exit_code == 0, result.stdout
+    content = destination.read_text(encoding="utf-8")
+    assert "<html" in content.lower()
+    # self-contained: no remote script/style/font references
+    assert "http://" not in content
+    assert "https://" not in content
+
+
+def test_report_missing_run_file_is_invalid_input(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "report",
+            str(tmp_path / "nope.json"),
+            "--format",
+            "jsonl",
+            "--output",
+            str(tmp_path / "x.jsonl"),
+        ],
+    )
+    assert result.exit_code == 2
