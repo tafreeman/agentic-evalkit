@@ -14,9 +14,11 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from agentic_evalkit.errors import ManifestValidationError
-from agentic_evalkit.manifest import CliTarget, dump_manifest, load_manifest
+from agentic_evalkit.manifest import CliTarget, ManifestDocument, dump_manifest, load_manifest
+from agentic_evalkit.models import DatasetRef, EvalRunManifest, SamplingPolicy
 
 
 def _write(tmp_path: Path, content: str) -> Path:
@@ -139,6 +141,36 @@ def test_dump_manifest_round_trips_through_load_manifest(tmp_path: Path) -> None
     assert round_tripped.target == document.target
 
 
+def test_dump_manifest_round_trips_target_fingerprint(tmp_path: Path) -> None:
+    fixture = Path("tests/fixtures/manifests/gsm8k.yaml")
+    document = load_manifest(fixture)
+    with_fingerprint = ManifestDocument(
+        manifest=document.manifest.model_copy(update={"target_fingerprint": "sha256:" + "a" * 64}),
+        target=document.target,
+    )
+
+    dumped = dump_manifest(with_fingerprint)
+    parsed = yaml.safe_load(dumped)
+    assert parsed["target_fingerprint"] == "sha256:" + "a" * 64
+
+    round_tripped_path = tmp_path / "round-tripped.yaml"
+    round_tripped_path.write_text(dumped, encoding="utf-8")
+    round_tripped = load_manifest(round_tripped_path)
+
+    assert round_tripped.manifest == with_fingerprint.manifest
+    assert round_tripped.manifest.target_fingerprint == "sha256:" + "a" * 64
+
+
+def test_dump_manifest_omits_target_fingerprint_when_none() -> None:
+    fixture = Path("tests/fixtures/manifests/gsm8k.yaml")
+    document = load_manifest(fixture)
+    assert document.manifest.target_fingerprint is None
+
+    dumped = dump_manifest(document)
+    parsed = yaml.safe_load(dumped)
+    assert "target_fingerprint" not in parsed
+
+
 def test_dump_manifest_never_interpolates_environment_variables() -> None:
     fixture = Path("tests/fixtures/manifests/gsm8k.yaml")
     document = load_manifest(fixture)
@@ -159,3 +191,70 @@ def test_manifest_document_is_immutable() -> None:
     document = load_manifest(fixture)
     with pytest.raises(Exception):  # noqa: B017 - pydantic ValidationError (frozen)
         document.target.kind = "subprocess"  # type: ignore[misc]
+
+
+def _manifest_with_attempts(*, sampling_attempts: int, attempts: int) -> EvalRunManifest:
+    return EvalRunManifest(
+        run_name="attempts-check",
+        dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+        adapter="gsm8k@1",
+        grader="normalized-exact@1",
+        target_name="echo",
+        sampling=SamplingPolicy(attempts=sampling_attempts),
+        attempts=attempts,
+    )
+
+
+def test_diverging_attempts_are_rejected_with_a_clear_message() -> None:
+    with pytest.raises(ValidationError, match=r"sampling\.attempts.*attempts.*equal"):
+        _manifest_with_attempts(sampling_attempts=2, attempts=1)
+
+
+def test_equal_explicit_attempts_are_accepted() -> None:
+    manifest = _manifest_with_attempts(sampling_attempts=3, attempts=3)
+    assert manifest.sampling.attempts == 3
+    assert manifest.attempts == 3
+
+
+def test_default_attempts_on_both_fields_are_accepted() -> None:
+    # Neither "sampling" nor "attempts" is overridden here, so both take
+    # their class defaults of 1 -- the common case that must never fail.
+    manifest = EvalRunManifest(
+        run_name="attempts-defaults",
+        dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+        adapter="gsm8k@1",
+        grader="normalized-exact@1",
+        target_name="echo",
+    )
+    assert manifest.sampling.attempts == 1
+    assert manifest.attempts == 1
+
+
+def test_load_manifest_surfaces_diverging_attempts_as_manifest_validation_error(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path,
+        """
+run_name: diverging-attempts
+dataset:
+  provider: huggingface
+  dataset_id: openai/gsm8k
+  config: main
+  split: test
+adapter: gsm8k@1
+grader: normalized-exact@1
+target:
+  kind: callable
+  import_string: agentic_evalkit.examples.zero_target:zero_target
+sampling:
+  attempts: 2
+attempts: 1
+""".strip()
+        + "\n",
+    )
+    with pytest.raises(ManifestValidationError) as excinfo:
+        load_manifest(path)
+    errors = excinfo.value.context.get("errors")
+    assert errors
+    assert any("equal" in entry["message"] for entry in errors)  # type: ignore[union-attr]

@@ -121,6 +121,7 @@ class _ManifestFile(FrozenModel):
     redaction_policy: dict[str, ModelJsonValue] = Field(default_factory=dict)
     environment_fingerprint: str | None = None
     code_fingerprint: str | None = None
+    target_fingerprint: str | None = None
     baseline_compatibility_rules: dict[str, ModelJsonValue] = Field(default_factory=dict)
 
 
@@ -247,6 +248,7 @@ def load_manifest(path: str | Path) -> ManifestDocument:
             redaction_policy=parsed.redaction_policy,
             environment_fingerprint=parsed.environment_fingerprint,
             code_fingerprint=parsed.code_fingerprint,
+            target_fingerprint=parsed.target_fingerprint,
             baseline_compatibility_rules=parsed.baseline_compatibility_rules,
         )
     except ValidationError as error:
@@ -292,6 +294,8 @@ def dump_manifest(document: ManifestDocument) -> str:
         payload["environment_fingerprint"] = manifest.environment_fingerprint
     if manifest.code_fingerprint is not None:
         payload["code_fingerprint"] = manifest.code_fingerprint
+    if manifest.target_fingerprint is not None:
+        payload["target_fingerprint"] = manifest.target_fingerprint
     if manifest.baseline_compatibility_rules:
         payload["baseline_compatibility_rules"] = manifest.baseline_compatibility_rules
 

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.models.datasets import DatasetRef, ResolvedDataset
@@ -20,7 +20,15 @@ class DatasetSelection(FrozenModel):
 
 
 class SamplingPolicy(FrozenModel):
-    """Seed, temperature, and repeated-attempt policy for a run."""
+    """Seed, temperature, and repeated-attempt policy for a run.
+
+    ``attempts`` here is a *policy declaration*, not the value the runner
+    consumes: :attr:`EvalRunManifest.attempts` is canonical (it is what
+    :class:`~agentic_evalkit.runner.EvalRunner` actually reads). The two
+    must agree -- :class:`EvalRunManifest` enforces this with a validator --
+    so this field can never silently diverge from the value that governs
+    execution.
+    """
 
     seed: int | None = None
     temperature: float | None = None
@@ -42,8 +50,18 @@ class EvalRunManifest(FrozenModel):
     grader: str
     target_name: str
     target_fingerprint_policy: str | None = None
+    #: Pins the actual resolved target identity: a sha256 digest (see
+    #: :func:`agentic_evalkit.provenance.compute_target_fingerprint`) over
+    #: the canonical target config, computed once the target is resolved.
+    #: ``target_fingerprint_policy`` states *how* this field is enforced
+    #: (e.g. "required"); this field carries the enforced value itself.
+    target_fingerprint: str | None = None
     selection: DatasetSelection = Field(default_factory=DatasetSelection)
     sampling: SamplingPolicy = Field(default_factory=SamplingPolicy)
+    #: Canonical repeated-attempt count: :class:`~agentic_evalkit.runner.EvalRunner`
+    #: reads this field, not ``sampling.attempts``. The two are validated
+    #: equal below so ``sampling.attempts`` can never silently disagree
+    #: with the value that actually governs execution.
     attempts: int = 1
     timeout_seconds: float | None = None
     concurrency: int = 1
@@ -52,6 +70,25 @@ class EvalRunManifest(FrozenModel):
     environment_fingerprint: str | None = None
     code_fingerprint: str | None = None
     baseline_compatibility_rules: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_attempts_agree(self) -> "EvalRunManifest":
+        """Reject a manifest whose two attempt counts have silently diverged.
+
+        ``sampling.attempts`` and ``attempts`` duplicate one concept; only
+        ``attempts`` is canonical (the runner never reads
+        ``sampling.attempts``). Both default to ``1``, so this only fires
+        on an explicit, meaningful mismatch -- never on the common
+        all-defaults case.
+        """
+        if self.sampling.attempts != self.attempts:
+            raise ValueError(
+                "sampling.attempts "
+                f"({self.sampling.attempts}) and attempts ({self.attempts}) must be "
+                "equal -- attempts is canonical (the runner reads it, not "
+                "sampling.attempts); set both to the same value"
+            )
+        return self
 
 
 class SampleResult(FrozenModel):

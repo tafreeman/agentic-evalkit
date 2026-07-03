@@ -247,6 +247,7 @@ def test_eval_run_manifest_round_trips() -> None:
         grader="normalized-exact@1",
         target_name="echo",
         target_fingerprint_policy="required",
+        target_fingerprint="sha256:target",
         selection=DatasetSelection(offset=0, limit=10),
         sampling=SamplingPolicy(seed=42, attempts=1),
         attempts=1,
