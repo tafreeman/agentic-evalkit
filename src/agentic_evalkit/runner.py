@@ -19,6 +19,7 @@ view) stand in for it.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
@@ -32,6 +33,7 @@ from agentic_evalkit.events import (
     GradeCompleted,
     RunCompleted,
     RunEvent,
+    RunFailed,
     RunStarted,
     SampleCompleted,
     SampleStarted,
@@ -50,6 +52,7 @@ from agentic_evalkit.models import (
     SampleResult,
     SourceRecord,
 )
+from agentic_evalkit.reporters.base import RedactionPolicy
 from agentic_evalkit.targets.base import ExecutionTarget
 
 #: Serialized ``NormalizedExecutionResult.output`` larger than this many bytes
@@ -126,6 +129,10 @@ class EvalRunner:
             Tests can inject a deterministic clock.
         id_factory: Injectable run-ID source; defaults to a random UUID hex
             string. Tests can inject a deterministic sequence.
+        redaction_policy: Optional policy applied to spilled artifact bytes
+            before they are written (see ``_spill_large_output``). Defaults
+            to ``None``, which preserves today's unredacted-spill behavior
+            byte-for-byte -- a caller must opt in explicitly.
     """
 
     def __init__(
@@ -138,6 +145,7 @@ class EvalRunner:
         artifact_store: ArtifactStore,
         clock: ClockFactory = _default_clock,
         id_factory: IdFactory = _default_id_factory,
+        redaction_policy: RedactionPolicy | None = None,
     ) -> None:
         self._catalog = catalog
         self._adapters = dict(adapters)
@@ -146,6 +154,7 @@ class EvalRunner:
         self._artifact_store = artifact_store
         self._clock = clock
         self._id_factory = id_factory
+        self._redaction_policy = redaction_policy
 
     async def run(
         self,
@@ -160,6 +169,23 @@ class EvalRunner:
         ``asyncio.CancelledError`` after any already-scheduled attempts are
         allowed to finish or observe cancellation themselves (requirement
         11); no attempt is left as an orphan background task.
+
+        Manifest validation happens before any ``run_id`` is minted, so a
+        ``ManifestValidationError`` from a typo'd component name is a
+        precondition failure, not a run that started and then aborted -- it
+        raises directly and never reaches the failure handling below.
+
+        Everything from the dataset resolving onward runs with one ``run_id``
+        already established (and ``RunStarted`` already emitted). Any
+        exception that escapes that region -- a dataset provider error, the
+        awaiting task being cancelled (``asyncio.CancelledError``), or any
+        other unexpected failure -- is an infrastructure-level abort: exactly
+        one :class:`~agentic_evalkit.events.RunFailed` is emitted for the
+        already-known ``run_id`` and the original exception is re-raised
+        unchanged (never swallowed, never replaced), so callers -- the CLI
+        maps exception types to exit codes -- see the same behavior as
+        before, plus the added event. ``RunCompleted`` is therefore emitted
+        only on the success path and never alongside ``RunFailed``.
         """
         sink: EventSink = event_sink if event_sink is not None else _noop_sink
         self._validate_manifest(manifest)
@@ -175,22 +201,26 @@ class EvalRunner:
             )
         )
 
-        resolved_dataset = await self._catalog.resolve(manifest.dataset_ref)
-        sink(
-            DatasetResolved(
-                run_id=run_id,
-                dataset_id=resolved_dataset.dataset_id,
-                dataset_revision=resolved_dataset.revision,
-                resolved_at=self._clock(),
+        try:
+            resolved_dataset = await self._catalog.resolve(manifest.dataset_ref)
+            sink(
+                DatasetResolved(
+                    run_id=run_id,
+                    dataset_id=resolved_dataset.dataset_id,
+                    dataset_revision=resolved_dataset.revision,
+                    resolved_at=self._clock(),
+                )
             )
-        )
 
-        samples = await self._prepare_samples(manifest, resolved_dataset)
-        sample_results = await self._execute_all(run_id, manifest, samples, sink)
+            samples = await self._prepare_samples(manifest, resolved_dataset)
+            sample_results = await self._execute_all(run_id, manifest, samples, sink)
 
-        summary = _summarize(sample_results)
-        finished_at = self._clock()
-        sink(RunCompleted(run_id=run_id, total_samples=summary.total, finished_at=finished_at))
+            summary = _summarize(sample_results)
+            finished_at = self._clock()
+            sink(RunCompleted(run_id=run_id, total_samples=summary.total, finished_at=finished_at))
+        except BaseException as error:
+            self._emit_run_failed(sink, run_id=run_id, error=error)
+            raise
 
         return EvalRunResult(
             run_id=run_id,
@@ -201,6 +231,28 @@ class EvalRunner:
             started_at=started_at,
             finished_at=finished_at,
         )
+
+    def _emit_run_failed(self, sink: EventSink, *, run_id: str, error: BaseException) -> None:
+        """Emit one ``RunFailed`` for an infrastructure-level abort of ``run_id``.
+
+        The original ``error`` is always re-raised by the caller regardless
+        of what happens here: if the sink itself raises while handling this
+        notification, that secondary failure is discarded rather than
+        allowed to replace or mask the run's real failure cause.
+        """
+        try:
+            sink(
+                RunFailed(
+                    run_id=run_id,
+                    error_type=type(error).__name__,
+                    message=str(error),
+                    failed_at=self._clock(),
+                )
+            )
+        except Exception:
+            # A broken sink must never replace or mask the caller's real
+            # failure (`error`, re-raised by the caller regardless).
+            pass
 
     def _validate_manifest(self, manifest: EvalRunManifest) -> None:
         """Requirement 1: validate component names and capabilities up front.
@@ -371,19 +423,66 @@ class EvalRunner:
         Builds a *new* ``NormalizedExecutionResult`` via ``model_copy`` (the
         contract is frozen) rather than mutating the target's returned
         instance. Small outputs are left inline unchanged.
+
+        This is the only place in the runner that applies
+        ``self._redaction_policy``'s ``secret_patterns``, and it applies them
+        to the serialized string *before* the size check -- so a spilled
+        artifact never carries a raw credential to disk even though the
+        events module docstring promises no unredacted output payload
+        anywhere in the pipeline. Inline outputs (below the spill threshold)
+        are deliberately left as-is here: they remain part of the in-memory
+        ``EvalRunResult`` and are redacted exactly once, at the report
+        boundary, by :func:`agentic_evalkit.reporters.base.apply_redaction`
+        (design §12). Redacting twice -- once here, once at the report
+        boundary -- would be redundant; redacting only here and never at the
+        report boundary would leave the in-memory result (and any other
+        consumer of it besides a rendered report) holding raw secrets. This
+        method redacts only the bytes that are about to leave the in-memory
+        result and land on disk as an artifact.
         """
         if execution.output is None:
             return execution
-        serialized = str(execution.output).encode("utf-8")
-        if len(serialized) <= _LARGE_OUTPUT_THRESHOLD_BYTES:
+        original = str(execution.output)
+        patterns = self._compiled_secret_patterns()
+        candidate = _redact(original, patterns) if patterns else original
+        encoded = candidate.encode("utf-8")
+        if len(encoded) <= _LARGE_OUTPUT_THRESHOLD_BYTES:
             return execution
-        ref = self._artifact_store.put_bytes(serialized, media_type="application/json")
+        was_redacted: bool = candidate != original
+        ref = self._artifact_store.put_bytes(
+            encoded, media_type="application/json", redacted=was_redacted
+        )
         return execution.model_copy(
             update={
                 "output": None,
                 "artifacts": {**execution.artifacts, "output_ref": ref.digest},
             }
         )
+
+    def _compiled_secret_patterns(self) -> tuple[re.Pattern[str], ...]:
+        """Compile ``self._redaction_policy.secret_patterns``, or none at all.
+
+        Returns an empty tuple both when no policy was supplied (the default,
+        preserving today's unredacted-spill behavior) and when a policy was
+        supplied with no ``secret_patterns`` of its own.
+        """
+        if self._redaction_policy is None:
+            return ()
+        return tuple(re.compile(pattern) for pattern in self._redaction_policy.secret_patterns)
+
+
+def _redact(value: str, patterns: tuple[re.Pattern[str], ...]) -> str:
+    """Replace every match of any ``patterns`` entry in ``value`` with ``[REDACTED]``.
+
+    A pure string -> string function, mirroring
+    ``agentic_evalkit.reporters.base._redact_string``: this module cannot
+    import that private helper, so the same substitution behavior is
+    reimplemented locally against the same :class:`RedactionPolicy` contract.
+    """
+    redacted = value
+    for pattern in patterns:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
 
 
 def _summarize(sample_results: list[SampleResult]) -> RunSummary:

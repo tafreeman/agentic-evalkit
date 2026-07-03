@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from agentic_evalkit.artifacts import ArtifactStore
+from agentic_evalkit.artifacts import ArtifactRef, ArtifactStore
 from agentic_evalkit.errors import ManifestValidationError
-from agentic_evalkit.events import RunEvent
+from agentic_evalkit.events import RunEvent, RunFailed
 from agentic_evalkit.models import (
     DatasetRef,
     DatasetSelection,
@@ -38,6 +38,7 @@ from agentic_evalkit.models import (
     SamplingPolicy,
     SourceRecord,
 )
+from agentic_evalkit.reporters.base import RedactionPolicy
 from agentic_evalkit.runner import EvalRunner
 
 # --- Deterministic fakes ----------------------------------------------------
@@ -426,6 +427,16 @@ async def test_run_rejects_unknown_component_names(tmp_path: Path) -> None:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_run_emits_ordered_progress_events(tmp_path: Path) -> None:
+    """Asserts the EXACT full event-type sequence, not just counts and endpoints.
+
+    ``concurrency=1`` makes the two samples' sub-sequences run strictly one
+    after another rather than interleaved, so the full sequence -- not just
+    each sample's internal sub-sequence -- is deterministic. The fixture
+    target (``success_then_error``) grades sample 0 (``COMPLETED`` ->
+    ``GradeCompleted`` fires) and does not grade sample 1 (``ERROR`` ->
+    requirement 6 skips grading), which is why ``GradeCompleted`` appears
+    only once even though there are two samples.
+    """
     events: list[RunEvent] = []
 
     def _sink(event: RunEvent) -> None:
@@ -438,11 +449,218 @@ async def test_run_emits_ordered_progress_events(tmp_path: Path) -> None:
         graders={"exact@1": _ExactFixtureGrader()},
         artifact_store=_artifact_store(tmp_path),
     )
-    await runner.run(_manifest(), event_sink=_sink)
+    await runner.run(_manifest(concurrency=1), event_sink=_sink)
 
     event_type_names = [type(event).__name__ for event in events]
-    assert event_type_names[0] == "RunStarted"
-    assert event_type_names[-1] == "RunCompleted"
-    assert "DatasetResolved" in event_type_names
-    assert event_type_names.count("SampleStarted") == 2
-    assert event_type_names.count("SampleCompleted") == 2
+    assert event_type_names == [
+        "RunStarted",
+        "DatasetResolved",
+        "SampleStarted",
+        "ExecutionCompleted",
+        "GradeCompleted",
+        "SampleCompleted",
+        "SampleStarted",
+        "ExecutionCompleted",
+        "SampleCompleted",
+        "RunCompleted",
+    ]
+
+    run_id = events[0].run_id
+    assert all(event.run_id == run_id for event in events)
+
+
+# --- RunFailed emission (defect 1) ------------------------------------------
+
+
+class _ResolveRaisesCatalog:
+    """Structurally satisfies the runner's catalog protocol; ``resolve`` always fails.
+
+    ``iter_records`` is never expected to be called -- the runner must abort
+    before reaching sample preparation -- so it raises if it ever is, making
+    a wrongly-ordered runner change fail loudly rather than silently pass.
+    """
+
+    async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
+        raise RuntimeError("dataset provider unreachable")
+
+    async def iter_records(
+        self, dataset: ResolvedDataset, *, offset: int = 0, limit: int | None = None
+    ) -> AsyncIterator[SourceRecord]:
+        raise AssertionError("iter_records must not be called after resolve() failed")
+        yield  # pragma: no cover - unreachable; makes this an async generator
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_dataset_resolution_failure_emits_exactly_one_run_failed(tmp_path: Path) -> None:
+    """A catalog whose ``resolve`` raises is an infrastructure-level abort.
+
+    Exactly one ``RunFailed`` is emitted (naming the original exception's
+    type), no ``RunCompleted`` follows it, and the original exception -- not
+    a wrapped or replaced one -- is what the caller observes.
+    """
+    events: list[RunEvent] = []
+
+    def _sink(event: RunEvent) -> None:
+        events.append(event)
+
+    runner = EvalRunner(
+        catalog=_ResolveRaisesCatalog(),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={"fake": _SequencedTarget.success_then_error()},
+        graders={"exact@1": _ExactFixtureGrader()},
+        artifact_store=_artifact_store(tmp_path),
+    )
+    with pytest.raises(RuntimeError, match="dataset provider unreachable"):
+        await runner.run(_manifest(), event_sink=_sink)
+
+    event_type_names = [type(event).__name__ for event in events]
+    assert event_type_names == ["RunStarted", "RunFailed"]
+    assert "RunCompleted" not in event_type_names
+
+    run_failed = events[-1]
+    assert isinstance(run_failed, RunFailed)
+    assert run_failed.error_type == "RuntimeError"
+    assert run_failed.message == "dataset provider unreachable"
+    assert run_failed.run_id == events[0].run_id
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_cancellation_during_the_run_emits_exactly_one_run_failed(tmp_path: Path) -> None:
+    """``asyncio.CancelledError`` is itself an infrastructure-level abort.
+
+    Mirrors ``test_cancelling_the_run_marks_pending_samples_cancelled``'s
+    hanging-target fixture, but additionally asserts the ``RunFailed`` event
+    this defect fix adds: cancellation must not end the run with no
+    terminal event at all.
+    """
+    started_first = asyncio.Event()
+    events: list[RunEvent] = []
+
+    def _sink(event: RunEvent) -> None:
+        events.append(event)
+
+    class _HangsForeverTarget:
+        async def execute(
+            self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
+        ) -> NormalizedExecutionResult:
+            started_first.set()
+            await asyncio.sleep(10)
+            raise AssertionError("unreachable - the run is cancelled before this sleep returns")
+
+    runner = EvalRunner(
+        catalog=_FakeCatalog(_records(1)),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={"fake": _HangsForeverTarget()},
+        graders={"exact@1": _ExactFixtureGrader()},
+        artifact_store=_artifact_store(tmp_path),
+    )
+    run_task = asyncio.ensure_future(runner.run(_manifest(concurrency=1), event_sink=_sink))
+    await asyncio.wait_for(started_first.wait(), timeout=2.0)
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    event_type_names = [type(event).__name__ for event in events]
+    assert "RunFailed" in event_type_names
+    assert "RunCompleted" not in event_type_names
+    run_failed = next(event for event in events if isinstance(event, RunFailed))
+    assert run_failed.error_type == "CancelledError"
+
+
+# --- Redacted spill (defect 2) -----------------------------------------------
+
+
+class _PlantedTokenTarget:
+    """Returns one execution whose output is large enough to spill and
+    contains a planted fake Hugging Face token, so a redaction policy that
+    matches ``hf_...`` tokens has something real to catch.
+    """
+
+    def __init__(self, *, token: str, padding_chars: int) -> None:
+        self._token = token
+        self._padding_chars = padding_chars
+
+    async def execute(
+        self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
+    ) -> NormalizedExecutionResult:
+        now = datetime.now(UTC)
+        padding = "x" * self._padding_chars
+        return NormalizedExecutionResult(
+            sample_id=sample.sample_id,
+            attempt=attempt,
+            output={"answer": sample.reference, "log": f"token={self._token} {padding}"},
+            status=ExecutionStatus.COMPLETED,
+            started_at=now,
+            finished_at=now,
+        )
+
+
+_PLANTED_TOKEN = "hf_AbCdEfGh0123456789"
+#: Enough filler so the serialized output clears ``_LARGE_OUTPUT_THRESHOLD_BYTES``
+#: (8192 bytes) and is guaranteed to spill regardless of the token's own length.
+_SPILL_PADDING_CHARS = 8300
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_spill_redacts_a_planted_secret_when_a_policy_is_supplied(tmp_path: Path) -> None:
+    policy = RedactionPolicy(secret_patterns=(r"hf_[A-Za-z0-9]{16,}",))
+    artifact_store = _artifact_store(tmp_path)
+    runner = EvalRunner(
+        catalog=_FakeCatalog(_records(1)),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={
+            "fake": _PlantedTokenTarget(token=_PLANTED_TOKEN, padding_chars=_SPILL_PADDING_CHARS)
+        },
+        graders={"exact@1": _ExactFixtureGrader()},
+        artifact_store=artifact_store,
+        redaction_policy=policy,
+    )
+    result = await runner.run(_manifest())
+
+    execution = result.samples[0].execution
+    assert execution.output is None  # spilled, not left inline
+    digest = execution.artifacts["output_ref"]
+    assert isinstance(digest, str)
+
+    ref = ArtifactRef(digest=digest, media_type="application/json", byte_count=0)
+    payload = artifact_store.read(ref).decode("utf-8")
+    metadata = artifact_store.metadata(ref)
+
+    assert _PLANTED_TOKEN not in payload
+    assert "[REDACTED]" in payload
+    assert metadata.redacted is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_spill_is_unredacted_when_no_policy_is_supplied(tmp_path: Path) -> None:
+    """Without a ``redaction_policy``, spill behavior is unchanged: the
+    planted token reaches the stored artifact verbatim and the artifact is
+    recorded as not redacted -- today's byte-identical default behavior.
+    """
+    artifact_store = _artifact_store(tmp_path)
+    runner = EvalRunner(
+        catalog=_FakeCatalog(_records(1)),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={
+            "fake": _PlantedTokenTarget(token=_PLANTED_TOKEN, padding_chars=_SPILL_PADDING_CHARS)
+        },
+        graders={"exact@1": _ExactFixtureGrader()},
+        artifact_store=artifact_store,
+    )
+    result = await runner.run(_manifest())
+
+    execution = result.samples[0].execution
+    assert execution.output is None
+    digest = execution.artifacts["output_ref"]
+    assert isinstance(digest, str)
+
+    ref = ArtifactRef(digest=digest, media_type="application/json", byte_count=0)
+    payload = artifact_store.read(ref).decode("utf-8")
+    metadata = artifact_store.metadata(ref)
+
+    assert _PLANTED_TOKEN in payload
+    assert metadata.redacted is False
