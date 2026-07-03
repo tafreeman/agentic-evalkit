@@ -16,6 +16,19 @@ before construction). This module does not perform entry-point discovery
 itself; it only enforces that a caller-supplied provider can never silently
 replace a name reserved for a built-in provider (``builtin_provider_names``),
 raising :class:`~agentic_evalkit.errors.PluginCompatibilityError` instead.
+
+``offline`` is a per-call argument on every method, never construction-time
+state on ``DatasetCatalog`` itself — the same per-call shape ``preview`` has
+always had. Only ``preview`` can honor it (it is the one operation backed by
+an exact-match cache key per design §6.3); ``search``, ``resolve``, and
+``iter_records`` each inherently require the provider (a query has no stable
+cache key, a resolution is what produces the revision a cache key would need,
+and iteration is not cache-decorated at all), so ``offline=True`` on any of
+them raises :class:`~agentic_evalkit.errors.OfflineCacheMiss` rather than
+either contacting the provider or fabricating a stale result. The catalog
+does not remember or propagate the flag across calls, so an offline caller
+is limited to ``preview`` of exactly-cached pages; the other three
+operations reject ``offline=True`` outright.
 """
 
 from __future__ import annotations
@@ -99,15 +112,63 @@ class DatasetCatalog:
         filters: Mapping[str, str] | None = None,
         limit: int = 20,
         cursor: str | None = None,
+        offline: bool = False,
     ) -> SearchPage:
-        """Route a search to the named provider (design §6.1)."""
-        return await self._provider_for(provider).search(
-            query, filters=filters, limit=limit, cursor=cursor
-        )
+        """Route a search to the named provider (design §6.1).
 
-    async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
-        """Route resolution to ``ref.provider`` — the only field used for routing."""
-        return await self._provider_for(ref.provider).resolve(ref)
+        Search results are never cached (there is no stable, exact key for a
+        free-text query the way there is for a resolved page — design
+        §6.3's cache identity model is page/dataset-keyed, not query-keyed),
+        so ``offline=True`` can never be honored honestly here: it always
+        raises rather than either silently contacting ``provider`` or
+        silently returning a stale/empty result.
+
+        Raises:
+            KeyError: ``provider`` is not registered with this catalog.
+            OfflineCacheMiss: ``offline=True`` was passed; search results
+                are never cached, so a search can never be served offline.
+        """
+        provider_impl = self._provider_for(provider)
+        if offline:
+            raise OfflineCacheMiss(
+                message=(
+                    "offline search requested but search results are never cached; "
+                    f"provider {provider!r}, query {query!r} require contacting the provider"
+                ),
+                context={"provider": provider, "query": query},
+            )
+        return await provider_impl.search(query, filters=filters, limit=limit, cursor=cursor)
+
+    async def resolve(self, ref: DatasetRef, *, offline: bool = False) -> ResolvedDataset:
+        """Route resolution to ``ref.provider`` — the only field used for routing.
+
+        Resolution pins a revision (and often config/split/row-count/license
+        metadata) by asking the provider, and the existing content-addressed
+        cache (:mod:`agentic_evalkit.datasets.cache`) has no key for "the
+        most recent resolution of this ref" — ``CacheKey.revision`` is
+        required precisely because a resolution is what produces it, so
+        there is no revision-independent key to resolve *from* cache without
+        inventing a second, parallel keying scheme. Per design §6.3, this
+        method does not add one: ``offline=True`` always raises rather than
+        serving a possibly-stale resolution or silently contacting the
+        provider.
+
+        Raises:
+            KeyError: ``ref.provider`` is not registered with this catalog.
+            OfflineCacheMiss: ``offline=True`` was passed; resolution always
+                requires the provider.
+        """
+        provider_impl = self._provider_for(ref.provider)
+        if offline:
+            raise OfflineCacheMiss(
+                message=(
+                    "offline resolve requested but resolution is never cached; "
+                    f"provider {ref.provider!r}, dataset {ref.dataset_id!r} require "
+                    "contacting the provider to pin a revision"
+                ),
+                context={"provider": ref.provider, "dataset_id": ref.dataset_id},
+            )
+        return await provider_impl.resolve(ref)
 
     async def preview(
         self,
@@ -170,6 +231,7 @@ class DatasetCatalog:
         *,
         offset: int = 0,
         limit: int | None = None,
+        offline: bool = False,
     ) -> AsyncIterator[SourceRecord]:
         """Route bounded iteration to ``ref.provider`` (not cache-decorated).
 
@@ -177,8 +239,32 @@ class DatasetCatalog:
         exact-match cache key, so this always delegates directly to the
         provider; callers wanting cached, resumable pagination should use
         repeated :meth:`preview` calls instead.
+
+        Args:
+            offline: When ``True``, this raises immediately rather than
+                returning an iterator that would touch the provider on
+                first iteration. Iteration is not backed by an exact-match
+                cache key — providers (built-in or plugin) stream records
+                from their own source, outside this catalog's cache
+                decoration — so honoring ``offline=True`` honestly means
+                rejecting it, never silently iterating from the provider.
+
+        Raises:
+            KeyError: ``ref.provider`` is not registered with this catalog.
+            OfflineCacheMiss: ``offline=True`` was passed; iteration always
+                requires the provider.
         """
-        return self._provider_for(ref.provider).iter_records(dataset, offset=offset, limit=limit)
+        provider_impl = self._provider_for(ref.provider)
+        if offline:
+            raise OfflineCacheMiss(
+                message=(
+                    "offline iteration requested but iter_records is not cache-backed; "
+                    f"provider {ref.provider!r}, dataset {dataset.dataset_id!r} require "
+                    "contacting the provider"
+                ),
+                context={"provider": ref.provider, "dataset_id": dataset.dataset_id},
+            )
+        return provider_impl.iter_records(dataset, offset=offset, limit=limit)
 
     @staticmethod
     def _cache_key(

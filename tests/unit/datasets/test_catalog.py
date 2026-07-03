@@ -19,7 +19,7 @@ from agentic_evalkit.datasets.base import ProviderHealth
 from agentic_evalkit.datasets.cache import DatasetCache
 from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.datasets.presets import BUILTIN_PRESETS
-from agentic_evalkit.errors import PluginCompatibilityError
+from agentic_evalkit.errors import OfflineCacheMiss, PluginCompatibilityError
 from agentic_evalkit.models import (
     DatasetRef,
     ResolvedDataset,
@@ -220,6 +220,45 @@ async def test_registering_plugin_with_new_name_succeeds() -> None:
     assert page.total_hits == 0
     resolved = await catalog.resolve(ref)
     assert resolved.dataset_id == "x"
+
+
+# --- offline rejection on non-cacheable operations ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_offline_always_raises_without_calling_provider() -> None:
+    catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
+    with pytest.raises(OfflineCacheMiss, match="never cached"):
+        await catalog.search("x", provider="fake", offline=True)
+
+
+@pytest.mark.asyncio
+async def test_resolve_offline_always_raises_without_calling_provider() -> None:
+    catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
+    with pytest.raises(OfflineCacheMiss, match="never cached"):
+        await catalog.resolve(_fake_ref(), offline=True)
+
+
+@pytest.mark.asyncio
+async def test_iter_records_offline_raises_at_call_time() -> None:
+    catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+    # ``iter_records`` is a plain method returning the provider's iterator, so
+    # the offline rejection must surface synchronously at the call, not on the
+    # first ``__anext__``. The fake provider's ``iter_records`` raises
+    # ``NotImplementedError``, so reaching the provider would fail differently.
+    with pytest.raises(OfflineCacheMiss, match="not cache-backed"):
+        catalog.iter_records(ref, dataset, offline=True)
+
+
+@pytest.mark.asyncio
+async def test_offline_with_unknown_provider_reports_missing_provider() -> None:
+    # Provider validation precedes the offline rejection: a typo'd provider
+    # must not be misreported as an offline limitation.
+    catalog = DatasetCatalog(providers={})
+    with pytest.raises(KeyError, match="provider 'missing'"):
+        await catalog.search("x", provider="missing", offline=True)
 
 
 # --- list_presets --------------------------------------------------------------
