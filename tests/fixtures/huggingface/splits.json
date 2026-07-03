@@ -1,0 +1,1 @@
+{"splits":[{"dataset":"openai/gsm8k","config":"main","split":"train"},{"dataset":"openai/gsm8k","config":"main","split":"test"},{"dataset":"openai/gsm8k","config":"socratic","split":"train"},{"dataset":"openai/gsm8k","config":"socratic","split":"test"}],"pending":[],"failed":[]}
