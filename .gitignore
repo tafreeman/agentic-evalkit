@@ -15,3 +15,15 @@ __pycache__/
 .vscode/
 .sonar/
 external_analysis/
+# BMAD framework install + its generated output (local tooling, not repo content)
+_bmad/
+_bmad-output/
+.agent/
+.agents/
+.github/agents/
+docs/codebase/
+docs/project-scan-report.json
+# BMAD-installed skill packs; only the two curated contributor skills are tracked
+.claude/skills/*
+!.claude/skills/release-gate/
+!.claude/skills/write-adr/
