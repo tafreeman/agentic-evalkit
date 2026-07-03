@@ -1,18 +1,25 @@
 """Run compatibility checking and paired bootstrap comparison (design §10, ADR-0008).
 
 Two runs are only comparable when their dataset revision, split, adapter,
-grader, target policy, and sampling policy are compatible; an incompatible
-comparison must fail with an explanation rather than silently producing a
-misleading delta (design §10). ``compare_runs`` checks every provenance
-field described in Task 12 Step 6 (dataset ID/revision/config/split,
-adapter, grader, target policy, sampling temperature/seed policy, attempt
-count) and raises :class:`~agentic_evalkit.errors.IncompatibleRuns` listing
-every mismatch it finds, not just the first.
+grader, target policy, target fingerprint, and sampling policy are
+compatible; an incompatible comparison must fail with an explanation rather
+than silently producing a misleading delta (design §10). ``compare_runs``
+checks every provenance field described in Task 12 Step 6 (dataset ID/
+revision/config/split, adapter, grader, target policy, target fingerprint,
+sampling temperature/seed policy, attempt count) and raises
+:class:`~agentic_evalkit.errors.IncompatibleRuns` listing every mismatch it
+finds, not just the first. A named target with an unpinned fingerprint
+(``None``) is never treated as equal to a pinned fingerprint on the other
+run: unknown provenance must not silently compare as equal to verified
+provenance.
 
 For compatible runs, it pairs observations by ``(sample_id, attempt)`` so
 missing attempts on either side are simply excluded from the paired
-comparison rather than treated as a failure, computes the observed paired
-success-rate delta, and bootstraps a 95% interval for that delta using a
+comparison rather than treated as a failure. Zero paired observations means
+there is nothing to estimate a delta from, so ``compare_runs`` raises
+:class:`~agentic_evalkit.errors.IncompatibleRuns` rather than returning a
+confident-looking zero delta. Otherwise it computes the observed paired
+success-rate delta and bootstraps a 95% interval for that delta using a
 local ``random.Random(seed)`` instance so the same seed always reproduces
 the same bootstrap draw sequence (ADR-0008: deterministic seeded
 bootstrap).
@@ -52,7 +59,14 @@ class ComparisonResult(FrozenModel):
     lower_percentile: float
     upper_percentile: float
     paired_count: int
+    """Number of paired ``(sample_id, attempt)`` observations the delta and
+    bootstrap were computed over. With ``attempts > 1`` this can exceed
+    ``sample_count``, since each distinct sample may contribute up to one
+    paired observation per attempt."""
     sample_count: int
+    """Number of *distinct* ``sample_id`` values represented in
+    ``paired_count``, regardless of how many attempts each contributed.
+    Never multiplies with the attempt count the way ``paired_count`` does."""
     seed: int
 
 
@@ -64,7 +78,14 @@ def _describe_mismatches(left: EvalRunResult, right: EvalRunResult) -> list[str]
     policy") rather than the requested ``DatasetRef``, since the resolved
     dataset is the actual immutable source each run drew from. ``adapter``
     doubles as the harness/benchmark-binding identity per design §7, since
-    ``EvalRunManifest`` has no separate ``harness`` field.
+    ``EvalRunManifest`` has no separate ``harness`` field. "Target policy"
+    covers both the declared ``target_fingerprint_policy`` and the actual
+    ``target_fingerprint`` each run recorded: two runs sharing a
+    ``target_name`` under the same policy can still have drawn from
+    provably different targets, so the fingerprints themselves must match
+    too. An unset (``None``) fingerprint on one side and a pinned
+    fingerprint on the other is a mismatch, not a pass-through -- unknown
+    provenance is never treated as equal to verified provenance.
     """
     mismatches: list[str] = []
     left_dataset, right_dataset = left.resolved_dataset, right.resolved_dataset
@@ -101,6 +122,11 @@ def _describe_mismatches(left: EvalRunResult, right: EvalRunResult) -> list[str]
             "target fingerprint policy differs: "
             f"{left_manifest.target_fingerprint_policy!r} "
             f"!= {right_manifest.target_fingerprint_policy!r}"
+        )
+    if left_manifest.target_fingerprint != right_manifest.target_fingerprint:
+        mismatches.append(
+            "target fingerprint differs: "
+            f"{left_manifest.target_fingerprint!r} != {right_manifest.target_fingerprint!r}"
         )
     if left_manifest.sampling.temperature != right_manifest.sampling.temperature:
         mismatches.append(
@@ -152,14 +178,19 @@ def compare_runs(
     Returns:
         A :class:`ComparisonResult` with the observed paired delta
         (``right`` pass rate minus ``left`` pass rate over the paired
-        subset), its bootstrap 2.5/97.5 percentiles, the paired and total
-        sample counts, and the seed used.
+        subset), its bootstrap 2.5/97.5 percentiles, the paired
+        ``(sample_id, attempt)`` count and distinct sample count, and the
+        seed used.
 
     Raises:
         ValueError: If ``bootstrap_samples`` is outside ``[100, 10000]``.
         IncompatibleRuns: If the two runs' resolved dataset identity,
-            adapter, grader, target policy, sampling policy, or attempt
-            count differ. The error message lists every mismatched field.
+            adapter, grader, target policy (including target fingerprint),
+            sampling policy, or attempt count differ. Also raised if the
+            two runs share zero paired ``(sample_id, attempt)``
+            observations, since a delta computed over nothing is not a
+            comparison. The error message lists every mismatched field, or
+            names both run ids when the failure is zero overlap.
     """
     if not (_MIN_BOOTSTRAP_SAMPLES <= bootstrap_samples <= _MAX_BOOTSTRAP_SAMPLES):
         raise ValueError(
@@ -182,11 +213,21 @@ def compare_runs(
     right_index = _index_by_sample_and_attempt(right)
     paired_keys = sorted(set(left_index) & set(right_index))
 
+    if not paired_keys:
+        raise IncompatibleRuns(
+            message=(
+                f"runs {left.run_id!r} and {right.run_id!r} are not comparable: "
+                "they share zero paired (sample_id, attempt) observations"
+            ),
+            context={"left_run_id": left.run_id, "right_run_id": right.run_id},
+        )
+
     # (right_pass - left_pass) per paired observation: +1 if only right
     # passed, -1 if only left passed, 0 if both agreed.
     deltas = [int(right_index[key]) - int(left_index[key]) for key in paired_keys]
     paired_count = len(deltas)
-    estimate = (sum(deltas) / paired_count) if paired_count > 0 else 0.0
+    estimate = sum(deltas) / paired_count
+    sample_count = len({sample_id for sample_id, _attempt in paired_keys})
 
     lower, upper = _bootstrap_percentiles(deltas, bootstrap_samples=bootstrap_samples, seed=seed)
 
@@ -195,7 +236,7 @@ def compare_runs(
         lower_percentile=lower,
         upper_percentile=upper,
         paired_count=paired_count,
-        sample_count=paired_count,
+        sample_count=sample_count,
         seed=seed,
     )
 
@@ -221,8 +262,15 @@ def _bootstrap_percentiles(
     Resamples ``deltas`` with replacement ``bootstrap_samples`` times using
     a local ``random.Random(seed)`` instance (never the shared module-level
     ``random`` state) so a comparison never has side effects on unrelated
-    code and is fully reproducible from its seed alone. With zero paired
-    observations, both bounds are 0.0 -- there is no delta to estimate.
+    code and is fully reproducible from its seed alone.
+
+    ``compare_runs`` never calls this with an empty ``deltas``: it raises
+    :class:`~agentic_evalkit.errors.IncompatibleRuns` before reaching here
+    when the two runs share zero paired observations, rather than let a
+    zero-observation "estimate" masquerade as a real result. The guard
+    below is defensive only -- it protects any other future caller from a
+    ``ZeroDivisionError`` in the resample-mean computation -- and must
+    never be read as this function's normal, expected return path.
     """
     if not deltas:
         return (0.0, 0.0)

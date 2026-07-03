@@ -3,13 +3,22 @@
 
 ``compare_runs`` first verifies that two runs share every field that makes
 a delta between them meaningful: resolved dataset id/revision/config/
-split, adapter, grader, target policy, sampling policy, and attempt count.
-Any mismatch raises :class:`~agentic_evalkit.errors.IncompatibleRuns`
-listing *every* mismatched field, not just the first one found. Only for
-compatible runs does it pair observations by sample and attempt id and
-bootstrap the paired success-rate delta with a local
+split, adapter, grader, target policy (including target fingerprint),
+sampling policy, and attempt count. Any mismatch raises
+:class:`~agentic_evalkit.errors.IncompatibleRuns` listing *every*
+mismatched field, not just the first one found. A ``None`` fingerprint on
+one side and a pinned fingerprint on the other is itself a mismatch --
+unknown provenance is never treated as equal to verified provenance --
+while ``None`` on both sides still compares fine, for backward
+compatibility with runs recorded before fingerprints were captured.
+
+Only for compatible runs does it pair observations by sample and attempt
+id and bootstrap the paired success-rate delta with a local
 ``random.Random(seed)`` instance, so the same seed always reproduces the
-same estimate.
+same estimate. Zero paired observations is itself raised as
+``IncompatibleRuns`` rather than returned as a confident-looking zero
+delta. ``sample_count`` is the number of distinct sample ids represented,
+which is not the same as ``paired_count`` once ``attempts > 1``.
 
 Covers the plan's verbatim snippet (docs/plans/
 2026-07-02-agentic-evalkit-initial-release.md, Task 12 Step 2) unmodified.
@@ -94,6 +103,7 @@ def _run(
     grader: str = "normalized-exact@1",
     target_name: str = "echo-target",
     target_fingerprint_policy: str | None = None,
+    target_fingerprint: str | None = None,
     temperature: float | None = 0.0,
     seed: int | None = 7,
     attempts: int = 1,
@@ -120,6 +130,7 @@ def _run(
         grader=grader,
         target_name=target_name,
         target_fingerprint_policy=target_fingerprint_policy,
+        target_fingerprint=target_fingerprint,
         sampling=SamplingPolicy(seed=seed, temperature=temperature, attempts=attempts),
         attempts=attempts,
     )
@@ -200,6 +211,51 @@ def test_rejects_different_target_fingerprint_policies() -> None:
     right = _run(target_fingerprint_policy="loose")
     with pytest.raises(IncompatibleRuns, match="target"):
         compare_runs(left, right, seed=1)
+
+
+# --- Actual target fingerprint comparison -------------------------------------
+#
+# Same target_name and target_fingerprint_policy is not enough: two runs can
+# share both while having actually executed against provably different
+# targets. compare_runs must compare the recorded fingerprints themselves.
+
+
+def test_rejects_different_target_fingerprints() -> None:
+    left = _run(target_fingerprint="sha256:aaaa")
+    right = _run(target_fingerprint="sha256:bbbb")
+    with pytest.raises(IncompatibleRuns, match="fingerprint"):
+        compare_runs(left, right, seed=1)
+
+
+def test_accepts_equal_non_none_target_fingerprints() -> None:
+    left = _run(target_fingerprint="sha256:aaaa")
+    right = _run(target_fingerprint="sha256:aaaa")
+    result = compare_runs(left, right, seed=1)
+    assert result.paired_count == 2
+
+
+def test_rejects_none_fingerprint_against_a_pinned_fingerprint() -> None:
+    # Unknown provenance (None) must never silently compare as equal to
+    # verified provenance (a pinned fingerprint) -- regardless of which
+    # side is which.
+    left = _run(target_fingerprint=None)
+    right = _run(target_fingerprint="sha256:aaaa")
+    with pytest.raises(IncompatibleRuns, match="fingerprint"):
+        compare_runs(left, right, seed=1)
+
+    left = _run(target_fingerprint="sha256:aaaa")
+    right = _run(target_fingerprint=None)
+    with pytest.raises(IncompatibleRuns, match="fingerprint"):
+        compare_runs(left, right, seed=1)
+
+
+def test_accepts_none_target_fingerprint_on_both_sides() -> None:
+    # Backward compatibility: runs recorded before target_fingerprint
+    # capture existed both have None, and must still compare fine.
+    left = _run(target_fingerprint=None)
+    right = _run(target_fingerprint=None)
+    result = compare_runs(left, right, seed=1)
+    assert result.paired_count == 2
 
 
 def test_rejects_different_sampling_temperatures() -> None:
@@ -305,6 +361,51 @@ def test_unmatched_attempts_are_excluded_from_pairing() -> None:
     result = compare_runs(left, right, bootstrap_samples=200, seed=3)
     assert result.paired_count == 1
     assert result.sample_count == 1
+
+
+def test_zero_paired_overlap_raises_incompatible_runs_naming_both_run_ids() -> None:
+    # left and right are otherwise fully compatible (same manifest fields),
+    # but share no (sample_id, attempt) keys at all -- there is nothing to
+    # compute a delta from, so this must fail loudly rather than return a
+    # plausible-looking "no difference" verdict from literally nothing.
+    left = _run(
+        run_id="left-run",
+        samples=(_sample_result("s0", attempt=1, passed=True),),
+    )
+    right = _run(
+        run_id="right-run",
+        samples=(_sample_result("s1", attempt=1, passed=True),),
+    )
+    with pytest.raises(IncompatibleRuns) as excinfo:
+        compare_runs(left, right, seed=1)
+    message = str(excinfo.value)
+    assert "left-run" in message
+    assert "right-run" in message
+    assert excinfo.value.context["left_run_id"] == "left-run"
+    assert excinfo.value.context["right_run_id"] == "right-run"
+
+
+def test_sample_count_counts_distinct_samples_not_attempt_pairs() -> None:
+    # 2 samples x 3 attempts each, fully overlapping between left and
+    # right: paired_count must be 6 (one pair per (sample_id, attempt)),
+    # but sample_count must stay 2 -- it counts distinct sample ids, not
+    # attempt-pairs, so it must never multiply with the attempt count the
+    # way paired_count does.
+    left_samples = tuple(
+        _sample_result(sample_id, attempt=attempt, passed=True)
+        for sample_id in ("s0", "s1")
+        for attempt in (1, 2, 3)
+    )
+    right_samples = tuple(
+        _sample_result(sample_id, attempt=attempt, passed=True)
+        for sample_id in ("s0", "s1")
+        for attempt in (1, 2, 3)
+    )
+    left = _run(run_id="left", attempts=3, samples=left_samples)
+    right = _run(run_id="right", attempts=3, samples=right_samples)
+    result = compare_runs(left, right, seed=1)
+    assert result.paired_count == 6
+    assert result.sample_count == 2
 
 
 def test_bootstrap_percentiles_bracket_the_estimate_reasonably() -> None:
