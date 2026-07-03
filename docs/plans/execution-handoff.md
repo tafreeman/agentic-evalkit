@@ -1,6 +1,6 @@
 # Execution handoff — agentic-evalkit initial release
 
-**Updated:** 2026-07-02, after a session interruption (spend limit) cut three in-flight agents.
+**Updated:** 2026-07-03, after resume. Waves 1-2 (Tasks 4-13, plus 7 and 11) complete, committed, all gates green (314 tests, 92.78% coverage, mypy 49 files). ADR-0005..0008 written. Task 14 (CLI) Phase 1 in progress.
 **Audience:** the orchestrating agent (any session) resuming plan execution. The plan itself is
 `docs/plans/2026-07-02-agentic-evalkit-initial-release.md`; the design is
 `docs/specs/2026-07-02-agentic-evalkit-design.md`.
@@ -12,22 +12,27 @@
 - Subagents: sonnet, general-purpose, prompts per `docs/plans/agent-prompts/`. Agents NEVER run git and NEVER touch files outside their ownership list; every agent first reads `agent-prompts/COMMON.md`.
 - Orchestrator runs authoritative gates before each commit: `uv run pytest -m "not live" --cov` / `ruff check .` / `ruff format --check .` / `mypy`, then commits with the plan's conventional message (no attribution trailers).
 
-## State: done and committed (all gates green, 34 tests, coverage 94%)
+## State: done and committed (all gates green, 314 tests, coverage 92.78%, mypy 49 files)
 
 | Work | Commit |
 |---|---|
 | Plan hardenings + review follow-ups (docs) | 83910c6, 03c0fd2, 09c96f7 |
-| Task 1 foundation (+ `--version` test, CI 3.11-3.14, `invoke_without_command=True` fix) | d3c5b68 |
-| Task 2 contracts (19 models) | dceb303 |
-| RunSummary/samples reconciliation + `datasets/base.py` provider protocol + package `__init__` stubs | e2d9b25 |
-| Task 3 errors/plugins (17 error classes; note: `tests/__init__.py` was required for entry-point loading) | HEAD |
+| Task 1 foundation / Task 2 contracts / Task 3 errors+plugins | d3c5b68, dceb303, 543f79d |
+| RunSummary + `datasets/base.py` + `__init__` stubs | e2d9b25 |
+| pytest-repeat dev dep (orchestrator prep) | e7a8f0e |
+| Task 4 cache / Task 5 local / Task 8 benchmarks | 18860b7, 44ebfb2, 4d7d4ba |
+| Task 12 stats / Task 10 graders / Task 13 reporters | 4dc4dc0, 2088b0a, 5dce3ea |
+| Task 9 targets / Task 6 HF provider (live gate 2/2 pass) | 77aaea4, 61eb129 |
+| types-PyYAML stub swap | 5cb3b97 |
+| ADR-0005..0008 (benchmarks/targets/grading/stats) | 733ba53 |
+| Task 7 catalog / Task 11 runner | 417064f, 25a0010 |
 
 ## What is left (dispatch order)
 
-1. **Now, in parallel** (all dependencies satisfied; disjoint files): Task 4 (cache), Task 5 (local provider), Task 6 (HF provider) — prompts exist in `agent-prompts/`; Task 8 (benchmarks, REDO — died mid-run), Task 13 (reporters, REDO — died before writing files), Task 9 (targets), Task 10 (graders, full incl. judges), Task 12 (stats) — condensed notes below.
-2. After 4+5+6: Task 7 (catalog/presets). After 9+10: Task 11 (runner) — can run parallel with 7.
-3. After 7, 11, 12, 13: Task 14 (CLI, full Steps 1-11). Orchestrator itself executes Step 9: clean-wheel install, run doctor/init/run on GSM8K, record CONTINUE_FULL_V1, commit checkpoint doc. Merge milestone B.
-4. Task 15 (docs, workflows, dependency-boundary/clean-wheel/live gates — orchestrator runs the full verification matrix incl. `-m live`). Then Task 16 (acceptance audit). Merge to main.
+1. **Task 14 (CLI) Phase 1 IN PROGRESS** — agent building Steps 1-8: manifest.py (yaml.safe_load only), root Typer app, doctor, datasets curated/search/inspect/preview/pull, init, validate, run, examples/zero_target (returns "0"). Exit codes 0/2/3/4/5/130.
+2. **Orchestrator executes Step 9** (v0.1 checkpoint): build + install clean wheel in a fresh env, run `doctor` / `init --preset gsm8k` / `run eval.yaml --limit 5 --yes`; verify no importer code / manual download / `datasets` / `pyarrow` / Docker, canonical JSON produced, simulated outage prints stable code + remediation (no traceback). Record CONTINUE_FULL_V1 (pre-decided) in docs/release/v0.1-checkpoint.md and commit.
+3. **Task 14 Phase 2** (Steps 10-11, CONTINUE_FULL_V1): add `compare` (Task 12 compat checks, --bootstrap-samples 100-10000 default 1000) and `report` (regenerate JSONL/Markdown/HTML from canonical JSON). Then merge Milestone B to main.
+4. Task 15 (docs, workflows, dependency-boundary/clean-wheel/live gates — run full matrix incl. `-m live`). Then Task 16 (acceptance audit maps all 17 criteria to evidence). Merge to main. Finally remove this handoff file + agent-prompts/ before the release audit (per note below).
 
 ## Condensed orchestration notes (tasks without prompt files)
 
