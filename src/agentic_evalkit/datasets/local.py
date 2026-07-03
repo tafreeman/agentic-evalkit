@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Final
 
-import yaml  # type: ignore[import-untyped]  # no types-PyYAML in dev deps yet
+import yaml
 from pydantic import JsonValue
 
 from agentic_evalkit.datasets.base import ProviderHealth

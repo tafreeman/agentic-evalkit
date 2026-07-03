@@ -59,6 +59,7 @@ dev = [
   "pytest-cov>=5,<6",
   "pytest-repeat>=0.9,<1",
   "ruff>=0.6,<1",
+  "types-pyyaml>=6,<7",
 ]
 
 [tool.hatch.build.targets.wheel]
