@@ -1,0 +1,76 @@
+name: Publish
+
+# PyPI trusted publishing via GitHub OIDC -- no PyPI API token is stored in
+# this repository or its secrets at any point. Publishing is inert until
+# two things are configured outside this file: (1) a PyPI "pending
+# publisher" (or, after the first manual release, a regular trusted
+# publisher) is registered for this repository/workflow/environment on
+# pypi.org, and (2) a GitHub release is intentionally created. Until both
+# are true, this workflow simply never runs (releases are not created
+# automatically by anything in this repository) or fails at the PyPI
+# upload step with a clear "no matching trusted publisher" error -- it
+# never silently no-ops a real release intent.
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A real release upload must never be cancelled mid-flight by a second
+  # trigger; unlike ci.yml and live-provider.yml, this workflow does not
+  # cancel in progress.
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build and verify distribution artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.13"
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Verify built artifacts
+        run: |
+          test -n "$(find dist -maxdepth 1 -name '*.tar.gz')"
+          test -n "$(find dist -maxdepth 1 -name '*.whl')"
+          uvx twine check dist/*
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted-publishing environment: configure this environment's
+    # protection rules (e.g. required reviewers) on GitHub, and register
+    # this exact repository + workflow filename + environment name as a
+    # trusted publisher on the PyPI project page. No PyPI token is
+    # referenced here or stored as a repository/environment secret --
+    # `id-token: write` is the entire authentication mechanism.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/agentic-evalkit
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

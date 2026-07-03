@@ -6,6 +6,7 @@ build/
 .ruff_cache/
 .coverage
 htmlcov/
+site/
 __pycache__/
 *.py[cod]
 .env

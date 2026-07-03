@@ -1,0 +1,3 @@
+{"id": "q0", "question": "What is the capital of France?", "expected_answer": "Paris"}
+{"id": "q1", "question": "What is 2 + 2?", "expected_answer": "4"}
+{"id": "q2", "question": "What color is the sky on a clear day?", "expected_answer": "blue"}

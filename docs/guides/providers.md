@@ -1,0 +1,136 @@
+# Providers
+
+`agentic-evalkit` ships two dataset providers in the base install: `local`
+(files already on disk) and `huggingface` (Hub search plus Dataset Viewer
+integration). Both implement the same async `DatasetProvider` protocol
+(`search`, `resolve`, `preview`, `iter_records`, `healthcheck`), so a
+Python caller and the CLI use identical code paths.
+
+## Local files
+
+The `local` provider reads four formats from an allow-listed set of root
+directories:
+
+- **JSON** — a top-level list of objects, or an object containing a
+  `records` list;
+- **JSONL** — one JSON object per nonblank line;
+- **CSV** — parsed with `csv.DictReader` (header row required);
+- **YAML** — a list of objects, parsed with `yaml.safe_load`.
+
+Every row is validated as a JSON object and assigned a zero-based string
+row ID plus a canonical-JSON SHA-256 digest, so the same logical row
+produces the same digest regardless of source format. The dataset
+`revision` is the SHA-256 of the raw file bytes — any byte-level change to
+the source file is a different, immutable revision.
+
+Inspect a local file:
+
+```bash
+agentic-evalkit datasets inspect local:./my-dataset.jsonl
+agentic-evalkit datasets preview local:./my-dataset.jsonl --limit 3
+```
+
+Local roots are not recursively indexed — `search` against the `local`
+provider always returns an empty page. Point commands at the exact file
+path you want to use.
+
+## Hugging Face
+
+The `huggingface` provider combines `huggingface_hub.HfApi` (search and
+immutable revision metadata) with the Hugging Face Dataset Viewer HTTP API
+(validity, splits, schema, rows, pagination, size, statistics, and Parquet
+metadata). It never imports `datasets` or `pyarrow`, and it never sets
+`trust_remote_code=True` — a dataset that requires remote code to load
+raises a typed `UnsafeCodeRequired` error instead of executing uploaded
+code on your machine.
+
+Search and inspect any public dataset with no authentication required:
+
+```bash
+agentic-evalkit datasets search "coding agents" --provider huggingface
+agentic-evalkit datasets inspect hf:princeton-nlp/SWE-bench_Verified
+agentic-evalkit datasets preview hf:openai/gsm8k --config main --split test --limit 3
+```
+
+### Authentication for private and gated datasets
+
+Public dataset access needs no credentials. For private or gated datasets,
+the provider honors the standard Hugging Face credential resolution order:
+the `HF_TOKEN` environment variable, or a token stored via `huggingface-cli
+login` / `huggingface_hub.login()`. No `agentic-evalkit`-specific
+credential configuration is needed — set `HF_TOKEN` before invoking the
+CLI or constructing `HuggingFaceDatasetProvider` in Python, and access
+follows the Hub's usual authorization rules.
+
+### What `resolve()` guarantees
+
+Resolution is immutable: once `resolve()` returns a `ResolvedDataset`, its
+commit SHA, config, split, schema metadata, license, citation, and
+gated-access flags are pinned for the lifetime of that object. `resolve()`
+treats validity, dataset info, and splits as load-bearing — a failure on
+any of them fails the whole resolution with a typed error
+(`DatasetNotFound`, `DatasetAccessDenied`, `DatasetConfigRequired`, and so
+on). Size, statistics, and Parquet metadata are best-effort: many valid
+datasets legitimately lack statistics or a Parquet conversion, so a
+failure there is recorded as an explicit absence in the resolved metadata
+rather than failing the whole resolve.
+
+### Cache and `--offline` mode
+
+Every provider call goes through a content-addressed cache keyed by
+provider, canonical dataset ID, immutable revision, config, split, and
+page offset/limit. Two distinct cache record types exist: full-dataset
+entries and page entries. Every cache entry has a manifest and checksum;
+corruption is a typed `DatasetIntegrityError`, distinct from a plain
+cache miss.
+
+```bash
+agentic-evalkit datasets pull hf:openai/gsm8k --config main --split test --limit 100
+agentic-evalkit datasets preview hf:openai/gsm8k --config main --split test --offline
+```
+
+`pull` records an immutable cache entry at the resolved revision — it is a
+snapshot, not a "keep this dataset up to date" operation. `--offline`
+serves only exact previously-cached pages and never contacts a provider;
+requesting an uncached page while offline raises `OfflineCacheMiss` rather
+than silently returning nothing or falling back to the network.
+
+The cache lives in the platform user-cache directory by default (honoring
+`AGENTIC_EVALKIT_CACHE_DIR` as an override, then `%LOCALAPPDATA%` on
+Windows or `$XDG_CACHE_HOME`/`~/.cache` elsewhere).
+
+### The `parquet` extra
+
+For datasets or workflows where the Dataset Viewer's row-by-row pagination
+is insufficient — for example, bulk local processing of an entire split —
+install the `parquet` extra:
+
+```bash
+pip install 'agentic-evalkit[parquet]'
+```
+
+This is the explicit, opt-in fallback for the (uncommon) case where
+Dataset Viewer/Hub paths alone cannot serve what you need; it does not
+change any provider contract, and the base `huggingface` provider works
+without it for every curated preset in this release.
+
+## Writing a provider plugin
+
+Third-party providers register through the versioned Python entry-point
+group `agentic_evalkit.providers.v1`. A plugin object must expose
+`api_version = "1"`; `load_plugins()` verifies this at discovery time and
+raises a typed `PluginCompatibilityError` — naming the entry point and the
+original exception class — on a version mismatch, an import failure, or a
+duplicate plugin name. Plugin failures are always reported, never silently
+skipped, and a plugin cannot silently replace a built-in provider name
+(`local` or `huggingface`) — that also raises `PluginCompatibilityError`.
+
+```toml
+# pyproject.toml of a third-party plugin package
+[project.entry-points."agentic_evalkit.providers.v1"]
+my-provider = "my_package.providers:my_provider_instance"
+```
+
+See [ADR-0003](../adr/0003-provider-plugins-and-hugging-face-baseline.md)
+and [ADR-0009](../adr/0009-optional-dependencies-and-plugins.md) for the
+full plugin compatibility policy.

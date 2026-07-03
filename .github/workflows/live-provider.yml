@@ -1,0 +1,49 @@
+name: Live provider
+
+# Weekly scheduled evidence that the real Hugging Face Hub / Dataset Viewer
+# path still works for both verified presets (openai/gsm8k and
+# princeton-nlp/SWE-bench_Verified), plus an on-demand trigger for use
+# before a release. This is the *only* place in CI that exercises the real
+# network path (design §14: "Mocks prove local behavior but not live
+# source integration"). It never converts a provider outage into a
+# passing run and never retries indefinitely -- Task 6's bounded backoff
+# inside HuggingFaceDatasetProvider already governs in-request retries; a
+# genuine, still-failing outage after those bounded retries fails this
+# workflow visibly so it shows up as a real signal, not a silently
+# swallowed one.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every Monday at 09:00 UTC.
+    - cron: "0 9 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  live-provider:
+    name: live Hugging Face provider evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.13"
+
+      - name: Sync locked environment
+        run: uv sync --all-groups --locked
+
+      # Deliberately the *only* command this workflow runs: no retry loop,
+      # no "continue-on-error", no step that would convert a real,
+      # classified provider failure into a green run. A transient outage
+      # fails this job visibly; see docs/release/v0.1-checkpoint.md and
+      # design §14/§17 for how a classified outage at release time is
+      # handled (a documented known issue backed by the latest prior
+      # successful run of this workflow), which is a release-time policy,
+      # not something this workflow itself implements.
+      - name: Live Hugging Face provider tests
+        run: uv run pytest tests/live/test_huggingface_live.py -m live -v

@@ -57,6 +57,59 @@ task-by-task test-first workflow this project follows.
 This package must never import ARP, `agentic-tools`, or ExecutionKit modules
 — see ADR-0001. Do not add such imports in a pull request; integrations with
 those systems go through the public `ExecutionTarget` protocol instead.
+`tests/contract/test_dependency_boundary.py` enforces this with a static AST
+scan of `src/agentic_evalkit`, and `tests/contract/test_public_docs.py`
+separately scans every user-facing document, example, and CLI `--help`
+snapshot for the same internal codenames (`agentic_v2`, `agentic-v2-eval`,
+`tools.agents`, `executionkit`) so they cannot leak into README, guides, or
+examples even though this package never imports the modules they name.
+
+### Coexistence with legacy evaluation code
+
+`agentic-evalkit` separates datasets, grading, and reporting from the system
+under test through callable/subprocess/HTTP targets, and objective checks
+gate before judges. Legacy evaluation code may remain in host repositories
+that adopt this package — this package neither imports nor migrates it;
+integration happens only through the public `ExecutionTarget` protocol.
+
+## Documentation
+
+Documentation lives under `docs/` and builds with
+[MkDocs Material](https://squidfunk.github.io/mkdocs-material/) in strict
+mode:
+
+```bash
+uv run mkdocs build --strict
+uv run mkdocs serve   # live-reloading local preview
+```
+
+`mkdocs.yml` excludes in-progress planning scaffolding
+(`docs/plans/agent-prompts/`, `docs/plans/execution-handoff.md`, plan
+review/modification records, and `docs/release/`) from the published site
+via `exclude_docs`; everything else under `docs/` — the design, the
+implementation plan, all nine ADRs, and the guides — is part of the
+published site and must build without strict-mode warnings.
+
+## Release gates
+
+Beyond the offline verification matrix above, a release additionally
+requires (see `docs/plans/2026-07-02-agentic-evalkit-initial-release.md`,
+Task 15):
+
+```bash
+uv run pytest tests/contract/test_dependency_boundary.py tests/contract/test_adrs.py tests/contract/test_public_docs.py -v
+uv run mkdocs build --strict
+uv run pytest tests/integration/test_clean_wheel.py -v   # slow: builds a real wheel + venv
+uv run pytest tests/live/test_huggingface_live.py -m live -v   # requires network access
+```
+
+The clean-wheel test builds the wheel, installs *only* the wheel into a
+temporary virtual environment outside the repository, and confirms the CLI
+and Python import work with no host repository on `sys.path`. The live
+Hugging Face test is also run on a weekly schedule and on demand via
+`.github/workflows/live-provider.yml`; a classified transient outage there
+is a known issue to document, not something to silently retry into a false
+pass.
 
 ## Commit and pull request workflow
 

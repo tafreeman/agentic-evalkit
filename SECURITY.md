@@ -22,6 +22,15 @@ systems evaluated *through* `agentic-evalkit` (targets under test, such as
 ARP or ExecutionKit deployments) are out of scope for this repository and
 should be reported to the maintainers of those systems.
 
+`agentic-evalkit` separates datasets, grading, and reporting from the
+system under test through callable/subprocess/HTTP targets; it never
+imports ARP, `agentic-tools`, or ExecutionKit internals (see
+[ADR-0001](docs/adr/0001-standalone-boundary.md)). Legacy evaluation code
+that remains in a host repository is likewise out of scope here — this
+package neither imports nor migrates it, so a vulnerability in that
+legacy code should be reported to the host repository's own security
+policy, not this one.
+
 ## Supported Versions
 
 Security fixes are made against the latest released minor version. Older

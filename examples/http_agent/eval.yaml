@@ -1,0 +1,33 @@
+# Illustrative manifest for the http_agent example.
+#
+# This shows the CLI manifest shape for an HTTP target with a named
+# credential hook (docs/guides/targets.md, docs/guides/http-agent-example.md).
+# It is not run directly with `agentic-evalkit run` in this example because
+# `agent` and `agent-response-schema@1` are a custom adapter/grader pair
+# constructed in Python by run_example.py, not one of this CLI release's
+# built-in preset names -- see README.md's "Running via the CLI" section.
+#
+# To use this shape for real: point `target.url` at your deployed agent
+# endpoint, set `target.credential_hook` to the environment variable name
+# that holds your API token, and use one of the curated presets
+# (`gsm8k`/`swe-bench-verified`) as `adapter`/`grader`, or run the
+# equivalent Python-API setup shown in run_example.py for a custom
+# adapter/grader pair like this example's.
+schema_version: "1"
+run_name: http-agent-example
+dataset:
+  provider: local
+  dataset_id: questions.jsonl
+adapter: http-agent-questions@1
+grader: agent-response-schema@1
+target:
+  kind: http
+  url: http://127.0.0.1:8765
+  credential_hook: HTTP_AGENT_EXAMPLE_TOKEN
+selection:
+  offset: 0
+  limit: 3
+attempts: 1
+timeout_seconds: 60.0
+concurrency: 1
+artifact_policy: {}
