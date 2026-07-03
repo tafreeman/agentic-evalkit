@@ -91,10 +91,11 @@ async def _check_huggingface_health() -> DoctorCheck:
             remediation="Check network connectivity, or run with --offline.",
         )
     if health.status == "ok":
+        latency = "n/a" if health.latency_ms is None else f"{health.latency_ms:.1f}"
         return DoctorCheck(
             name="huggingface_health",
             status="ok",
-            detail=f"Dataset Viewer reachable (latency={health.latency_ms}ms)",
+            detail=f"Dataset Viewer reachable (latency={latency}ms)",
         )
     return DoctorCheck(
         name="huggingface_health",

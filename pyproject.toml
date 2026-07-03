@@ -66,7 +66,7 @@ dev = [
 packages = ["src/agentic_evalkit"]
 
 [tool.pytest.ini_options]
-addopts = "--strict-config --strict-markers"
+addopts = "--strict-config --strict-markers -m 'not live'"
 asyncio_mode = "auto"
 markers = [
   "integration: component integration tests",
