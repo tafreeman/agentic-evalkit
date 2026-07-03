@@ -10,9 +10,8 @@ docs_dir: docs
 # syntax) so `mkdocs build --strict` succeeds and no draft/internal content
 # is published alongside the accepted design, plan, ADRs, and guides.
 exclude_docs: |
-  plans/agent-prompts/
-  plans/execution-handoff.md
   plans/*plan-modifications*
+  plans/README.md
   release/
 
 theme:
