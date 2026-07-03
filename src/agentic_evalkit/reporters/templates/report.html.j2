@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Evaluation Run {{ run.run_id }}</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --pass: #1a7f37;
+    --fail: #cf222e;
+    --partial: #9a6700;
+    --error: #cf222e;
+    --timeout: #9a6700;
+    --cancelled: #57606a;
+    --abstain: #57606a;
+    --unavailable: #57606a;
+    --border: #d0d7de;
+  }
+  body {
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    margin: 2rem;
+    line-height: 1.5;
+    color: #1f2328;
+  }
+  h1, h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  .meta-grid {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.25rem 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .meta-grid dt { font-weight: 600; }
+  .counts { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem; }
+  .count-chip {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.9rem;
+  }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: rgba(130, 130, 130, 0.08); }
+  .status-pass { color: var(--pass); font-weight: 600; }
+  .status-fail { color: var(--fail); font-weight: 600; }
+  .status-partial { color: var(--partial); font-weight: 600; }
+  .status-error { color: var(--error); font-weight: 600; }
+  .status-timeout { color: var(--timeout); font-weight: 600; }
+  .status-cancelled { color: var(--cancelled); font-weight: 600; }
+  .status-abstain { color: var(--abstain); font-weight: 600; }
+  .status-unavailable { color: var(--unavailable); font-weight: 600; }
+  .filter-bar { margin-bottom: 1rem; }
+  .filter-button {
+    border: 1px solid var(--border);
+    background: transparent;
+    border-radius: 4px;
+    padding: 0.3rem 0.6rem;
+    margin-right: 0.4rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .filter-button[aria-pressed="true"] { background: rgba(130, 130, 130, 0.18); }
+  tr[data-outcome].is-hidden { display: none; }
+  pre.evidence { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.85rem; }
+  noscript p { font-style: italic; }
+  #embedded-run-data { display: none; }
+</style>
+</head>
+<body>
+<h1>Evaluation Run {{ run.run_id }}</h1>
+
+<noscript>
+  <p>
+    JavaScript is disabled: showing the full, unfiltered sample table below.
+    Summary — total {{ run.summary.total }}, passed {{ run.summary.passed }},
+    failed {{ run.summary.failed }}, partial {{ run.summary.partial }},
+    errors {{ run.summary.errors }}, timeouts {{ run.summary.timeouts }},
+    cancelled {{ run.summary.cancelled }}, abstained {{ run.summary.abstained }},
+    unavailable {{ run.summary.unavailable }}.
+  </p>
+</noscript>
+
+<dl class="meta-grid">
+  <dt>Run name</dt><dd>{{ run.manifest.run_name }}</dd>
+  <dt>Generated at</dt><dd>{{ generated_at }}</dd>
+  <dt>Started at</dt><dd>{{ run.started_at }}</dd>
+  <dt>Finished at</dt><dd>{{ run.finished_at or "unfinished" }}</dd>
+  <dt>Dataset</dt><dd>{{ run.resolved_dataset.dataset_id }} @ {{ run.resolved_dataset.revision }}</dd>
+  <dt>Config / split</dt><dd>{{ run.resolved_dataset.config }} / {{ run.resolved_dataset.split }}</dd>
+  <dt>Adapter</dt><dd>{{ run.manifest.adapter }}</dd>
+  <dt>Grader</dt><dd>{{ run.manifest.grader }}</dd>
+  <dt>Target</dt><dd>{{ run.manifest.target_name }}</dd>
+  <dt>Environment fingerprint</dt><dd>{{ run.manifest.environment_fingerprint }}</dd>
+  <dt>Code fingerprint</dt><dd>{{ run.manifest.code_fingerprint }}</dd>
+</dl>
+
+<h2>Outcome counts</h2>
+<div class="counts">
+  <span class="count-chip">Passed: {{ run.summary.passed }}/{{ run.summary.total }}</span>
+  <span class="count-chip">Failed: {{ run.summary.failed }}/{{ run.summary.total }}</span>
+  <span class="count-chip">Partial: {{ run.summary.partial }}/{{ run.summary.total }}</span>
+  <span class="count-chip">Errors: {{ run.summary.errors }}/{{ run.summary.total }}</span>
+  <span class="count-chip">Timeouts: {{ run.summary.timeouts }}/{{ run.summary.total }}</span>
+  <span class="count-chip">Cancelled: {{ run.summary.cancelled }}/{{ run.summary.total }}</span>
+  <span class="count-chip">Abstained: {{ run.summary.abstained }}/{{ run.summary.total }}</span>
+  <span class="count-chip">Unavailable: {{ run.summary.unavailable }}/{{ run.summary.total }}</span>
+</div>
+
+<h2>Samples</h2>
+<div class="filter-bar" id="filter-bar">
+  <button type="button" class="filter-button" data-filter="all" aria-pressed="true">All</button>
+  <button type="button" class="filter-button" data-filter="pass" aria-pressed="false">Pass</button>
+  <button type="button" class="filter-button" data-filter="fail" aria-pressed="false">Fail</button>
+  <button type="button" class="filter-button" data-filter="partial" aria-pressed="false">Partial</button>
+  <button type="button" class="filter-button" data-filter="error" aria-pressed="false">Error</button>
+  <button type="button" class="filter-button" data-filter="timeout" aria-pressed="false">Timeout</button>
+  <button type="button" class="filter-button" data-filter="cancelled" aria-pressed="false">Cancelled</button>
+  <button type="button" class="filter-button" data-filter="abstain" aria-pressed="false">Abstain</button>
+  <button type="button" class="filter-button" data-filter="unavailable" aria-pressed="false">Unavailable</button>
+</div>
+
+<table id="sample-table">
+  <thead>
+    <tr>
+      <th>Sample</th>
+      <th>Execution</th>
+      <th>Outcome</th>
+      <th>Score</th>
+      <th>Output</th>
+      <th>Evidence</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in sample_rows %}
+    <tr data-outcome="{{ row.outcome }}">
+      <td><code>{{ row.sample_id }}</code></td>
+      <td>{{ row.execution_status }}</td>
+      <td class="status-{{ row.outcome }}">{{ row.outcome }}</td>
+      <td>{{ row.score if row.score is not none else "-" }}</td>
+      <td><pre class="evidence">{{ row.output_text }}</pre></td>
+      <td><pre class="evidence">{{ row.evidence_json }}</pre></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<script id="embedded-run-data" type="application/json">{{ run_json | safe }}</script>
+<script>
+(function () {
+  "use strict";
+  var buttons = document.querySelectorAll(".filter-button");
+  var rows = document.querySelectorAll("#sample-table tbody tr");
+  function applyFilter(outcome) {
+    rows.forEach(function (row) {
+      var matches = outcome === "all" || row.getAttribute("data-outcome") === outcome;
+      row.classList.toggle("is-hidden", !matches);
+    });
+    buttons.forEach(function (button) {
+      button.setAttribute("aria-pressed", String(button.getAttribute("data-filter") === outcome));
+    });
+  }
+  buttons.forEach(function (button) {
+    button.addEventListener("click", function () {
+      applyFilter(button.getAttribute("data-filter"));
+    });
+  });
+})();
+</script>
+</body>
+</html>
