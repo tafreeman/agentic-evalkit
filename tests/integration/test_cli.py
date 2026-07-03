@@ -1,31 +1,44 @@
 """Integration tests for the runnable objective-only CLI (plan Task 14, Steps 1-7).
 
-The first two tests below are copied verbatim from
-``docs/plans/2026-07-02-agentic-evalkit-initial-release.md`` (Task 14, Step 1).
-Everything else in this module is additional coverage for the ``doctor``,
-``datasets``, ``init``/``validate``, and ``run`` commands built in Steps 5-7,
-plus the exit-code policy from Step 4.
+The first two tests below originate verbatim from
+``docs/plans/2026-07-02-agentic-evalkit-initial-release.md`` (Task 14, Step 1);
+the second has since gained a ``live`` marker and cache isolation per the
+2026-07-03 test-quality review. Everything else in this module is additional
+coverage for the ``doctor``, ``datasets``, ``init``/``validate``, and ``run``
+commands built in Steps 5-7, plus the exit-code policy from Step 4.
 
-``test_provider_failure_has_nonzero_exit_and_error_code`` legitimately hits
-the real Hugging Face Dataset Viewer. The Viewer returns HTTP 401 (not 404)
-for anonymous requests to any nonexistent dataset -- deliberate
-anti-enumeration so private-dataset existence cannot be probed -- which the
-provider correctly maps to ``dataset_access_denied`` (ADR-0003 / Task 6). The
-test therefore asserts the exit code (4, provider error) plus that a stable
-provider error code is surfaced, not a specific one. This module is not marked
-``live``; it relies on one specific, stable negative-path HTTP response.
+``test_provider_failure_has_nonzero_exit_and_error_code`` and
+``test_datasets_search_supports_json_format`` contact the real Hugging Face
+Hub, so both are marked ``live`` (deselected by default via pyproject's
+``-m 'not live'``) and pin their catalog cache to ``tmp_path`` through
+``AGENTIC_EVALKIT_CACHE_DIR`` so no suite run ever writes to the real user
+cache. The Dataset Viewer returns HTTP 401 (not 404) for anonymous requests
+to any nonexistent dataset -- deliberate anti-enumeration so private-dataset
+existence cannot be probed -- which the provider correctly maps to
+``dataset_access_denied`` (ADR-0003 / Task 6); the live inspect test
+therefore asserts the exit code (4, provider error) plus that a stable
+provider error code is surfaced, not a specific one. Each live test has a
+hermetic twin driven by ``_CannedHubProvider`` so the default suite still
+pins the provider-error exit-code contract and the search JSON shape without
+any network access.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from agentic_evalkit.cli import app
+from agentic_evalkit.cli import datasets as cli_datasets
 from agentic_evalkit.cli.runs import write_canonical_report
+from agentic_evalkit.datasets.base import ProviderHealth
+from agentic_evalkit.datasets.catalog import DatasetCatalog
+from agentic_evalkit.errors import DatasetNotFound
 from agentic_evalkit.models import (
     DatasetRef,
     EvalRunManifest,
@@ -37,8 +50,12 @@ from agentic_evalkit.models import (
     NormalizedExecutionResult,
     ResolvedDataset,
     RunSummary,
+    SamplePage,
     SampleResult,
     SamplingPolicy,
+    SearchHit,
+    SearchPage,
+    SourceRecord,
 )
 from agentic_evalkit.reporters.json import JsonReporter
 
@@ -135,13 +152,86 @@ def test_curated_and_init_work_without_manual_import(tmp_path) -> None:  # type:
     assert "valid" in validated.stdout.lower()
 
 
-def test_provider_failure_has_nonzero_exit_and_error_code() -> None:
-    result = runner.invoke(app, ["datasets", "inspect", "hf:missing/not-found"])
+@pytest.mark.live
+def test_provider_failure_has_nonzero_exit_and_error_code(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["datasets", "inspect", "hf:missing/not-found"],
+        env={"AGENTIC_EVALKIT_CACHE_DIR": str(tmp_path)},
+    )
     assert result.exit_code == 4
     # HF returns 401 (anti-enumeration) rather than 404 for a nonexistent
     # dataset, which maps to dataset_access_denied; either provider error code
     # is a correct, stable, nonzero-exit outcome for an unresolvable dataset.
     assert ("dataset_access_denied" in result.stdout) or ("dataset_not_found" in result.stdout)
+
+
+# --- Hermetic twins of the live provider tests ------------------------------
+
+
+class _CannedHubProvider:
+    """Hermetic stand-in for the Hugging Face provider (no network, no cache).
+
+    ``search`` returns one canned hit and ``resolve`` raises
+    :class:`DatasetNotFound`, so the default (``not live``) suite keeps the
+    provider-error exit-code contract and the search JSON shape pinned while
+    the real-Hub versions of these tests run only under ``-m live``.
+    """
+
+    api_version = "1"
+
+    async def search(
+        self,
+        query: str,
+        *,
+        filters: Mapping[str, str] | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> SearchPage:
+        return SearchPage(
+            hits=(SearchHit(dataset_id="openai/gsm8k", provider="huggingface"),),
+            cursor=None,
+            total_hits=1,
+        )
+
+    async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
+        raise DatasetNotFound(
+            message=f"dataset {ref.dataset_id!r} does not exist",
+            context={"dataset_id": ref.dataset_id},
+        )
+
+    async def preview(
+        self, dataset: ResolvedDataset, *, offset: int = 0, limit: int = 10
+    ) -> SamplePage:
+        raise NotImplementedError
+
+    def iter_records(
+        self, dataset: ResolvedDataset, *, offset: int = 0, limit: int | None = None
+    ) -> AsyncIterator[SourceRecord]:
+        raise NotImplementedError
+
+    async def healthcheck(self) -> ProviderHealth:
+        return ProviderHealth(status="ok")
+
+
+def _canned_hub_catalog() -> DatasetCatalog:
+    # No cache is wired in: search/resolve never touch it, so the twins
+    # cannot write anywhere. builtin_provider_names=() mirrors build_catalog,
+    # which registers its own "huggingface" without tripping the plugin
+    # collision guard.
+    return DatasetCatalog(
+        providers={"huggingface": _CannedHubProvider()}, builtin_provider_names=()
+    )
+
+
+def test_provider_failure_exit_code_contract_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _canned_hub_catalog()
+    monkeypatch.setattr(cli_datasets, "build_catalog", lambda *, offline: catalog)
+    result = runner.invoke(app, ["datasets", "inspect", "hf:missing/not-found"])
+    assert result.exit_code == 4
+    assert "dataset_not_found" in result.stdout
 
 
 # --- Additional coverage (plan Task 14, Steps 5-7) --------------------------
@@ -248,7 +338,22 @@ def test_run_missing_manifest_file_is_invalid_input(tmp_path: Path) -> None:
     assert result.exit_code == 2
 
 
-def test_datasets_search_supports_json_format() -> None:
+@pytest.mark.live
+def test_datasets_search_supports_json_format(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["datasets", "search", "gsm8k", "--provider", "huggingface", "--format", "json"],
+        env={"AGENTIC_EVALKIT_CACHE_DIR": str(tmp_path)},
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert isinstance(payload, dict)
+    assert "hits" in payload
+
+
+def test_datasets_search_json_shape_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    catalog = _canned_hub_catalog()
+    monkeypatch.setattr(cli_datasets, "build_catalog", lambda *, offline: catalog)
     result = runner.invoke(
         app,
         ["datasets", "search", "gsm8k", "--provider", "huggingface", "--format", "json"],
@@ -256,7 +361,8 @@ def test_datasets_search_supports_json_format() -> None:
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert isinstance(payload, dict)
-    assert "hits" in payload
+    assert payload["hits"][0]["dataset_id"] == "openai/gsm8k"
+    assert payload["total_hits"] == 1
 
 
 # --- compare (plan Task 14 Step 10) -----------------------------------------

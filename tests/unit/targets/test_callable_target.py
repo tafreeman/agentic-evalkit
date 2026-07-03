@@ -99,7 +99,11 @@ async def test_callable_target_times_out_long_running_callable() -> None:
     import time
 
     def slow(value: dict[str, object]) -> dict[str, object]:
-        time.sleep(5)
+        # 1.0s is 20x the 0.05s timeout -- ample to prove the timeout maps to
+        # ExecutionStatus.TIMEOUT -- while keeping the uncancellable
+        # to_thread sleep (which outlives the test and is awaited at
+        # event-loop shutdown) short.
+        time.sleep(1.0)
         return {"answer": "too-late"}
 
     target = CallableTarget(slow, name="slow")

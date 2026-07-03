@@ -163,16 +163,28 @@ class _ExactFixtureGrader:
         )
 
 
+#: Keeps each no-arg ``_artifact_store`` ``TemporaryDirectory`` alive for the
+#: whole session; its exit finalizer then removes it, unlike a bare
+#: ``mkdtemp()``, which left one orphaned OS temp directory per session.
+_NO_ARG_STORE_DIRS: list[tempfile.TemporaryDirectory[str]] = []
+
+
 def _artifact_store(root: Path | None = None) -> ArtifactStore:
     """Build an isolated ``ArtifactStore``.
 
     The plan's verbatim test calls this with no arguments, so ``root``
     defaults to a fresh OS temp directory (never the repo's working
-    directory or a shared path) rather than requiring a pytest fixture.
-    Other tests in this module pass pytest's ``tmp_path`` explicitly to get
-    a directory that is cleaned up by pytest itself.
+    directory or a shared path) rather than requiring a pytest fixture; the
+    directory is registered in ``_NO_ARG_STORE_DIRS`` so it outlives the
+    test but is still deleted at interpreter exit. Other tests in this
+    module pass pytest's ``tmp_path`` explicitly to get a directory that is
+    cleaned up by pytest itself.
     """
-    return ArtifactStore(root if root is not None else Path(tempfile.mkdtemp()))
+    if root is None:
+        temp_dir = tempfile.TemporaryDirectory(prefix="evalkit-artifact-store-")
+        _NO_ARG_STORE_DIRS.append(temp_dir)
+        root = Path(temp_dir.name)
+    return ArtifactStore(root)
 
 
 def _records(count: int) -> tuple[SourceRecord, ...]:
