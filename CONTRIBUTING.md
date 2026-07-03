@@ -83,10 +83,9 @@ uv run mkdocs build --strict
 uv run mkdocs serve   # live-reloading local preview
 ```
 
-`mkdocs.yml` excludes in-progress planning scaffolding
-(`docs/plans/agent-prompts/`, `docs/plans/execution-handoff.md`, plan
-review/modification records, and `docs/release/`) from the published site
-via `exclude_docs`; everything else under `docs/` — the design, the
+`mkdocs.yml` excludes internal process records (plan review/modification
+records, `docs/plans/README.md`, and `docs/release/`) from the published
+site via `exclude_docs`; everything else under `docs/` — the design, the
 implementation plan, all nine ADRs, and the guides — is part of the
 published site and must build without strict-mode warnings.
 
@@ -110,6 +109,12 @@ Hugging Face test is also run on a weekly schedule and on demand via
 `.github/workflows/live-provider.yml`; a classified transient outage there
 is a known issue to document, not something to silently retry into a false
 pass.
+
+The offline release gates can also be run on demand in CI via the manually
+triggered `.github/workflows/release-gates.yml` workflow, or locally in one
+pass with `.claude/skills/release-gate/scripts/run-gates.sh` (the live
+Hugging Face gate stays in `live-provider.yml`, the only workflow that
+exercises the real network path).
 
 ## Commit and pull request workflow
 
