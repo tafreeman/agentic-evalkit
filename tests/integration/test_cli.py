@@ -25,6 +25,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from agentic_evalkit.cli import app
+from agentic_evalkit.cli.runs import write_canonical_report
 from agentic_evalkit.models import (
     DatasetRef,
     EvalRunManifest,
@@ -378,6 +379,42 @@ def test_report_regenerates_self_contained_html(tmp_path: Path) -> None:
     # self-contained: no remote script/style/font references
     assert "http://" not in content
     assert "https://" not in content
+
+
+def _with_leaky_evidence(run: EvalRunResult, value: str) -> EvalRunResult:
+    """Copy ``run`` with a credential-shaped string planted in one grade's evidence."""
+    first = run.samples[0]
+    assert first.grade is not None
+    grade = first.grade.model_copy(update={"evidence": {"note": value}})
+    sample = first.model_copy(update={"grade": grade})
+    return run.model_copy(update={"samples": (sample, *run.samples[1:])})
+
+
+def test_report_applies_default_redaction_to_regenerated_output(tmp_path: Path) -> None:
+    leaky = _with_leaky_evidence(
+        _run_result(run_id="run-a"),
+        "captured header Authorization: Bearer hf_AbCdEf0123456789XYZq",
+    )
+    source = _write_run(tmp_path, "run", leaky)
+    assert "hf_AbCdEf0123456789XYZq" in source.read_text(encoding="utf-8")
+
+    destination = tmp_path / "out.jsonl"
+    result = runner.invoke(
+        app, ["report", str(source), "--format", "jsonl", "--output", str(destination)]
+    )
+    assert result.exit_code == 0, result.stdout
+    regenerated = destination.read_text(encoding="utf-8")
+    assert "hf_AbCdEf0123456789XYZq" not in regenerated
+    assert "[REDACTED]" in regenerated
+
+
+def test_run_canonical_json_is_redacted_before_reaching_disk(tmp_path: Path) -> None:
+    leaky = _with_leaky_evidence(_run_result(run_id="run-a"), "token=sk-live_abcDEF0123456789")
+    written = write_canonical_report(leaky, tmp_path)
+    assert written == tmp_path / "run-a.json"
+    text = written.read_text(encoding="utf-8")
+    assert "sk-live_abcDEF0123456789" not in text
+    assert "[REDACTED]" in text
 
 
 def test_report_missing_run_file_is_invalid_input(tmp_path: Path) -> None:

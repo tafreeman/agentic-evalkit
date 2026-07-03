@@ -28,7 +28,7 @@ import typer
 from agentic_evalkit.cli.app import app, console, print_output, run_cli_command, safe_text
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.models import EvalRunResult
-from agentic_evalkit.reporters.base import Reporter
+from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, Reporter, apply_redaction
 from agentic_evalkit.reporters.html import HtmlReporter
 from agentic_evalkit.reporters.jsonl import JsonlReporter
 from agentic_evalkit.reporters.markdown import MarkdownReporter
@@ -206,7 +206,13 @@ def report(
     ] = None,
     debug: Annotated[bool, typer.Option("--debug", help="Show full tracebacks on error.")] = False,
 ) -> None:
-    """Regenerate a JSONL, Markdown, or self-contained HTML report from run JSON."""
+    """Regenerate a JSONL, Markdown, or self-contained HTML report from run JSON.
+
+    The default redaction policy is re-applied before rendering: ``run``
+    already writes redacted canonical JSON, so this is defense in depth for
+    run files produced by older tools or edited by hand -- a credential-shaped
+    evidence value can never reach a regenerated report either way.
+    """
 
     def _action() -> Path:
         if format_ not in _REPORTERS:
@@ -214,7 +220,7 @@ def report(
                 message=(f"unknown report format {format_!r}; choose one of {sorted(_REPORTERS)}"),
                 context={"errors": ({"path": "format", "message": f"unknown format {format_!r}"},)},
             )
-        run = load_run_result(source)
+        run = apply_redaction(load_run_result(source), DEFAULT_REDACTION_POLICY)
         destination = output if output is not None else source.with_suffix(_SUFFIXES[format_])
         return _REPORTERS[format_].write(run, destination)
 

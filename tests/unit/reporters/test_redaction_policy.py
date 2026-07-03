@@ -2,7 +2,7 @@
 
 from conftest import _run_with_pass_error_timeout_and_provenance
 
-from agentic_evalkit.reporters import RedactionPolicy, apply_redaction
+from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY, RedactionPolicy, apply_redaction
 
 
 def test_redaction_removes_configured_evidence_keys() -> None:
@@ -53,3 +53,52 @@ def test_redaction_leaves_samples_without_grades_untouched() -> None:
     redacted = apply_redaction(run, policy)
     assert redacted.samples[1].grade is None
     assert redacted.samples[2].grade is None
+
+
+def test_default_policy_redacts_known_credential_shapes() -> None:
+    run = _run_with_pass_error_timeout_and_provenance()
+    leaking_grade = run.samples[0].grade
+    assert leaking_grade is not None
+    leaking_grade = leaking_grade.model_copy(
+        update={
+            "evidence": {
+                "hf": "hub token hf_AbCdEfGh0123456789 captured in output",
+                "openai": "sk-proj-abcDEF0123456789xy",
+                "header": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload",
+            }
+        }
+    )
+    leaking_sample = run.samples[0].model_copy(update={"grade": leaking_grade})
+    run = run.model_copy(update={"samples": (leaking_sample, *run.samples[1:])})
+
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY)
+    redacted_grade = redacted.samples[0].grade
+    assert redacted_grade is not None
+    rendered = str(redacted_grade.evidence)
+    assert "hf_AbCdEfGh0123456789" not in rendered
+    assert "sk-proj-abcDEF0123456789xy" not in rendered
+    assert "eyJhbGciOiJIUzI1NiJ9" not in rendered
+    assert "[REDACTED]" in rendered
+
+
+def test_default_policy_leaves_benign_evidence_untouched() -> None:
+    # Length guards must keep ordinary prose intact: "task-manager" contains
+    # a literal "sk-", "hf_hub" starts like a token, "the bearer is here" has
+    # a short word after "bearer", and "authorization" as an evidence *key*
+    # is never pattern-scanned (patterns apply to string values only).
+    run = _run_with_pass_error_timeout_and_provenance()
+    benign = {
+        "note": "hf_hub lookup for task-manager passed; the bearer is here",
+        "expected": "42",
+        "authorization": "granted",
+    }
+    grade = run.samples[0].grade
+    assert grade is not None
+    grade = grade.model_copy(update={"evidence": benign})
+    sample = run.samples[0].model_copy(update={"grade": grade})
+    run = run.model_copy(update={"samples": (sample, *run.samples[1:])})
+
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY)
+    redacted_grade = redacted.samples[0].grade
+    assert redacted_grade is not None
+    assert redacted_grade.evidence == benign

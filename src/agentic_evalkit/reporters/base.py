@@ -34,6 +34,24 @@ class RedactionPolicy(FrozenModel):
     secret_patterns: tuple[str, ...] = ()
 
 
+#: Conservative default applied at the CLI report boundaries (``run`` writes
+#: the canonical JSON through it; ``report`` re-applies it before rendering).
+#: Patterns target well-known credential shapes only -- Hugging Face user
+#: tokens, OpenAI-style secret keys, and HTTP bearer/authorization values --
+#: with length guards so ordinary evidence text (words that merely start with
+#: "hf_" or "sk-") is never mangled. Library callers are unaffected: reporters
+#: apply no policy themselves, and callers compose their own via
+#: :func:`apply_redaction`.
+DEFAULT_REDACTION_POLICY = RedactionPolicy(
+    secret_patterns=(
+        r"hf_[A-Za-z0-9]{16,}",
+        r"sk-[A-Za-z0-9_-]{16,}",
+        r"(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,}",
+        r"(?i:authorization)\s*[:=]\s*\S{8,}",
+    ),
+)
+
+
 @runtime_checkable
 class Reporter(Protocol):
     """A pure function from a completed run to a written report file.
@@ -133,4 +151,4 @@ def apply_redaction(run: EvalRunResult, policy: RedactionPolicy) -> EvalRunResul
     return run.model_copy(update={"samples": redacted_samples})
 
 
-__all__ = ["RedactionPolicy", "Reporter", "apply_redaction"]
+__all__ = ["DEFAULT_REDACTION_POLICY", "RedactionPolicy", "Reporter", "apply_redaction"]

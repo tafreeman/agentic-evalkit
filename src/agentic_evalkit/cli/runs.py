@@ -10,7 +10,7 @@ without running anything. ``run`` loads a manifest, resolves its CLI target
 block into a concrete :class:`~agentic_evalkit.targets.base.ExecutionTarget`,
 prints a preflight summary, streams Rich progress from
 :class:`~agentic_evalkit.runner.EvalRunner` events, and writes the canonical
-run JSON report.
+run JSON report with the default redaction policy applied (design §12).
 """
 
 from __future__ import annotations
@@ -49,10 +49,12 @@ from agentic_evalkit.models import (
     DatasetRef,
     DatasetSelection,
     EvalRunManifest,
+    EvalRunResult,
     ResolvedDataset,
     SamplingPolicy,
     SourceRecord,
 )
+from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, apply_redaction
 from agentic_evalkit.reporters.json import JsonReporter
 from agentic_evalkit.runner import EvalRunner
 from agentic_evalkit.targets.base import ExecutionTarget
@@ -60,7 +62,7 @@ from agentic_evalkit.targets.callable import CallableTarget
 from agentic_evalkit.targets.http import HttpTarget
 from agentic_evalkit.targets.subprocess import SubprocessTarget
 
-__all__ = ["build_target_for_document", "init", "run", "validate"]
+__all__ = ["build_target_for_document", "init", "run", "validate", "write_canonical_report"]
 
 
 class _RunnerCatalogAdapter:
@@ -374,10 +376,7 @@ def run(
 
     result = run_cli_command(_action, debug=debug)
 
-    destination_dir = output_dir or _default_output_dir()
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    report_path = destination_dir / f"{result.run_id}.json"
-    JsonReporter().write(result, report_path)
+    report_path = write_canonical_report(result, output_dir or _default_output_dir())
 
     summary = result.summary
     console.print(
@@ -397,6 +396,21 @@ def run(
 
 def _run_stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+
+
+def write_canonical_report(result: EvalRunResult, destination_dir: Path) -> Path:
+    """Write ``result`` as canonical run JSON with the default redaction applied.
+
+    Redaction happens exactly once, here, before the canonical JSON reaches
+    disk (design §12): ``report``/``compare`` and every other consumer then
+    derive from evidence that never contained an unredacted credential.
+    Exposed (like :func:`build_target_for_document`) so tests can verify the
+    redaction boundary without executing a full run.
+    """
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    report_path = destination_dir / f"{result.run_id}.json"
+    JsonReporter().write(apply_redaction(result, DEFAULT_REDACTION_POLICY), report_path)
+    return report_path
 
 
 def build_target_for_document(document: ManifestDocument) -> ExecutionTarget:
