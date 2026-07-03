@@ -1,0 +1,19 @@
+schema_version: "1"
+run_name: gsm8k-smoke
+dataset:
+  provider: huggingface
+  dataset_id: openai/gsm8k
+  config: main
+  split: test
+adapter: gsm8k@1
+grader: normalized-exact@1
+target:
+  kind: callable
+  import_string: agentic_evalkit.examples.zero_target:zero_target
+selection:
+  offset: 0
+  limit: 5
+attempts: 1
+timeout_seconds: 30.0
+concurrency: 1
+artifact_policy: {}
