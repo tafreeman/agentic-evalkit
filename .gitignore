@@ -27,3 +27,8 @@ docs/project-scan-report.json
 .claude/skills/*
 !.claude/skills/release-gate/
 !.claude/skills/write-adr/
+# Generated test/quality reports (TEA output; double space verbatim from _bmad/tea/config.yaml)
+# and example run outputs -- local artifacts, never committed
+coverage  and quality reports/
+examples/http_agent/artifacts/
+examples/http_agent/*.json
