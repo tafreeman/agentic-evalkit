@@ -12,3 +12,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.vscode/
+.sonar/
+external_analysis/
