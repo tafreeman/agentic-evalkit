@@ -13,6 +13,8 @@ exclude_docs: |
   plans/*plan-modifications*
   plans/README.md
   release/
+  codebase/
+  project-scan-report.json
 
 theme:
   name: material
