@@ -1,0 +1,40 @@
+name: Release gates
+
+# On-demand pre-release verification: the offline release gates from
+# CONTRIBUTING.md ("Release gates") as one dispatchable job, so tagging a
+# release never depends on a human remembering to run each command. The
+# live Hugging Face gate deliberately stays out of this workflow --
+# .github/workflows/live-provider.yml remains the only workflow that
+# exercises the real network path (design §14); dispatch it alongside this
+# one before a release.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release-gates:
+    name: offline release gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.13"
+
+      - name: Sync locked environment
+        run: uv sync --all-groups --locked
+
+      - name: Contract gates (dependency boundary, ADRs, public docs)
+        run: uv run pytest tests/contract/test_dependency_boundary.py tests/contract/test_adrs.py tests/contract/test_public_docs.py -v
+
+      - name: Docs gate (strict build)
+        run: uv run mkdocs build --strict
+
+      - name: Clean-wheel gate (isolated install)
+        run: uv run pytest tests/integration/test_clean_wheel.py -v
