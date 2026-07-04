@@ -10,6 +10,7 @@ them into a boolean.
 from datetime import UTC, datetime
 
 import pytest
+from _benchmark_fixtures import _harness_request
 from pydantic import ValidationError
 
 from agentic_evalkit.benchmarks.harness import (
@@ -20,22 +21,6 @@ from agentic_evalkit.benchmarks.harness import (
     UnavailableHarnessExecutor,
 )
 from agentic_evalkit.models import GradeResult, GradeStatus
-
-
-def _harness_request(sample_id: str = "org__repo-1") -> HarnessRequest:
-    return HarnessRequest(
-        benchmark="swebench-verified@1",
-        sample_id=sample_id,
-        prediction={
-            "instance_id": sample_id,
-            "model_name_or_path": "agentic-evalkit-target",
-            "model_patch": "diff --git a/x b/x",
-        },
-        source={"dataset_revision": "abc"},
-        environment={},
-        timeout_seconds=60,
-        resource_limits={"cpus": 1, "memory_mb": 1024},
-    )
 
 
 def test_harness_request_round_trips_through_versioned_json() -> None:

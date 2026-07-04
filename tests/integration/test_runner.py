@@ -137,13 +137,8 @@ class _SequencedTarget:
     async def execute(
         self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
     ) -> NormalizedExecutionResult:
-        index = len(self._results) - len(self._pending())
-        result = self._pending().pop(0)
-        assert index >= 0  # nosec B101 - test-only sequencing guard
+        result = self._results.pop(0)
         return result.model_copy(update={"sample_id": sample.sample_id, "attempt": attempt})
-
-    def _pending(self) -> list[NormalizedExecutionResult]:
-        return self._results
 
 
 class _ExactFixtureGrader:

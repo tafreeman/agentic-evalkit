@@ -29,17 +29,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from _stats_fixtures import _execution, _grade, _sample
 
 from agentic_evalkit.errors import IncompatibleRuns
 from agentic_evalkit.models import (
     DatasetRef,
     EvalRunManifest,
     EvalRunResult,
-    EvalSample,
     ExecutionStatus,
-    GradeResult,
     GradeStatus,
-    NormalizedExecutionResult,
     ResolvedDataset,
     RunSummary,
     SampleResult,
@@ -51,45 +49,13 @@ _STARTED_AT = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
 _FINISHED_AT = datetime(2026, 7, 2, 12, 5, 0, tzinfo=UTC)
 
 
-def _sample(sample_id: str) -> EvalSample:
-    return EvalSample(
-        sample_id=sample_id,
-        input={"question": f"question for {sample_id}"},
-        reference="42",
-        source_digest=f"sha256:{sample_id}",
-        adapter="gsm8k@1",
-    )
-
-
-def _execution(
-    sample_id: str, *, attempt: int, status: ExecutionStatus
-) -> NormalizedExecutionResult:
-    return NormalizedExecutionResult(
-        sample_id=sample_id,
-        attempt=attempt,
-        status=status,
-        started_at=_STARTED_AT,
-        finished_at=_FINISHED_AT,
-    )
-
-
-def _grade(sample_id: str, *, status: GradeStatus) -> GradeResult:
-    return GradeResult(
-        sample_id=sample_id,
-        grader="normalized-exact@1",
-        status=status,
-        score=1.0 if status is GradeStatus.PASS else 0.0,
-        hard_gate=False,
-        created_at=_FINISHED_AT,
-    )
-
-
 def _sample_result(sample_id: str, *, attempt: int, passed: bool) -> SampleResult:
     status = GradeStatus.PASS if passed else GradeStatus.FAIL
+    score = 1.0 if passed else 0.0
     return SampleResult(
         sample=_sample(sample_id),
         execution=_execution(sample_id, attempt=attempt, status=ExecutionStatus.COMPLETED),
-        grade=_grade(sample_id, status=status),
+        grade=_grade(sample_id, status=status, score=score),
     )
 
 

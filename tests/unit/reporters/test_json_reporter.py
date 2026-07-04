@@ -3,13 +3,14 @@
 import json
 from pathlib import Path
 
-from conftest import _run_with_pass_error_timeout_and_provenance
-
+from agentic_evalkit.models import EvalRunResult
 from agentic_evalkit.reporters import JsonReporter
 
 
-def test_json_and_jsonl_retain_sample_evidence(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_json_and_jsonl_retain_sample_evidence(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     json_path = JsonReporter().write(run, tmp_path / "run.json")
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["provenance"]["dataset_revision"] == "abc"
@@ -20,8 +21,10 @@ def test_json_and_jsonl_retain_sample_evidence(tmp_path: Path) -> None:
     }
 
 
-def test_envelope_has_required_top_level_keys(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_envelope_has_required_top_level_keys(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     json_path = JsonReporter().write(run, tmp_path / "run.json")
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert set(payload) == {
@@ -40,8 +43,10 @@ def test_envelope_has_required_top_level_keys(tmp_path: Path) -> None:
     assert payload["schema_version"] == "1"
 
 
-def test_provenance_contains_all_required_fields(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_provenance_contains_all_required_fields(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     json_path = JsonReporter().write(run, tmp_path / "run.json")
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     provenance = payload["provenance"]
@@ -58,8 +63,10 @@ def test_provenance_contains_all_required_fields(tmp_path: Path) -> None:
     }
 
 
-def test_manifest_and_resolved_dataset_are_fully_serialized(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_manifest_and_resolved_dataset_are_fully_serialized(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     json_path = JsonReporter().write(run, tmp_path / "run.json")
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["manifest"]["run_name"] == "gsm8k-smoke"
@@ -72,8 +79,10 @@ def test_manifest_and_resolved_dataset_are_fully_serialized(tmp_path: Path) -> N
     assert payload["summary"]["timeouts"] == 1
 
 
-def test_output_uses_sorted_keys_and_two_space_indent(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_output_uses_sorted_keys_and_two_space_indent(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     json_path = JsonReporter().write(
         run, tmp_path / "run.json", generated_at="2026-07-02T12:05:00+00:00"
     )
@@ -82,8 +91,10 @@ def test_output_uses_sorted_keys_and_two_space_indent(tmp_path: Path) -> None:
     assert content == reparsed
 
 
-def test_generated_at_is_used_verbatim_when_supplied(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_generated_at_is_used_verbatim_when_supplied(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     json_path = JsonReporter().write(
         run, tmp_path / "run.json", generated_at="2026-07-02T12:05:00+00:00"
     )
@@ -91,17 +102,21 @@ def test_generated_at_is_used_verbatim_when_supplied(tmp_path: Path) -> None:
     assert payload["generated_at"] == "2026-07-02T12:05:00+00:00"
 
 
-def test_write_is_atomic_and_leaves_no_temp_file_behind(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_write_is_atomic_and_leaves_no_temp_file_behind(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     destination = tmp_path / "run.json"
     JsonReporter().write(run, destination, generated_at="fixed")
     remaining = {path.name for path in tmp_path.iterdir()}
     assert remaining == {"run.json"}
 
 
-def test_rewrite_replaces_prior_contents(tmp_path: Path) -> None:
+def test_rewrite_replaces_prior_contents(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
     destination = tmp_path / "run.json"
-    first_run = _run_with_pass_error_timeout_and_provenance()
+    first_run = pass_error_timeout_and_provenance_run
     JsonReporter().write(first_run, destination, generated_at="first")
     second_run = first_run.model_copy(update={"run_id": "run-002"})
     JsonReporter().write(second_run, destination, generated_at="second")
@@ -111,9 +126,9 @@ def test_rewrite_replaces_prior_contents(tmp_path: Path) -> None:
 
 
 def test_two_renders_of_the_same_run_are_byte_identical_with_fixed_generated_at(
-    tmp_path: Path,
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
 ) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+    run = pass_error_timeout_and_provenance_run
     first_path = JsonReporter().write(run, tmp_path / "first.json", generated_at="fixed")
     second_path = JsonReporter().write(run, tmp_path / "second.json", generated_at="fixed")
     assert first_path.read_bytes() == second_path.read_bytes()

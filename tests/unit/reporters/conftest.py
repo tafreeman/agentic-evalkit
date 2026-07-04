@@ -7,6 +7,8 @@ reporter is proven against one identical, provenance-carrying run.
 
 from datetime import UTC, datetime
 
+import pytest
+
 from agentic_evalkit.models import (
     DatasetRef,
     DatasetSelection,
@@ -62,7 +64,8 @@ def _grade(sample_id: str) -> GradeResult:
     )
 
 
-def _run_with_pass_error_timeout_and_provenance() -> EvalRunResult:
+@pytest.fixture
+def pass_error_timeout_and_provenance_run() -> EvalRunResult:
     """A frozen three-sample run: one pass, one error, one timeout.
 
     ``resolved_dataset.revision`` is pinned to ``"abc"`` so every reporter

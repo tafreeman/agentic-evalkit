@@ -15,16 +15,14 @@ import math
 from datetime import UTC, datetime
 
 import pytest
+from _stats_fixtures import _execution, _grade, _sample
 
 from agentic_evalkit.models import (
     DatasetRef,
     EvalRunManifest,
     EvalRunResult,
-    EvalSample,
     ExecutionStatus,
-    GradeResult,
     GradeStatus,
-    NormalizedExecutionResult,
     ResolvedDataset,
     RunSummary,
     SampleResult,
@@ -33,50 +31,6 @@ from agentic_evalkit.stats.aggregate import aggregate_run, wilson_interval
 
 _STARTED_AT = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
 _FINISHED_AT = datetime(2026, 7, 2, 12, 5, 0, tzinfo=UTC)
-
-
-def _sample(sample_id: str) -> EvalSample:
-    return EvalSample(
-        sample_id=sample_id,
-        input={"question": f"question for {sample_id}"},
-        reference="42",
-        source_digest=f"sha256:{sample_id}",
-        adapter="gsm8k@1",
-    )
-
-
-def _execution(
-    sample_id: str,
-    *,
-    attempt: int = 1,
-    status: ExecutionStatus,
-    latency_ms: float | None = None,
-    input_tokens: int | None = None,
-    output_tokens: int | None = None,
-    cost_usd: float | None = None,
-) -> NormalizedExecutionResult:
-    return NormalizedExecutionResult(
-        sample_id=sample_id,
-        attempt=attempt,
-        status=status,
-        latency_ms=latency_ms,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cost_usd=cost_usd,
-        started_at=_STARTED_AT,
-        finished_at=_FINISHED_AT,
-    )
-
-
-def _grade(sample_id: str, *, status: GradeStatus, score: float | None = None) -> GradeResult:
-    return GradeResult(
-        sample_id=sample_id,
-        grader="normalized-exact@1",
-        status=status,
-        score=score,
-        hard_gate=False,
-        created_at=_FINISHED_AT,
-    )
 
 
 def _manifest(**overrides: object) -> EvalRunManifest:

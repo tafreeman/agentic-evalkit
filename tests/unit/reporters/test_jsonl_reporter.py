@@ -3,13 +3,14 @@
 import json
 from pathlib import Path
 
-from conftest import _run_with_pass_error_timeout_and_provenance
-
+from agentic_evalkit.models import EvalRunResult
 from agentic_evalkit.reporters import JsonlReporter
 
 
-def test_jsonl_writes_header_one_record_per_sample_and_trailer(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_jsonl_writes_header_one_record_per_sample_and_trailer(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     jsonl_path = JsonlReporter().write(run, tmp_path / "run.jsonl", generated_at="fixed")
     lines = jsonl_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1 + len(run.samples) + 1
@@ -34,8 +35,10 @@ def test_jsonl_writes_header_one_record_per_sample_and_trailer(tmp_path: Path) -
     assert trailer["generated_at"] == "fixed"
 
 
-def test_jsonl_sample_records_preserve_sample_order(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_jsonl_sample_records_preserve_sample_order(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     jsonl_path = JsonlReporter().write(run, tmp_path / "run.jsonl", generated_at="fixed")
     lines = jsonl_path.read_text(encoding="utf-8").splitlines()
     sample_records = [json.loads(line) for line in lines[1:-1]]
@@ -44,8 +47,10 @@ def test_jsonl_sample_records_preserve_sample_order(tmp_path: Path) -> None:
     ]
 
 
-def test_jsonl_each_line_is_compact_single_line_json(tmp_path: Path) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+def test_jsonl_each_line_is_compact_single_line_json(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
     jsonl_path = JsonlReporter().write(run, tmp_path / "run.jsonl", generated_at="fixed")
     raw = jsonl_path.read_text(encoding="utf-8")
     assert raw.endswith("\n")
@@ -55,9 +60,9 @@ def test_jsonl_each_line_is_compact_single_line_json(tmp_path: Path) -> None:
 
 
 def test_two_renders_of_the_same_run_are_byte_identical_with_fixed_generated_at(
-    tmp_path: Path,
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
 ) -> None:
-    run = _run_with_pass_error_timeout_and_provenance()
+    run = pass_error_timeout_and_provenance_run
     first = JsonlReporter().write(run, tmp_path / "first.jsonl", generated_at="fixed")
     second = JsonlReporter().write(run, tmp_path / "second.jsonl", generated_at="fixed")
     assert first.read_bytes() == second.read_bytes()
