@@ -14,8 +14,11 @@ set ``hard_gate=True`` on a returned :class:`GradeResult`:
 
 - the judge's live ``fingerprint`` must equal ``CalibrationArtifact.judge_fingerprint``;
 - the calibration must not be expired;
+- the calibration must be dated and within the ratified maximum age of 90 days;
 - held-out positives (TP+FN) and negatives (TN+FP) must each be >= 30;
 - TPR and TNR must each be >= ``CalibrationArtifact.threshold``;
+- the ratified project floor must hold: TNR >= 0.95 and TPR >= 0.85 (decision
+  D-1), so a lax caller-supplied ``threshold`` can never gate below it;
 - a reversed-order ("position-bias") probe must agree with the primary verdict;
 - the judge must return a parseable, non-abstained structured response
   (parse failures retry at most twice, i.e. three attempts total).
@@ -25,7 +28,7 @@ outcome; several are also distinct non-PASS statuses so the *reason* survives
 into ``evidence["reason"]`` rather than being collapsed into a bare FAIL.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from pydantic import Field, JsonValue, model_validator
@@ -36,6 +39,15 @@ from agentic_evalkit.models.base import FrozenModel
 # Minimum held-out positive/negative label counts a calibration must have
 # before it is trusted to gate a release (plan Task 10 KEY REQUIREMENTS).
 _MINIMUM_CLASS_SAMPLE_COUNT = 30
+
+# Ratified project calibration floor (decision D-1, 2026-07-04). A caller-
+# supplied ``CalibrationArtifact.threshold`` may be laxer than these, but it
+# can never lower the bar below the project minimums: a calibration must clear
+# ALL of these before it may hard-gate a release, independent of its own
+# ``threshold``.
+PROJECT_MIN_TNR = 0.95
+PROJECT_MIN_TPR = 0.85
+PROJECT_MAX_CALIBRATION_AGE_DAYS = 90
 
 # Parse failures retry at most this many times (plan Task 10 KEY
 # REQUIREMENTS: "parse retries <= 2"), i.e. up to 3 total judge calls.
@@ -92,6 +104,10 @@ class CalibrationArtifact(FrozenModel):
         expires_at: Timestamp after which this calibration is stale and
             must not gate, regardless of how strong its historical TPR/TNR
             were.
+        calibrated_at: Timestamp the held-out labels were collected. Optional
+            and additive (schema_version stays "1"); when absent the artifact
+            cannot prove it is within the ratified maximum age and is treated
+            as unusable for gating (decision D-1).
         true_positive/true_negative/false_positive/false_negative: Confusion
             matrix counts from held-out human-labeled samples.
         threshold: Minimum TPR *and* TNR this calibration must clear.
@@ -100,6 +116,7 @@ class CalibrationArtifact(FrozenModel):
     calibration_id: str
     judge_fingerprint: str
     expires_at: datetime
+    calibrated_at: datetime | None = None
     true_positive: int
     true_negative: int
     false_positive: int
@@ -143,6 +160,28 @@ class CalibrationArtifact(FrozenModel):
     def is_expired(self, *, now: datetime | None = None) -> bool:
         return self.expires_at <= (now or datetime.now(UTC))
 
+    def age_failure_reason(self, *, now: datetime | None = None) -> str | None:
+        """Return why this calibration is too old (or undated) to gate, or
+        ``None`` if its age is within the ratified maximum (decision D-1).
+
+        An artifact with no ``calibrated_at`` cannot prove its age and is
+        rejected outright, so a laxer caller cannot bypass the age floor by
+        simply omitting the timestamp.
+        """
+        if self.calibrated_at is None:
+            return (
+                f"calibration {self.calibration_id!r} has no calibrated_at; "
+                f"cannot verify age within {PROJECT_MAX_CALIBRATION_AGE_DAYS} days"
+            )
+        if (now or datetime.now(UTC)) - self.calibrated_at > timedelta(
+            days=PROJECT_MAX_CALIBRATION_AGE_DAYS
+        ):
+            return (
+                f"calibration {self.calibration_id!r} age exceeds the maximum of "
+                f"{PROJECT_MAX_CALIBRATION_AGE_DAYS} days"
+            )
+        return None
+
     def usability_failure_reason(self, *, now: datetime | None = None) -> str | None:
         """Return a human-readable reason this calibration cannot gate, or
         ``None`` if it clears every usability bar (design §9 / plan Task 10).
@@ -165,6 +204,14 @@ class CalibrationArtifact(FrozenModel):
         tnr = self.true_negative_rate
         if tnr is None or tnr < self.threshold:
             return f"calibration TNR={tnr} is below threshold={self.threshold}"
+        # Enforce the ratified project floor AFTER the artifact's own
+        # threshold: a lax caller ``threshold`` can never lower the bar below
+        # these project minimums (decision D-1). ``tpr``/``tnr`` are non-None
+        # here since both class counts are >= 30.
+        if tnr < PROJECT_MIN_TNR:
+            return f"calibration TNR={tnr} is below the project minimum {PROJECT_MIN_TNR}"
+        if tpr < PROJECT_MIN_TPR:
+            return f"calibration TPR={tpr} is below the project minimum {PROJECT_MIN_TPR}"
         return None
 
 
@@ -253,22 +300,29 @@ class JudgeGrader:
                 reason="judge explicitly abstained from rendering a verdict",
             )
 
-        if self._calibration is not None and self._calibration.is_expired():
-            # An expired calibration is not merely "untrustworthy for
-            # gating" (hard_gate=False) -- the calibration artifact itself
-            # is unusable, so grading capability is UNAVAILABLE outright
-            # (plan Task 10 Step 6, verbatim expiry test).
-            return self._result(
-                sample,
-                now,
-                status=GradeStatus.UNAVAILABLE,
-                score=None,
-                hard_gate=False,
-                reason=(
+        if self._calibration is not None:
+            # An expired, stale (>90d), or undated calibration is not merely
+            # "untrustworthy for gating" (hard_gate=False) -- the calibration
+            # artifact itself is unusable, so grading capability is UNAVAILABLE
+            # outright (plan Task 10 Step 6 for expiry; decision D-1 for the
+            # ratified age floor). This runs BEFORE the usability/floor path so
+            # an unusable artifact never yields an advisory PASS.
+            if self._calibration.is_expired(now=now):
+                stale_reason: str | None = (
                     f"calibration {self._calibration.calibration_id!r} expired at "
                     f"{self._calibration.expires_at.isoformat()}"
-                ),
-            )
+                )
+            else:
+                stale_reason = self._calibration.age_failure_reason(now=now)
+            if stale_reason is not None:
+                return self._result(
+                    sample,
+                    now,
+                    status=GradeStatus.UNAVAILABLE,
+                    score=None,
+                    hard_gate=False,
+                    reason=stale_reason,
+                )
 
         calibration_failure = self._calibration_failure_reason()
         position_bias_reason = await self._position_bias_failure_reason(request, response)

@@ -109,7 +109,23 @@ RunEvent = (
     | RunFailed
 )
 
+#: Enumerable, reflection-friendly counterpart to the :data:`RunEvent` union:
+#: every concrete event type the runner may emit, in emission order. A new
+#: event type must be listed here to be recognised, so structural contracts
+#: (e.g. "every event field is wire-safe") cannot be bypassed (Story 2.2).
+ALL_EVENT_TYPES: tuple[type[FrozenModel], ...] = (
+    RunStarted,
+    DatasetResolved,
+    SampleStarted,
+    ExecutionCompleted,
+    GradeCompleted,
+    SampleCompleted,
+    RunCompleted,
+    RunFailed,
+)
+
 __all__ = [
+    "ALL_EVENT_TYPES",
     "DatasetResolved",
     "ExecutionCompleted",
     "GradeCompleted",

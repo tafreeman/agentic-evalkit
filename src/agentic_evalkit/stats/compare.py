@@ -33,11 +33,19 @@ from typing import TYPE_CHECKING
 from agentic_evalkit.errors import IncompatibleRuns
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.models.grades import GradeStatus
+from agentic_evalkit.models.runs import EvalRunManifest
 
 if TYPE_CHECKING:
     from agentic_evalkit.models.runs import EvalRunResult, SampleResult
 
-__all__ = ["ComparisonResult", "compare_runs"]
+__all__ = ["PROVENANCE_FIELDS_CHECKED", "ComparisonResult", "compare_runs"]
+
+#: The manifest provenance fields ``_describe_mismatches`` actually compares.
+#: Bound directly to :meth:`EvalRunManifest.provenance_field_names` so the
+#: checked set and the manifest's declared provenance set can never drift: a
+#: new declared field that ``_describe_mismatches`` fails to check is caught by
+#: the ``tests/contract/test_provenance_drift.py`` contract (R-004 P0).
+PROVENANCE_FIELDS_CHECKED: frozenset[str] = EvalRunManifest.provenance_field_names()
 
 _MIN_BOOTSTRAP_SAMPLES = 100
 _MAX_BOOTSTRAP_SAMPLES = 10_000

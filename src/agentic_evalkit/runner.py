@@ -52,7 +52,7 @@ from agentic_evalkit.models import (
     SampleResult,
     SourceRecord,
 )
-from agentic_evalkit.reporters.base import RedactionPolicy
+from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
 from agentic_evalkit.targets.base import ExecutionTarget
 
 #: Serialized ``NormalizedExecutionResult.output`` larger than this many bytes
@@ -129,10 +129,13 @@ class EvalRunner:
             Tests can inject a deterministic clock.
         id_factory: Injectable run-ID source; defaults to a random UUID hex
             string. Tests can inject a deterministic sequence.
-        redaction_policy: Optional policy applied to spilled artifact bytes
-            before they are written (see ``_spill_large_output``). Defaults
-            to ``None``, which preserves today's unredacted-spill behavior
-            byte-for-byte -- a caller must opt in explicitly.
+        redaction_policy: Policy applied to spilled artifact bytes before
+            they are written (see ``_spill_large_output``). Defaults to
+            :data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`,
+            so spilled artifacts are redacted by default and real runs never
+            spill raw secrets to disk. A caller may pass a custom
+            ``RedactionPolicy`` to tune the patterns, or ``RedactionPolicy()``
+            (empty patterns) to explicitly opt out of spill redaction.
     """
 
     def __init__(
@@ -145,7 +148,7 @@ class EvalRunner:
         artifact_store: ArtifactStore,
         clock: ClockFactory = _default_clock,
         id_factory: IdFactory = _default_id_factory,
-        redaction_policy: RedactionPolicy | None = None,
+        redaction_policy: RedactionPolicy | None = DEFAULT_REDACTION_POLICY,
     ) -> None:
         self._catalog = catalog
         self._adapters = dict(adapters)
@@ -462,9 +465,11 @@ class EvalRunner:
     def _compiled_secret_patterns(self) -> tuple[re.Pattern[str], ...]:
         """Compile ``self._redaction_policy.secret_patterns``, or none at all.
 
-        Returns an empty tuple both when no policy was supplied (the default,
-        preserving today's unredacted-spill behavior) and when a policy was
-        supplied with no ``secret_patterns`` of its own.
+        Returns an empty tuple both when the policy was explicitly set to
+        ``None`` (opting out of spill redaction) and when a policy was
+        supplied with no ``secret_patterns`` of its own. The constructor
+        default is :data:`DEFAULT_REDACTION_POLICY`, which does carry
+        patterns, so the ordinary path compiles those.
         """
         if self._redaction_policy is None:
             return ()

@@ -54,8 +54,8 @@ from agentic_evalkit.models import (
     SamplingPolicy,
     SourceRecord,
 )
+from agentic_evalkit.reporters import REPORTER_FORMATS
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, apply_redaction
-from agentic_evalkit.reporters.json import JsonReporter
 from agentic_evalkit.runner import EvalRunner
 from agentic_evalkit.targets.base import ExecutionTarget
 from agentic_evalkit.targets.callable import CallableTarget
@@ -409,7 +409,11 @@ def write_canonical_report(result: EvalRunResult, destination_dir: Path) -> Path
     """
     destination_dir.mkdir(parents=True, exist_ok=True)
     report_path = destination_dir / f"{result.run_id}.json"
-    JsonReporter().write(apply_redaction(result, DEFAULT_REDACTION_POLICY), report_path)
+    # Select the reporter through the canonical registry so only a registered
+    # (and therefore redaction-routed) format can be written here; redaction is
+    # still applied exactly once, immediately before the write (design §12).
+    reporter = REPORTER_FORMATS["json"]()
+    reporter.write(apply_redaction(result, DEFAULT_REDACTION_POLICY), report_path)
     return report_path
 
 

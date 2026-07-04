@@ -54,9 +54,10 @@ def _valid_calibration(**overrides: object) -> CalibrationArtifact:
         "calibration_id": "cal-1",
         "judge_fingerprint": "judge:model:prompt",
         "expires_at": datetime.now(UTC) + timedelta(days=30),
-        "true_positive": 40,
-        "true_negative": 40,
-        "false_positive": 5,
+        "calibrated_at": datetime.now(UTC),
+        "true_positive": 95,
+        "true_negative": 97,
+        "false_positive": 3,
         "false_negative": 5,
         "threshold": 0.7,
     }

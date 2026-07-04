@@ -92,10 +92,12 @@ calibration check. `JudgeGrader` verifies, before it will ever set
 - the live judge's `fingerprint` matches the calibration's
   `judge_fingerprint` exactly (a different model or prompt invalidates the
   calibration);
-- the calibration has not expired (`expires_at` is in the future);
+- the calibration has not expired (`expires_at` is in the future) and was
+  calibrated within the last 90 days (`calibrated_at`);
 - the held-out calibration has at least 30 positive and 30 negative labels;
 - both TPR (true positive rate) and TNR (true negative rate) meet the
-  calibration's threshold;
+  calibration's threshold **and** the project floor of TNR ≥ 0.95 and
+  TPR ≥ 0.85;
 - a reversed-order ("position-bias") probe agrees with the primary verdict;
 - the judge returns a parseable, non-abstained structured response (parse
   failures retry at most twice — three attempts total).
@@ -107,15 +109,17 @@ from agentic_evalkit.graders.judge import CalibrationArtifact, JudgeGrader
 calibration = CalibrationArtifact(
     calibration_id="cal-2026-07",
     judge_fingerprint="judge:my-model:v3-prompt",
+    calibrated_at=datetime.now(UTC),
     expires_at=datetime.now(UTC) + timedelta(days=30),
-    true_positive=42, true_negative=45, false_positive=3, false_negative=4,
+    true_positive=95, true_negative=97, false_positive=3, false_negative=5,
     threshold=0.85,
 )
 grader = JudgeGrader(my_judge_client, calibration=calibration, gate=True)
 ```
 
-An uncalibrated or expired judge cannot gate a release. If any calibration
-condition fails, the grader demotes its result to a non-gating,
+An uncalibrated, expired, or stale (older than 90 days) judge — or one whose
+held-out TNR/TPR falls below the project floor — cannot gate a release. If any
+calibration condition fails, the grader demotes its result to a non-gating,
 `UNAVAILABLE` outcome and records the specific reason in
 `evidence["reason"]` (for example, `"calibration expired"` or
 `"insufficient held-out samples"`) — it never silently converts a

@@ -643,10 +643,11 @@ async def test_spill_redacts_a_planted_secret_when_a_policy_is_supplied(tmp_path
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_spill_is_unredacted_when_no_policy_is_supplied(tmp_path: Path) -> None:
-    """Without a ``redaction_policy``, spill behavior is unchanged: the
-    planted token reaches the stored artifact verbatim and the artifact is
-    recorded as not redacted -- today's byte-identical default behavior.
+async def test_spill_redacts_a_planted_secret_by_default(tmp_path: Path) -> None:
+    """With no explicit ``redaction_policy``, the runner now defaults to
+    ``DEFAULT_REDACTION_POLICY`` (Story 2.1 / R-002): the planted ``hf_``
+    token is stripped from the spilled artifact and the artifact is recorded
+    as redacted, so a real run never spills raw secrets to disk.
     """
     artifact_store = _artifact_store(tmp_path)
     runner = EvalRunner(
@@ -669,5 +670,6 @@ async def test_spill_is_unredacted_when_no_policy_is_supplied(tmp_path: Path) ->
     payload = artifact_store.read(ref).decode("utf-8")
     metadata = artifact_store.metadata(ref)
 
-    assert _PLANTED_TOKEN in payload
-    assert metadata.redacted is False
+    assert _PLANTED_TOKEN not in payload
+    assert "[REDACTED]" in payload
+    assert metadata.redacted is True
