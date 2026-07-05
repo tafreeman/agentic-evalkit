@@ -195,6 +195,15 @@ _WINDOWS_ONLY = pytest.mark.skipif(
 # only a genuine unbounded hang (not ordinary teardown slack) trips it.
 _NO_HANG_WALL_CLOCK_SECONDS = 20.0
 
+# Bound for the cleanup-after-cancel step. If the regression this helper
+# guards against is itself the kind of cancellation-resistant wedge that
+# leaves a task uncancellable (a Proactor connection-lost callback that never
+# fires), `.cancel()` alone does not guarantee the task unwinds -- an
+# unbounded cleanup await would then hang exactly like the bug it exists to
+# catch. This bound is a last resort so the test always terminates with its
+# intended AssertionError instead of wedging CI.
+_CLEANUP_WALL_CLOCK_SECONDS = 5.0
+
 # Fixed envelope (timestamps, fingerprint, error type/message) added to the
 # configured stream bounds when asserting the serialized result stays byte-
 # bounded. Small and constant; only an *unbounded* stream leaking into the
@@ -210,16 +219,20 @@ async def _run_within_no_hang_bound(
     ``asyncio.wait`` (unlike ``asyncio.wait_for``) never cancels the awaited
     task on timeout, so a task wedged in an *uncancellable* teardown cannot
     turn a hang into a masked cancellation: if the bound elapses, ``done`` is
-    empty and the explicit assertion fails with a clear no-hang message. On the
-    failure path the still-pending task is cancelled and suppressed so no
-    pending-task teardown noise leaks.
+    empty and the explicit assertion fails with a clear no-hang message. On
+    the failure path the still-pending task is cancelled, and that cleanup
+    is *itself* bounded (``_CLEANUP_WALL_CLOCK_SECONDS``): if the same
+    cancellation-resistant wedge this helper guards against means ``.cancel()``
+    does not fully unwind the task, an unbounded cleanup await would hang
+    exactly like the regression under test, silently defeating the point of
+    using ``asyncio.wait`` in the first place.
     """
     task = asyncio.ensure_future(target.execute(_sample(), attempt=1, timeout_seconds=5.0))
     done, pending = await asyncio.wait({task}, timeout=_NO_HANG_WALL_CLOCK_SECONDS)
     if not done:
         for stuck in pending:
             stuck.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.wait(pending, timeout=_CLEANUP_WALL_CLOCK_SECONDS)
         raise AssertionError("teardown did not complete within the no-hang bound")
     return await next(iter(done))
 
