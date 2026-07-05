@@ -124,6 +124,15 @@ exercises the real network path).
 3. Run the full offline verification matrix above.
 4. Open a pull request describing the change and the tests that cover it.
 
+## AI agent context
+
+AI coding agents (and humans who want the condensed rulebook) should start from
+[CLAUDE.md](CLAUDE.md) at the repository root: it lists the load-bearing invariants and the
+verification commands, then points at the authoritative sources — the ADRs under `docs/adr/`
+and the design under `docs/specs/`. On maintainer machines a richer generated context file
+exists at `_bmad-output/project-context.md` (gitignored, BMAD-regenerated); when it is absent,
+the ADRs govern.
+
 ## Reporting security issues
 
 Do not open a public issue for security vulnerabilities — see
