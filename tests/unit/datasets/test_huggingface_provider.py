@@ -166,6 +166,48 @@ def _handler_for(fixtures: dict[str, dict[str, Any]]) -> Any:
     return handler
 
 
+def _handler_with_override(
+    overrides: dict[str, httpx.Response | Any] | None = None,
+) -> Any:
+    """Build the standard 5-endpoint GSM8K-fixture handler with per-test overrides.
+
+    By default every endpoint (``is-valid``, ``splits``, ``size``,
+    ``statistics``, ``parquet``) returns its captured 200 GSM8K fixture.
+    ``overrides`` lets a test replace the response for just the endpoint(s)
+    it cares about, keyed by endpoint suffix. Each override value is either
+    an ``httpx.Response`` (returned as-is) or a callable
+    ``(request: httpx.Request) -> httpx.Response`` for tests that need
+    stateful/dynamic behavior (e.g. failing once then succeeding).
+
+    Any request whose path doesn't match one of the five known endpoints
+    (or an extra endpoint introduced via ``overrides``, e.g. ``"rows"``)
+    still raises ``AssertionError``, matching the previous inline handlers.
+    """
+
+    defaults: dict[str, httpx.Response] = {
+        "is-valid": httpx.Response(200, json=GSM8K_IS_VALID),
+        "splits": httpx.Response(200, json=GSM8K_SPLITS),
+        "size": httpx.Response(200, json=GSM8K_SIZE),
+        "statistics": httpx.Response(200, json=GSM8K_STATISTICS),
+        "parquet": httpx.Response(200, json=GSM8K_PARQUET),
+    }
+    resolved_overrides = overrides or {}
+    known_suffixes = {**defaults, **resolved_overrides}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        for suffix in known_suffixes:
+            if request.url.path.endswith(f"/{suffix}"):
+                override = resolved_overrides.get(suffix)
+                if override is None:
+                    return defaults[suffix]
+                if isinstance(override, httpx.Response):
+                    return override
+                return override(request)
+        raise AssertionError(f"unexpected request {request.url}")
+
+    return handler
+
+
 def _gsm8k_transport() -> httpx.MockTransport:
     return httpx.MockTransport(
         _handler_for(
@@ -342,18 +384,9 @@ async def test_resolve_unique_split_can_be_inferred() -> None:
 
 @pytest.mark.asyncio
 async def test_size_failure_is_recorded_not_fatal() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/is-valid"):
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(500, json={"error": "internal error"})
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(200, json=GSM8K_STATISTICS)
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(200, json=GSM8K_PARQUET)
-        raise AssertionError(f"unexpected request {request.url}")
+    handler = _handler_with_override(
+        {"size": httpx.Response(500, json={"error": "internal error"})}
+    )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})
@@ -369,18 +402,12 @@ async def test_size_failure_is_recorded_not_fatal() -> None:
 
 @pytest.mark.asyncio
 async def test_statistics_and_parquet_failure_is_recorded_not_fatal() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/is-valid"):
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(200, json=GSM8K_SIZE)
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(404, json={"error": "no statistics"})
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(404, json={"error": "no parquet"})
-        raise AssertionError(f"unexpected request {request.url}")
+    handler = _handler_with_override(
+        {
+            "statistics": httpx.Response(404, json={"error": "no statistics"}),
+            "parquet": httpx.Response(404, json={"error": "no parquet"}),
+        }
+    )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})
@@ -506,23 +533,13 @@ async def _no_op_sleep(_seconds: float) -> None:
 async def test_429_then_200_succeeds() -> None:
     attempts = {"is-valid": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/is-valid"):
-            attempts["is-valid"] += 1
-            if attempts["is-valid"] == 1:
-                return httpx.Response(
-                    429, headers={"Retry-After": "0"}, json={"error": "slow down"}
-                )
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(200, json=GSM8K_SIZE)
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(200, json=GSM8K_STATISTICS)
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(200, json=GSM8K_PARQUET)
-        raise AssertionError(f"unexpected request {request.url}")
+    def is_valid_once_then_ok(request: httpx.Request) -> httpx.Response:
+        attempts["is-valid"] += 1
+        if attempts["is-valid"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, json={"error": "slow down"})
+        return httpx.Response(200, json=GSM8K_IS_VALID)
+
+    handler = _handler_with_override({"is-valid": is_valid_once_then_ok})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})
@@ -575,21 +592,13 @@ async def test_nonretryable_4xx_attempted_once() -> None:
 async def test_502_is_retried_and_recovers() -> None:
     attempts = {"is-valid": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/is-valid"):
-            attempts["is-valid"] += 1
-            if attempts["is-valid"] < 2:
-                return httpx.Response(502, text="bad gateway")
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(200, json=GSM8K_SIZE)
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(200, json=GSM8K_STATISTICS)
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(200, json=GSM8K_PARQUET)
-        raise AssertionError(f"unexpected request {request.url}")
+    def is_valid_bad_gateway_then_ok(request: httpx.Request) -> httpx.Response:
+        attempts["is-valid"] += 1
+        if attempts["is-valid"] < 2:
+            return httpx.Response(502, text="bad gateway")
+        return httpx.Response(200, json=GSM8K_IS_VALID)
+
+    handler = _handler_with_override({"is-valid": is_valid_bad_gateway_then_ok})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})
@@ -646,22 +655,11 @@ async def test_preview_converts_rows_to_source_records() -> None:
 @pytest.mark.asyncio
 async def test_preview_page_capped_at_100() -> None:
     seen: list[httpx.Request] = []
+    inner_handler = _handler_with_override({"rows": httpx.Response(200, json=GSM8K_ROWS)})
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        if request.url.path.endswith("/is-valid"):
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(200, json=GSM8K_SIZE)
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(200, json=GSM8K_STATISTICS)
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(200, json=GSM8K_PARQUET)
-        if request.url.path.endswith("/rows"):
-            return httpx.Response(200, json=GSM8K_ROWS)
-        raise AssertionError(f"unexpected request {request.url}")
+        return inner_handler(request)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})
@@ -679,31 +677,21 @@ async def test_preview_page_capped_at_100() -> None:
 async def test_iter_records_stops_at_caller_limit() -> None:
     call_count = {"rows": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/is-valid"):
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(200, json=GSM8K_SIZE)
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(200, json=GSM8K_STATISTICS)
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(200, json=GSM8K_PARQUET)
-        if request.url.path.endswith("/rows"):
-            call_count["rows"] += 1
-            offset = int(request.url.params["offset"])
-            return httpx.Response(
-                200,
-                json={
-                    "rows": [
-                        {"row_idx": offset, "row": {"question": "q", "answer": "a"}},
-                        {"row_idx": offset + 1, "row": {"question": "q2", "answer": "a2"}},
-                    ],
-                    "num_rows_total": 1319,
-                },
-            )
-        raise AssertionError(f"unexpected request {request.url}")
+    def rows_page(request: httpx.Request) -> httpx.Response:
+        call_count["rows"] += 1
+        offset = int(request.url.params["offset"])
+        return httpx.Response(
+            200,
+            json={
+                "rows": [
+                    {"row_idx": offset, "row": {"question": "q", "answer": "a"}},
+                    {"row_idx": offset + 1, "row": {"question": "q2", "answer": "a2"}},
+                ],
+                "num_rows_total": 1319,
+            },
+        )
+
+    handler = _handler_with_override({"rows": rows_page})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})
@@ -718,20 +706,9 @@ async def test_iter_records_stops_at_caller_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_iter_records_stops_on_empty_page() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/is-valid"):
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(200, json=GSM8K_SIZE)
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(200, json=GSM8K_STATISTICS)
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(200, json=GSM8K_PARQUET)
-        if request.url.path.endswith("/rows"):
-            return httpx.Response(200, json={"rows": [], "num_rows_total": 0})
-        raise AssertionError(f"unexpected request {request.url}")
+    handler = _handler_with_override(
+        {"rows": httpx.Response(200, json={"rows": [], "num_rows_total": 0})}
+    )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})
@@ -876,23 +853,15 @@ async def test_malformed_retry_after_header_falls_back_to_jittered_backoff() -> 
     """A non-numeric Retry-After must not crash retry scheduling."""
     attempts = {"is-valid": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/is-valid"):
-            attempts["is-valid"] += 1
-            if attempts["is-valid"] == 1:
-                return httpx.Response(
-                    429, headers={"Retry-After": "not-a-number"}, json={"error": "slow down"}
-                )
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(200, json=GSM8K_SIZE)
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(200, json=GSM8K_STATISTICS)
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(200, json=GSM8K_PARQUET)
-        raise AssertionError(f"unexpected request {request.url}")
+    def is_valid_bad_retry_after_then_ok(request: httpx.Request) -> httpx.Response:
+        attempts["is-valid"] += 1
+        if attempts["is-valid"] == 1:
+            return httpx.Response(
+                429, headers={"Retry-After": "not-a-number"}, json={"error": "slow down"}
+            )
+        return httpx.Response(200, json=GSM8K_IS_VALID)
+
+    handler = _handler_with_override({"is-valid": is_valid_bad_retry_after_then_ok})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})
@@ -1025,19 +994,9 @@ async def test_card_data_object_with_to_dict_is_converted() -> None:
 async def test_iter_records_stops_exactly_at_limit_mid_page() -> None:
     """The caller limit falls inside a page rather than on a page boundary."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/is-valid"):
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(200, json=GSM8K_SIZE)
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(200, json=GSM8K_STATISTICS)
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(200, json=GSM8K_PARQUET)
-        if request.url.path.endswith("/rows"):
-            return httpx.Response(
+    handler = _handler_with_override(
+        {
+            "rows": httpx.Response(
                 200,
                 json={
                     "rows": [
@@ -1047,7 +1006,8 @@ async def test_iter_records_stops_exactly_at_limit_mid_page() -> None:
                     "num_rows_total": 1319,
                 },
             )
-        raise AssertionError(f"unexpected request {request.url}")
+        }
+    )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})
@@ -1063,26 +1023,17 @@ async def test_iter_records_stops_exactly_at_limit_mid_page() -> None:
 async def test_iter_records_stops_exactly_at_upstream_total() -> None:
     """current_offset reaching num_rows_total exactly must stop, not overshoot."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/is-valid"):
-            return httpx.Response(200, json=GSM8K_IS_VALID)
-        if request.url.path.endswith("/splits"):
-            return httpx.Response(200, json=GSM8K_SPLITS)
-        if request.url.path.endswith("/size"):
-            return httpx.Response(200, json=GSM8K_SIZE)
-        if request.url.path.endswith("/statistics"):
-            return httpx.Response(200, json=GSM8K_STATISTICS)
-        if request.url.path.endswith("/parquet"):
-            return httpx.Response(200, json=GSM8K_PARQUET)
-        if request.url.path.endswith("/rows"):
-            return httpx.Response(
+    handler = _handler_with_override(
+        {
+            "rows": httpx.Response(
                 200,
                 json={
                     "rows": [{"row_idx": 0, "row": {"question": "q", "answer": "a"}}],
                     "num_rows_total": 1,
                 },
             )
-        raise AssertionError(f"unexpected request {request.url}")
+        }
+    )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     hub = _FakeHub(datasets={"openai/gsm8k": _dataset_info_from_fixture(GSM8K_DATASET_INFO)})

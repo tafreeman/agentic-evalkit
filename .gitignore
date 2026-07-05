@@ -23,6 +23,8 @@ _bmad-output/
 .github/agents/
 docs/codebase/
 docs/project-scan-report.json
+# Local AI-agent context file (solo-dev machine convenience, not shipped repo content)
+CLAUDE.md
 # BMAD-installed skill packs; only the two curated contributor skills are tracked
 .claude/skills/*
 !.claude/skills/release-gate/

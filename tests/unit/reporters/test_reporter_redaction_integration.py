@@ -8,8 +8,6 @@ same redacted evidence, never the original.
 import json
 from pathlib import Path
 
-from conftest import _run_with_pass_error_timeout_and_provenance
-
 from agentic_evalkit.models import EvalRunResult
 from agentic_evalkit.reporters import (
     HtmlReporter,
@@ -21,8 +19,7 @@ from agentic_evalkit.reporters import (
 )
 
 
-def _leaking_run() -> EvalRunResult:
-    run = _run_with_pass_error_timeout_and_provenance()
+def _leaking_run(run: EvalRunResult) -> EvalRunResult:
     assert run.samples[0].grade is not None
     leaking_grade = run.samples[0].grade.model_copy(
         update={"evidence": {"expected": "42", "actual": "42", "api_key": "sk-super-secret"}}
@@ -31,8 +28,10 @@ def _leaking_run() -> EvalRunResult:
     return run.model_copy(update={"samples": (leaking_sample, *run.samples[1:])})
 
 
-def test_json_reporter_never_writes_redacted_evidence_key(tmp_path: Path) -> None:
-    run = _leaking_run()
+def test_json_reporter_never_writes_redacted_evidence_key(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = _leaking_run(pass_error_timeout_and_provenance_run)
     policy = RedactionPolicy(evidence_keys=("api_key",))
     redacted_run = apply_redaction(run, policy)
 
@@ -43,8 +42,10 @@ def test_json_reporter_never_writes_redacted_evidence_key(tmp_path: Path) -> Non
     assert "api_key" not in payload["samples"][0]["grade"]["evidence"]
 
 
-def test_jsonl_reporter_never_writes_redacted_evidence_key(tmp_path: Path) -> None:
-    run = _leaking_run()
+def test_jsonl_reporter_never_writes_redacted_evidence_key(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = _leaking_run(pass_error_timeout_and_provenance_run)
     policy = RedactionPolicy(evidence_keys=("api_key",))
     redacted_run = apply_redaction(run, policy)
 
@@ -53,8 +54,10 @@ def test_jsonl_reporter_never_writes_redacted_evidence_key(tmp_path: Path) -> No
     assert "sk-super-secret" not in content
 
 
-def test_markdown_reporter_never_writes_secret_pattern_match(tmp_path: Path) -> None:
-    run = _leaking_run()
+def test_markdown_reporter_never_writes_secret_pattern_match(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = _leaking_run(pass_error_timeout_and_provenance_run)
     policy = RedactionPolicy(secret_patterns=(r"sk-[a-zA-Z0-9-]+",))
     redacted_run = apply_redaction(run, policy)
 
@@ -63,8 +66,10 @@ def test_markdown_reporter_never_writes_secret_pattern_match(tmp_path: Path) -> 
     assert "sk-super-secret" not in content
 
 
-def test_html_reporter_never_writes_redacted_evidence_key(tmp_path: Path) -> None:
-    run = _leaking_run()
+def test_html_reporter_never_writes_redacted_evidence_key(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = _leaking_run(pass_error_timeout_and_provenance_run)
     policy = RedactionPolicy(evidence_keys=("api_key",))
     redacted_run = apply_redaction(run, policy)
 

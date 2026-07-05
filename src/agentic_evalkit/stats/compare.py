@@ -28,16 +28,45 @@ bootstrap).
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from agentic_evalkit.errors import IncompatibleRuns
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.models.grades import GradeStatus
+from agentic_evalkit.models.runs import EvalRunManifest
 
 if TYPE_CHECKING:
     from agentic_evalkit.models.runs import EvalRunResult, SampleResult
 
-__all__ = ["ComparisonResult", "compare_runs"]
+__all__ = ["PROVENANCE_FIELDS_CHECKED", "ComparisonResult", "compare_runs"]
+
+#: The manifest provenance checks ``_describe_mismatches`` actually performs,
+#: as ``(declared field name, human label, value getter)`` rows. This table IS
+#: the enumeration the mismatch description iterates, so
+#: :data:`PROVENANCE_FIELDS_CHECKED` below is derived from the *checks
+#: themselves* -- not re-declared -- and the
+#: ``tests/contract/test_provenance_drift.py`` contract comparing it against
+#: :meth:`EvalRunManifest.provenance_field_names` is falsifiable: a field
+#: declared as provenance but missing a row here (or vice versa) fails CI
+#: (R-004 P0).
+_PROVENANCE_CHECKS: tuple[tuple[str, str, Callable[[EvalRunManifest], object]], ...] = (
+    ("adapter", "adapter", lambda m: m.adapter),
+    ("grader", "grader", lambda m: m.grader),
+    ("target_name", "target name", lambda m: m.target_name),
+    (
+        "target_fingerprint_policy",
+        "target fingerprint policy",
+        lambda m: m.target_fingerprint_policy,
+    ),
+    ("target_fingerprint", "target fingerprint", lambda m: m.target_fingerprint),
+    ("sampling.temperature", "sampling temperature", lambda m: m.sampling.temperature),
+    ("sampling.seed", "sampling seed", lambda m: m.sampling.seed),
+    ("attempts", "attempt count", lambda m: m.attempts),
+)
+
+#: Derived from :data:`_PROVENANCE_CHECKS` row names -- see the table's note.
+PROVENANCE_FIELDS_CHECKED: frozenset[str] = frozenset(name for name, _, _ in _PROVENANCE_CHECKS)
 
 _MIN_BOOTSTRAP_SAMPLES = 100
 _MAX_BOOTSTRAP_SAMPLES = 10_000
@@ -107,41 +136,13 @@ def _describe_mismatches(left: EvalRunResult, right: EvalRunResult) -> list[str]
         mismatches.append(
             f"dataset split differs: {left_dataset.split!r} != {right_dataset.split!r}"
         )
-    if left_manifest.adapter != right_manifest.adapter:
-        mismatches.append(
-            f"adapter differs: {left_manifest.adapter!r} != {right_manifest.adapter!r}"
-        )
-    if left_manifest.grader != right_manifest.grader:
-        mismatches.append(f"grader differs: {left_manifest.grader!r} != {right_manifest.grader!r}")
-    if left_manifest.target_name != right_manifest.target_name:
-        mismatches.append(
-            f"target name differs: {left_manifest.target_name!r} != {right_manifest.target_name!r}"
-        )
-    if left_manifest.target_fingerprint_policy != right_manifest.target_fingerprint_policy:
-        mismatches.append(
-            "target fingerprint policy differs: "
-            f"{left_manifest.target_fingerprint_policy!r} "
-            f"!= {right_manifest.target_fingerprint_policy!r}"
-        )
-    if left_manifest.target_fingerprint != right_manifest.target_fingerprint:
-        mismatches.append(
-            "target fingerprint differs: "
-            f"{left_manifest.target_fingerprint!r} != {right_manifest.target_fingerprint!r}"
-        )
-    if left_manifest.sampling.temperature != right_manifest.sampling.temperature:
-        mismatches.append(
-            "sampling temperature differs: "
-            f"{left_manifest.sampling.temperature!r} != {right_manifest.sampling.temperature!r}"
-        )
-    if left_manifest.sampling.seed != right_manifest.sampling.seed:
-        mismatches.append(
-            f"sampling seed differs: {left_manifest.sampling.seed!r} "
-            f"!= {right_manifest.sampling.seed!r}"
-        )
-    if left_manifest.attempts != right_manifest.attempts:
-        mismatches.append(
-            f"attempt count differs: {left_manifest.attempts!r} != {right_manifest.attempts!r}"
-        )
+    # Manifest provenance is compared by iterating the checks table, so the
+    # set of checked fields is derived from the comparisons that actually run
+    # (see _PROVENANCE_CHECKS) -- the R-004 drift contract depends on this.
+    for _, label, get_value in _PROVENANCE_CHECKS:
+        left_value, right_value = get_value(left_manifest), get_value(right_manifest)
+        if left_value != right_value:
+            mismatches.append(f"{label} differs: {left_value!r} != {right_value!r}")
     return mismatches
 
 

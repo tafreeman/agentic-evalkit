@@ -179,6 +179,133 @@ async def test_all_scores_unavailable_yields_unavailable_not_zero() -> None:
     assert result.score is None
 
 
+# --- Story 1.2 (R-010): composite-grading edge integrity --------------------
+#
+# Guards FR11: a hard-gated FAIL can never be averaged away, a raising
+# component never contributes a silent zero, and missing / abstained /
+# unavailable / errored sub-scores are excluded from the weighted mean rather
+# than counted as 0. The cases below close the gaps left by the tests above,
+# which cover the single-component and abstain-only shapes but not the mixed
+# shapes (a survivor alongside a non-definitive component) where a silent
+# zero-contribution bug would actually hide.
+
+
+class _AlwaysRaisesGrader:
+    """A component grader that always raises during grading.
+
+    Module-level (distinct from the function-local ``_RaisingGrader`` used by
+    ``test_missing_grader_result_is_error_not_zero`` above) so the mixed-shape
+    Story 1.2 tests below can share one raising component.
+    """
+
+    async def grade(self, sample: EvalSample, execution: NormalizedExecutionResult) -> GradeResult:
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_hard_gate_fail_wins_over_a_near_perfect_majority() -> None:
+    """One low-weight hard-gated FAIL forces the whole composite to FAIL even
+    when every other (much higher-weighted) component passes with a perfect
+    score, so a hard gate can never be diluted by out-voting weight.
+    """
+    grader = CompositeGrader(
+        name="quality@1",
+        graders=(
+            WeightedGrader(_StaticGrader(GradeStatus.FAIL, 0.0), weight=0.01, hard_gate=True),
+            WeightedGrader(_StaticGrader(GradeStatus.PASS, 1.0), weight=100.0, hard_gate=False),
+            WeightedGrader(_StaticGrader(GradeStatus.PASS, 1.0), weight=100.0, hard_gate=False),
+        ),
+    )
+    result = await grader.grade(_sample(), _execution())
+    assert result.status is GradeStatus.FAIL
+    assert result.hard_gate is True
+
+
+@pytest.mark.asyncio
+async def test_raising_component_is_excluded_from_the_mean_not_scored_zero() -> None:
+    """A component that raises alongside a passing one must not drag the
+    weighted mean down toward zero: its heavy weight is dropped from the
+    denominator entirely, so the surviving PASS keeps the mean at 1.0 rather
+    than the 0.09 a silent zero-contribution would produce.
+    """
+    grader = CompositeGrader(
+        name="quality@1",
+        graders=(
+            WeightedGrader(_StaticGrader(GradeStatus.PASS, 1.0), weight=1.0, hard_gate=False),
+            WeightedGrader(_AlwaysRaisesGrader(), weight=10.0, hard_gate=False),
+        ),
+    )
+    result = await grader.grade(_sample(), _execution())
+    # The raising component contributes neither its weight nor a zero score:
+    # if it were treated as 0.0 with weight 10.0 the mean would be ~0.09.
+    assert result.score == pytest.approx(1.0)
+    assert result.status is GradeStatus.PASS
+
+
+@pytest.mark.asyncio
+async def test_raising_component_surfaces_as_error_child_result() -> None:
+    """The raising component's own child result is an explicit ERROR with a
+    ``None`` score recorded in evidence -- never a silently-fabricated 0.0 --
+    so a report can attribute the failure to that component.
+    """
+    grader = CompositeGrader(
+        name="quality@1",
+        graders=(
+            WeightedGrader(_StaticGrader(GradeStatus.PASS, 1.0), weight=1.0, hard_gate=False),
+            WeightedGrader(_AlwaysRaisesGrader(), weight=1.0, hard_gate=False),
+        ),
+    )
+    result = await grader.grade(_sample(), _execution())
+    children = result.evidence["children"]
+    assert isinstance(children, tuple | list)
+    errored = [child for child in children if child["status"] == GradeStatus.ERROR.value]
+    assert len(errored) == 1
+    assert errored[0]["score"] is None
+
+
+@pytest.mark.asyncio
+async def test_unavailable_and_error_subscores_are_excluded_from_the_mean() -> None:
+    """UNAVAILABLE and ERROR sub-scores (not just ABSTAIN) are dropped from the
+    weighted mean rather than counted as 0, so only the definitive PASS drives
+    the composite score.
+    """
+    grader = CompositeGrader(
+        name="quality@1",
+        graders=(
+            WeightedGrader(_StaticGrader(GradeStatus.PASS, 1.0), weight=1.0, hard_gate=False),
+            WeightedGrader(
+                _StaticGrader(GradeStatus.UNAVAILABLE, None), weight=5.0, hard_gate=False
+            ),
+            WeightedGrader(_StaticGrader(GradeStatus.ERROR, None), weight=5.0, hard_gate=False),
+        ),
+    )
+    result = await grader.grade(_sample(), _execution())
+    # Only the first component's weight (1.0) is in the denominator; the other
+    # two are excluded, so the mean is 1.0, not 1.0/11.0.
+    assert result.score == pytest.approx(1.0)
+    assert result.status is GradeStatus.PASS
+
+
+@pytest.mark.asyncio
+async def test_definitive_zero_scored_component_still_lowers_the_mean() -> None:
+    """A component that returns a definitive numeric 0.0 (e.g. a FAIL with a
+    real score) is legitimately included in the mean -- the exclusion rule
+    applies only to non-definitive statuses / ``None`` scores, never to a
+    genuine zero.
+    """
+    grader = CompositeGrader(
+        name="quality@1",
+        graders=(
+            WeightedGrader(_StaticGrader(GradeStatus.PASS, 1.0), weight=1.0, hard_gate=False),
+            WeightedGrader(_StaticGrader(GradeStatus.FAIL, 0.0), weight=1.0, hard_gate=False),
+        ),
+    )
+    result = await grader.grade(_sample(), _execution())
+    # Both scores are definitive numbers, so the mean is (1.0 + 0.0) / 2.
+    assert result.score == pytest.approx(0.5)
+    assert result.status is GradeStatus.PARTIAL
+
+
 class _Answer:
     """A trivial structured payload for SchemaGrader tests."""
 

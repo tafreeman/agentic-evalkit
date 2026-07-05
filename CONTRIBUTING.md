@@ -124,6 +124,14 @@ exercises the real network path).
 3. Run the full offline verification matrix above.
 4. Open a pull request describing the change and the tests that cover it.
 
+## AI agent context
+
+The tracked source of truth for AI coding agents (and humans who want the condensed rulebook)
+is the ADRs under `docs/adr/` plus the design under `docs/specs/`. Maintainer machines may also
+carry local, gitignored quick-reference files that are not part of the shipped repo: a root
+`CLAUDE.md` and/or a richer generated `_bmad-output/project-context.md` (BMAD-regenerated).
+When neither is present — e.g. a fresh clone — the ADRs govern.
+
 ## Reporting security issues
 
 Do not open a public issue for security vulnerabilities — see

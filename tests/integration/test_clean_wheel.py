@@ -10,8 +10,13 @@ clean-wheel verification already recorded in
 ``docs/release/v0.1-checkpoint.md``.
 
 Marked ``@pytest.mark.integration`` per the plan: it is slow (a real wheel
-build plus a real venv creation and package install) and is not part of
-the default fast contract-test loop.
+build plus a real venv creation and package install). The project's default
+pytest filter only excludes ``live``-marked tests (``-m 'not live'``, see
+``pyproject.toml`` ``addopts`` and ``.github/workflows/ci.yml``), so this
+test *does* run in a plain local ``pytest`` invocation and in CI today --
+it is not excluded from the default suite. It does not require network
+access (the wheel build, venv creation, and install all resolve from the
+local checkout and uv's package cache), so running it by default is safe.
 """
 
 from __future__ import annotations

@@ -1,6 +1,7 @@
 import pytest
+from _benchmark_fixtures import _harness_request
 
-from agentic_evalkit.benchmarks.harness import HarnessRequest, UnavailableHarnessExecutor
+from agentic_evalkit.benchmarks.harness import UnavailableHarnessExecutor
 from agentic_evalkit.benchmarks.swebench import SweBenchVerifiedAdapter
 from agentic_evalkit.errors import DatasetSchemaMismatch
 from agentic_evalkit.models import SourceRecord
@@ -14,22 +15,6 @@ _COMPLETE_ROW_DATA = {
     "FAIL_TO_PASS": '["test_x"]',
     "PASS_TO_PASS": '["test_y"]',
 }
-
-
-def _harness_request() -> HarnessRequest:
-    return HarnessRequest(
-        benchmark="swebench-verified@1",
-        sample_id="org__repo-1",
-        prediction={
-            "instance_id": "org__repo-1",
-            "model_name_or_path": "agentic-evalkit-target",
-            "model_patch": "diff --git a/x b/x",
-        },
-        source={"dataset_revision": "abc"},
-        environment={},
-        timeout_seconds=60,
-        resource_limits={"cpus": 1, "memory_mb": 1024},
-    )
 
 
 def test_exports_official_prediction_shape() -> None:

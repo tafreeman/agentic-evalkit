@@ -28,10 +28,8 @@ import typer
 from agentic_evalkit.cli.app import app, console, print_output, run_cli_command, safe_text
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.models import EvalRunResult
+from agentic_evalkit.reporters import REPORTER_FORMATS
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, Reporter, apply_redaction
-from agentic_evalkit.reporters.html import HtmlReporter
-from agentic_evalkit.reporters.jsonl import JsonlReporter
-from agentic_evalkit.reporters.markdown import MarkdownReporter
 from agentic_evalkit.stats import ComparisonResult, compare_runs
 
 __all__ = ["compare", "load_run_result", "report"]
@@ -188,10 +186,12 @@ def compare(
 
 # --- report -----------------------------------------------------------------
 
+# Derived from the canonical REPORTER_FORMATS registry so this second write
+# boundary can never drift from it: a newly registered format is regeneratable
+# here automatically, and an unregistered reporter is unreachable (R-002).
+# "json" is excluded because this command regenerates FROM canonical run JSON.
 _REPORTERS: dict[str, Reporter] = {
-    "jsonl": JsonlReporter(),
-    "markdown": MarkdownReporter(),
-    "html": HtmlReporter(),
+    name: reporter_type() for name, reporter_type in REPORTER_FORMATS.items() if name != "json"
 }
 
 
@@ -221,7 +221,8 @@ def report(
                 context={"errors": ({"path": "format", "message": f"unknown format {format_!r}"},)},
             )
         run = apply_redaction(load_run_result(source), DEFAULT_REDACTION_POLICY)
-        destination = output if output is not None else source.with_suffix(_SUFFIXES[format_])
+        default_suffix = _SUFFIXES.get(format_, f".{format_}")
+        destination = output if output is not None else source.with_suffix(default_suffix)
         return _REPORTERS[format_].write(run, destination)
 
     destination = run_cli_command(_action, debug=debug)

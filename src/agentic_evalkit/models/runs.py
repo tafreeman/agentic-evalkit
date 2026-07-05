@@ -71,6 +71,22 @@ class EvalRunManifest(FrozenModel):
     code_fingerprint: str | None = None
     baseline_compatibility_rules: dict[str, JsonValue] = Field(default_factory=dict)
 
+    @classmethod
+    def provenance_field_names(cls) -> frozenset[str]:
+        """The comparability-relevant manifest provenance fields (design section 10)."""
+        return frozenset(
+            {
+                "adapter",
+                "grader",
+                "target_name",
+                "target_fingerprint_policy",
+                "target_fingerprint",
+                "sampling.temperature",
+                "sampling.seed",
+                "attempts",
+            }
+        )
+
     @model_validator(mode="after")
     def _validate_attempts_agree(self) -> "EvalRunManifest":
         """Reject a manifest whose two attempt counts have silently diverged.

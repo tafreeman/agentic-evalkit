@@ -25,6 +25,7 @@ any network access.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
@@ -35,10 +36,11 @@ from typer.testing import CliRunner
 
 from agentic_evalkit.cli import app
 from agentic_evalkit.cli import datasets as cli_datasets
-from agentic_evalkit.cli.runs import write_canonical_report
+from agentic_evalkit.cli.runs import build_target_for_document, write_canonical_report
 from agentic_evalkit.datasets.base import ProviderHealth
 from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.errors import DatasetNotFound
+from agentic_evalkit.manifest import HttpTargetConfig, ManifestDocument
 from agentic_evalkit.models import (
     DatasetRef,
     EvalRunManifest,
@@ -58,6 +60,7 @@ from agentic_evalkit.models import (
     SourceRecord,
 )
 from agentic_evalkit.reporters.json import JsonReporter
+from agentic_evalkit.targets import HttpTarget
 
 runner = CliRunner()
 
@@ -536,3 +539,105 @@ def test_report_missing_run_file_is_invalid_input(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 2
+
+
+# --- Story 2.3 (R-002): credential-hook runtime resolution never recorded ---
+#
+# The CLI-path half of Story 2.3: ``build_target_for_document`` is where the
+# credential hook actually resolves (``_load_http_target`` reads
+# ``os.environ.get(credential_hook)`` at build time). With the hook's env var
+# set to a sentinel secret, building the target must not write the resolved
+# value back into the document, and a canonical report of the run must never
+# contain it. (The manifest-persistence half is covered in
+# ``tests/unit/test_manifest.py``; recorded-evidence header redaction is
+# covered in ``tests/unit/targets/test_http_target.py``.)
+
+_CRED_HOOK_SECRET = "hook-secret-XYZZY-do-not-persist"
+_CRED_HOOK_ENV_NAME = "AGENTIC_EVALKIT_TEST_CLI_CRED_HOOK"
+
+
+def _http_hook_document() -> ManifestDocument:
+    manifest = EvalRunManifest(
+        run_name="http-hook-run",
+        dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+        adapter="gsm8k@1",
+        grader="normalized-exact@1",
+        target_name="cli-target",
+    )
+    return ManifestDocument(
+        manifest=manifest,
+        target=HttpTargetConfig(
+            url="https://example.test/eval", credential_hook=_CRED_HOOK_ENV_NAME
+        ),
+    )
+
+
+def test_building_target_resolves_hook_without_persisting_the_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Building the target through the CLI dispatch reads the hook's env var
+    (the real resolution point) but leaves the source document carrying only
+    the hook name -- the resolved secret never lands on the document/manifest.
+    """
+    monkeypatch.setenv(_CRED_HOOK_ENV_NAME, _CRED_HOOK_SECRET)
+    document = _http_hook_document()
+
+    target = build_target_for_document(document)
+    try:
+        assert isinstance(target, HttpTarget)
+        # Resolution actually happened: the hook's env var was read at build
+        # time and the resolved secret reached the target's header provider
+        # (an Authorization: Bearer <token> header), which is the mechanism a
+        # real request would carry. Without this the test could pass on a
+        # target that silently never resolved the hook at all.
+        header_provider = target._headers  # type: ignore[attr-defined]
+        assert header_provider is not None
+        resolved_headers = header_provider()
+        assert _CRED_HOOK_SECRET in resolved_headers["Authorization"]
+        # ...yet the document that produced the target is unchanged: it
+        # references only the hook name and never the resolved secret value.
+        assert isinstance(document.target, HttpTargetConfig)
+        assert document.target.credential_hook == _CRED_HOOK_ENV_NAME
+        serialized = document.model_dump_json()
+        assert _CRED_HOOK_ENV_NAME in serialized
+        assert _CRED_HOOK_SECRET not in serialized
+    finally:
+        # build_target_for_document constructs its own httpx client; close it
+        # so no unclosed-client ResourceWarning leaks into the suite. Guard the
+        # attribute access with getattr so a failed isinstance/assertion above
+        # is never masked by an AttributeError here.
+        client = getattr(target, "_client", None)
+        if client is not None:
+            asyncio.run(client.aclose())
+
+
+def test_canonical_report_of_a_hook_run_contains_no_resolved_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canonical report whose manifest *references the hook by name* (here in
+    ``run_name``, a serialized free-text field) records that hook NAME but never
+    the resolved secret VALUE, even though the hook's env var is set while the
+    report is written.
+
+    Anchoring the hook name into the serialized report makes the discrimination
+    real rather than vacuous: the persisted bytes provably carry a hook
+    reference, so if the pipeline ever resolved-and-persisted the secret it
+    could plausibly appear -- and it must not. What this does *not* cover: the
+    actual ``_load_http_target`` env-var resolution path (that is exercised by
+    ``test_building_target_resolves_hook_without_persisting_the_secret`` above);
+    here the run result is constructed directly, so no resolution runs.
+    """
+    monkeypatch.setenv(_CRED_HOOK_ENV_NAME, _CRED_HOOK_SECRET)
+    base = _run_result(run_id="hook-run")
+    hook_referencing_manifest = base.manifest.model_copy(
+        update={"run_name": f"hook-run-using-{_CRED_HOOK_ENV_NAME}"}
+    )
+    run = base.model_copy(update={"manifest": hook_referencing_manifest})
+
+    written = write_canonical_report(run, tmp_path)
+    text = written.read_text(encoding="utf-8")
+    # The report carries the hook NAME (proving it can carry hook-related
+    # text)...
+    assert _CRED_HOOK_ENV_NAME in text
+    # ...but never the resolved secret VALUE.
+    assert _CRED_HOOK_SECRET not in text

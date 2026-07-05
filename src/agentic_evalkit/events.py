@@ -109,7 +109,25 @@ RunEvent = (
     | RunFailed
 )
 
+#: Enumerable, reflection-friendly counterpart to the :data:`RunEvent` union:
+#: every concrete event type the runner may emit, in emission order. The
+#: redaction-enumeration contract asserts this tuple equals the union's
+#: members exactly, so adding an event type to one but not the other fails CI
+#: -- that binding is what makes structural contracts over events (e.g.
+#: "every field is wire-safe") impossible to bypass (Story 2.2).
+ALL_EVENT_TYPES: tuple[type[FrozenModel], ...] = (
+    RunStarted,
+    DatasetResolved,
+    SampleStarted,
+    ExecutionCompleted,
+    GradeCompleted,
+    SampleCompleted,
+    RunCompleted,
+    RunFailed,
+)
+
 __all__ = [
+    "ALL_EVENT_TYPES",
     "DatasetResolved",
     "ExecutionCompleted",
     "GradeCompleted",

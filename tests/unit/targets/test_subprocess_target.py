@@ -10,12 +10,14 @@ Linux"). They are relocated to ``tests/unit/targets/**`` per this task's
 explicit test-tree ownership rather than ``tests/integration/``.
 """
 
+import asyncio
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
-from agentic_evalkit.models import EvalSample, ExecutionStatus
+from agentic_evalkit.models import EvalSample, ExecutionStatus, NormalizedExecutionResult
 from agentic_evalkit.targets import SubprocessTarget
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -30,6 +32,28 @@ def _sample(sample_id: str = "s1") -> EvalSample:
     )
 
 
+def _subprocess_env() -> dict[str, str]:
+    """A copy of the parent environment with pytest-cov's subprocess coverage
+    auto-embedding variables stripped.
+
+    ``SubprocessTarget`` defaults to ``env=None`` (inherit everything), so a
+    spawned fixture script inherits ``COV_CORE_*``/``COVERAGE_PROCESS_START``
+    whenever the test session runs under ``pytest --cov``. pytest-cov's
+    site-installed embed hook then auto-starts a SEPARATE coverage collector
+    inside the subprocess, which can record without branch data and crash the
+    parent's ``cov.combine()`` with ``DataError: Can't combine statement
+    coverage data with branch data``. These fixture scripts are test-only
+    stubs outside ``agentic_evalkit`` (excluded from the coverage source
+    anyway), so subprocess coverage measurement here is pure noise -- strip
+    the trigger variables so it never starts.
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("COV_CORE_") and key != "COVERAGE_PROCESS_START"
+    }
+
+
 def _target(
     script: str,
     *,
@@ -40,6 +64,7 @@ def _target(
         command=(sys.executable, str(_FIXTURES / script)),
         max_output_bytes=max_output_bytes,
         max_stderr_bytes=max_stderr_bytes,
+        env=_subprocess_env(),
     )
 
 
@@ -132,6 +157,7 @@ async def test_uses_no_shell_and_argument_tuple() -> None:
         command=(sys.executable, str(_FIXTURES / "echo_target.py")),
         max_output_bytes=65_536,
         max_stderr_bytes=65_536,
+        env=_subprocess_env(),
     )
     assert isinstance(target.command, tuple)
     sample = EvalSample(
@@ -143,3 +169,142 @@ async def test_uses_no_shell_and_argument_tuple() -> None:
     result = await target.execute(sample, attempt=1, timeout_seconds=5.0)
     assert result.status is ExecutionStatus.COMPLETED
     assert result.output == {"question": "echo hi; rm -rf /"}
+
+
+# --- Story 5.1 (R-005): Windows ProactorEventLoop oversized-output no-hang ---
+#
+# On Windows, ``asyncio.run`` uses ``WindowsProactorEventLoopPolicy`` by
+# default (Python 3.8+), and pytest-asyncio's ``asyncio_mode = "auto"`` runs
+# each async test on that default loop. The proactor pipe transport can leave
+# a connection-lost callback unfired after a ``StreamReader`` overrun, making
+# ``Process.wait()`` hang even though the OS process has already exited;
+# ``SubprocessTarget._terminate`` guards this with a bounded post-``kill()``
+# wait plus a best-effort transport close. The tests below make that loop
+# dimension explicit (they skip off Windows) and bound the whole exchange with
+# ``asyncio.wait`` (via ``_run_within_no_hang_bound``); because ``asyncio.wait``
+# never cancels the awaited task on timeout, a regression manifests as an
+# explicit ``AssertionError`` failure -- immune to being masked by an
+# uncancellable-task wedge -- rather than a wedged CI job.
+
+_WINDOWS_ONLY = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="ProactorEventLoop is the default asyncio loop only on Windows",
+)
+
+# Generous relative to the target's own internal 1.0s post-kill wait bound, so
+# only a genuine unbounded hang (not ordinary teardown slack) trips it.
+_NO_HANG_WALL_CLOCK_SECONDS = 20.0
+
+# Fixed envelope (timestamps, fingerprint, error type/message) added to the
+# configured stream bounds when asserting the serialized result stays byte-
+# bounded. Small and constant; only an *unbounded* stream leaking into the
+# result would blow past bounds + this envelope.
+_RESULT_ENVELOPE_BYTES = 4096
+
+
+async def _run_within_no_hang_bound(
+    target: SubprocessTarget,
+) -> NormalizedExecutionResult:
+    """Await ``target.execute`` under a wall-clock bound using ``asyncio.wait``.
+
+    ``asyncio.wait`` (unlike ``asyncio.wait_for``) never cancels the awaited
+    task on timeout, so a task wedged in an *uncancellable* teardown cannot
+    turn a hang into a masked cancellation: if the bound elapses, ``done`` is
+    empty and the explicit assertion fails with a clear no-hang message. On the
+    failure path the still-pending task is cancelled and suppressed so no
+    pending-task teardown noise leaks.
+    """
+    task = asyncio.ensure_future(target.execute(_sample(), attempt=1, timeout_seconds=5.0))
+    done, pending = await asyncio.wait({task}, timeout=_NO_HANG_WALL_CLOCK_SECONDS)
+    if not done:
+        for stuck in pending:
+            stuck.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        raise AssertionError("teardown did not complete within the no-hang bound")
+    return await next(iter(done))
+
+
+def _assert_result_stays_byte_bounded(
+    result: NormalizedExecutionResult, *, max_output_bytes: int, max_stderr_bytes: int
+) -> None:
+    """Assert the returned result respects the configured stream byte bounds.
+
+    On the oversized-output error path the megabyte-scale stdout is never
+    inlined (``output is None``); any captured stderr surfaced as diagnostic
+    evidence is bounded by ``max_stderr_bytes``; and the whole serialized
+    result stays within the configured bounds plus a small fixed envelope --
+    so no unbounded stream ever reaches the result on this platform.
+    """
+    assert result.output is None
+    if result.error is not None:
+        captured_stderr = result.error.get("stderr")
+        if isinstance(captured_stderr, str):
+            assert len(captured_stderr.encode("utf-8")) <= max_stderr_bytes
+    serialized = len(result.model_dump_json().encode("utf-8"))
+    assert serialized <= max_output_bytes + max_stderr_bytes + _RESULT_ENVELOPE_BYTES
+
+
+def _assert_running_on_proactor_loop() -> None:
+    """Make the loop-policy assumption explicit: on Windows the active loop
+    must be a ``ProactorEventLoop`` for this guard to exercise the transport
+    interaction it targets. If some other loop is installed, skip rather than
+    assert a false pass.
+    """
+    loop = asyncio.get_running_loop()
+    proactor_loop = getattr(asyncio, "ProactorEventLoop", None)
+    if proactor_loop is None or not isinstance(loop, proactor_loop):
+        pytest.skip(f"active event loop is {type(loop).__name__}, not ProactorEventLoop")
+
+
+@_WINDOWS_ONLY
+@pytest.mark.asyncio
+async def test_oversized_output_on_proactor_loop_tears_down_without_hanging() -> None:
+    """An oversized standard-output line on a ProactorEventLoop must complete
+    the exchange (as a bounded ``ERROR``) via kill-and-await teardown, never
+    hang. The ``asyncio.wait`` wall-clock bound turns a regression into an
+    explicit ``AssertionError`` failure instead of a hung run, and the result
+    is asserted to stay byte-bounded.
+    """
+    _assert_running_on_proactor_loop()
+    max_output_bytes = 1024
+    max_stderr_bytes = 65_536
+    target = _target(
+        "oversized_output_target.py",
+        max_output_bytes=max_output_bytes,
+        max_stderr_bytes=max_stderr_bytes,
+    )
+    result = await _run_within_no_hang_bound(target)
+    assert result.status is ExecutionStatus.ERROR
+    assert result.error is not None
+    # Byte-bounded: the megabyte of standard output never lands inline in the
+    # result; the serialized result stays within the configured bounds.
+    _assert_result_stays_byte_bounded(
+        result, max_output_bytes=max_output_bytes, max_stderr_bytes=max_stderr_bytes
+    )
+
+
+@_WINDOWS_ONLY
+@pytest.mark.asyncio
+async def test_oversized_output_stays_byte_bounded_with_concurrent_stderr_drain() -> None:
+    """With both an oversized standard-output line *and* an oversized standard
+    error stream (concurrent drain), teardown on the ProactorEventLoop still
+    completes within the wall-clock bound and reports a bounded ``ERROR``: the
+    concurrent stderr drain never deadlocks the pipe on Windows.
+    """
+    _assert_running_on_proactor_loop()
+    max_output_bytes = 1024
+    max_stderr_bytes = 1024
+    target = _target(
+        "oversized_stderr_and_output_target.py",
+        max_output_bytes=max_output_bytes,
+        max_stderr_bytes=max_stderr_bytes,
+    )
+    result = await _run_within_no_hang_bound(target)
+    assert result.status is ExecutionStatus.ERROR
+    assert result.error is not None
+    # Byte-bounded even with both streams oversized and drained concurrently:
+    # neither the oversized standard output nor the oversized standard error
+    # leaks unbounded into the result.
+    _assert_result_stays_byte_bounded(
+        result, max_output_bytes=max_output_bytes, max_stderr_bytes=max_stderr_bytes
+    )
