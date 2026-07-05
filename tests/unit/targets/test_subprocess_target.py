@@ -11,6 +11,7 @@ explicit test-tree ownership rather than ``tests/integration/``.
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,28 @@ def _sample(sample_id: str = "s1") -> EvalSample:
     )
 
 
+def _subprocess_env() -> dict[str, str]:
+    """A copy of the parent environment with pytest-cov's subprocess coverage
+    auto-embedding variables stripped.
+
+    ``SubprocessTarget`` defaults to ``env=None`` (inherit everything), so a
+    spawned fixture script inherits ``COV_CORE_*``/``COVERAGE_PROCESS_START``
+    whenever the test session runs under ``pytest --cov``. pytest-cov's
+    site-installed embed hook then auto-starts a SEPARATE coverage collector
+    inside the subprocess, which can record without branch data and crash the
+    parent's ``cov.combine()`` with ``DataError: Can't combine statement
+    coverage data with branch data``. These fixture scripts are test-only
+    stubs outside ``agentic_evalkit`` (excluded from the coverage source
+    anyway), so subprocess coverage measurement here is pure noise -- strip
+    the trigger variables so it never starts.
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("COV_CORE_") and key != "COVERAGE_PROCESS_START"
+    }
+
+
 def _target(
     script: str,
     *,
@@ -41,6 +64,7 @@ def _target(
         command=(sys.executable, str(_FIXTURES / script)),
         max_output_bytes=max_output_bytes,
         max_stderr_bytes=max_stderr_bytes,
+        env=_subprocess_env(),
     )
 
 
@@ -133,6 +157,7 @@ async def test_uses_no_shell_and_argument_tuple() -> None:
         command=(sys.executable, str(_FIXTURES / "echo_target.py")),
         max_output_bytes=65_536,
         max_stderr_bytes=65_536,
+        env=_subprocess_env(),
     )
     assert isinstance(target.command, tuple)
     sample = EvalSample(
