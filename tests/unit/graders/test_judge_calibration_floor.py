@@ -194,7 +194,11 @@ def test_usability_seam_itself_reports_age_failures() -> None:
     now = datetime.now(UTC)
     undated = _artifact(calibrated_at=None)
     stale = _artifact(calibrated_at=now - timedelta(days=120), expires_at=now + timedelta(days=30))
-    fresh = _artifact()
+    # calibrated_at=now (not _artifact()'s own datetime.now(UTC) default,
+    # called moments after `now` above) -- otherwise the future-dated-
+    # calibration guard can trip on the microsecond gap between the two
+    # clock reads on a fast machine, an unrelated flake in this fixture.
+    fresh = _artifact(calibrated_at=now)
     assert undated.usability_failure_reason(now=now) is not None
     assert stale.usability_failure_reason(now=now) is not None
     assert fresh.usability_failure_reason(now=now) is None
@@ -247,10 +251,35 @@ def test_naive_calibrated_at_is_rejected_at_construction() -> None:
         _artifact(calibrated_at=naive_timestamp)
 
 
+def test_naive_expires_at_is_rejected_at_construction() -> None:
+    # is_expired() compares expires_at against an aware datetime.now(UTC); a
+    # naive expires_at would raise TypeError at grade time, not demote.
+    naive_timestamp = datetime.now()  # deliberately naive: the rejection under test
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        _artifact(expires_at=naive_timestamp)
+
+
 def test_calibrated_at_after_expiry_is_rejected_at_construction() -> None:
     now = datetime.now(UTC)
     with pytest.raises(ValidationError, match="must not be after expires_at"):
         _artifact(calibrated_at=now + timedelta(days=40), expires_at=now + timedelta(days=30))
+
+
+async def test_future_dated_calibrated_at_cannot_gate() -> None:
+    # calibrated_at in the future (but still before expires_at, so
+    # construction's after-expiry check does not catch it) must not be
+    # mistaken for a fresh, trustworthy calibration -- effective_now -
+    # calibrated_at would be negative and never exceed the max-age bound,
+    # silently treating an impossible timestamp as within the 90-day floor.
+    now = datetime.now(UTC)
+    calibration = _artifact(
+        calibrated_at=now + timedelta(days=10), expires_at=now + timedelta(days=30)
+    )
+    assert calibration.age_failure_reason(now=now) is not None
+    grader = JudgeGrader(_FakeJudge(), calibration=calibration, gate=True)
+    result = await grader.grade(_sample(), _execution())
+    assert result.status is GradeStatus.PASS  # advisory verdict from the score
+    assert result.hard_gate is False
 
 
 # --- constants and no-over-restriction guards --------------------------------

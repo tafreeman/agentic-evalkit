@@ -68,6 +68,50 @@ def test_redaction_leaves_samples_without_grades_untouched(
     assert redacted.samples[2].grade is None
 
 
+def test_redaction_covers_the_system_under_tests_raw_output_too(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
+    """A secret-shaped value in ``execution.output`` must be redacted at the
+    report boundary just like grade evidence -- the target's own raw words
+    are not exempt. This is the gap the spill boundary's docstring assumed
+    was already closed here: an output that never hits the spill threshold
+    (or shrinks below it once redacted) still reaches this function.
+    """
+    run = pass_error_timeout_and_provenance_run
+    leaking_execution = run.samples[0].execution.model_copy(
+        update={"output": {"answer": "42", "note": "captured sk-abc123 in transit"}}
+    )
+    leaking_sample = run.samples[0].model_copy(update={"execution": leaking_execution})
+    run = run.model_copy(update={"samples": (leaking_sample, *run.samples[1:])})
+
+    redacted = apply_redaction(run, RedactionPolicy(secret_patterns=(r"sk-[a-zA-Z0-9]+",)))
+    redacted_output = redacted.samples[0].execution.output
+    assert redacted_output is not None
+    assert redacted_output == {"answer": "42", "note": "captured [REDACTED] in transit"}
+    # The grade (untouched by this policy's evidence_keys) survives unchanged.
+    assert redacted.samples[0].grade == run.samples[0].grade
+
+
+def test_redaction_covers_execution_error_payloads(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
+    """An operational failure's captured ``error`` context can carry exception
+    text (stack traces, repr'd arguments) that happens to embed a credential
+    -- it must be redacted exactly like a successful execution's output."""
+    run = pass_error_timeout_and_provenance_run
+    leaking_execution = run.samples[1].execution.model_copy(
+        update={"error": {"message": "connect failed with Bearer eyJhbGciOiJIUzI1NiJ9.tok"}}
+    )
+    leaking_sample = run.samples[1].model_copy(update={"execution": leaking_execution})
+    run = run.model_copy(update={"samples": (run.samples[0], leaking_sample, run.samples[2])})
+
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY)
+    redacted_error = redacted.samples[1].execution.error
+    assert redacted_error is not None
+    assert "eyJhbGciOiJIUzI1NiJ9" not in str(redacted_error)
+    assert "[REDACTED]" in str(redacted_error)
+
+
 def test_default_policy_redacts_known_credential_shapes(
     pass_error_timeout_and_provenance_run: EvalRunResult,
 ) -> None:

@@ -17,6 +17,7 @@ from pydantic import JsonValue
 
 from agentic_evalkit.models import EvalRunResult, GradeResult, SampleResult
 from agentic_evalkit.models.base import FrozenModel
+from agentic_evalkit.models.execution import NormalizedExecutionResult
 
 _REDACTED = "[REDACTED]"
 
@@ -120,22 +121,64 @@ def _redact_grade(
     return grade.model_copy(update={"evidence": redacted_evidence})
 
 
+def _redact_execution(
+    execution: NormalizedExecutionResult, *, patterns: tuple[re.Pattern[str], ...]
+) -> NormalizedExecutionResult:
+    """Redact secret-shaped substrings from a system-under-test's raw output.
+
+    Unlike grade evidence, ``output``/``structured_output``/``error`` are the
+    target's own words, not the harness's -- there is no meaningful
+    ``evidence_keys``-style drop list for keys the harness doesn't define, so
+    only pattern substitution applies here, never key removal. Without this,
+    an output that happens to embed a credential-shaped value is written to
+    the canonical report unredacted regardless of the spill threshold: the
+    spill boundary (``EvalRunner._spill_large_output``) only redacts bytes
+    that are about to leave the in-memory result as an oversized artifact,
+    and small/never-spilled outputs reach the report exactly as the target
+    returned them until this function also covers them.
+    """
+    if not patterns:
+        return execution
+    updates: dict[str, object] = {}
+    for field_name in ("output", "structured_output", "error"):
+        value = getattr(execution, field_name)
+        if value is None:
+            continue
+        redacted_value = _redact_json_value(value, patterns)
+        if redacted_value != value:
+            updates[field_name] = redacted_value
+    if not updates:
+        return execution
+    return execution.model_copy(update=updates)
+
+
 def _redact_sample(
     sample: SampleResult,
     *,
     evidence_keys: frozenset[str],
     patterns: tuple[re.Pattern[str], ...],
 ) -> SampleResult:
-    if sample.grade is None:
+    updates: dict[str, object] = {}
+    redacted_execution = _redact_execution(sample.execution, patterns=patterns)
+    if redacted_execution is not sample.execution:
+        updates["execution"] = redacted_execution
+    if sample.grade is not None:
+        redacted_grade = _redact_grade(sample.grade, evidence_keys=evidence_keys, patterns=patterns)
+        if redacted_grade is not sample.grade:
+            updates["grade"] = redacted_grade
+    if not updates:
         return sample
-    redacted_grade = _redact_grade(sample.grade, evidence_keys=evidence_keys, patterns=patterns)
-    if redacted_grade is sample.grade:
-        return sample
-    return sample.model_copy(update={"grade": redacted_grade})
+    return sample.model_copy(update=updates)
 
 
 def apply_redaction(run: EvalRunResult, policy: RedactionPolicy) -> EvalRunResult:
     """Return a new :class:`EvalRunResult` with ``policy`` applied.
+
+    Covers both the harness's own grade evidence (key removal via
+    ``evidence_keys``, plus pattern substitution) and each execution's raw
+    ``output``/``structured_output``/``error`` fields -- the system-under-
+    test's own words, pattern-substituted only, since there is no harness-
+    defined key list for content the harness didn't author.
 
     ``run`` is never mutated (design ADR-0002); this always returns a fresh
     model built with ``model_copy``, even when the policy removes nothing.

@@ -146,18 +146,22 @@ class CalibrationArtifact(FrozenModel):
 
     @model_validator(mode="after")
     def _validate_calibrated_at(self) -> "CalibrationArtifact":
-        """Reject a ``calibrated_at`` that cannot support the age floor.
+        """Reject timestamps that cannot support the age floor or expiry check.
 
-        A naive timestamp would make the age arithmetic against the UTC
-        clock raise at grade time -- and a crash is not a demotion (D-1 is
-        fail-closed, never fail-crashed). A calibration taken after its own
+        A naive ``expires_at`` or ``calibrated_at`` would make the age/expiry
+        arithmetic against the UTC clock raise at grade time -- and a crash is
+        not a demotion (D-1 is fail-closed, never fail-crashed). ``expires_at``
+        is required on every artifact (unlike optional ``calibrated_at``), so
+        it is validated unconditionally. A calibration taken after its own
         expiry is self-contradictory data and is rejected outright.
         """
+        if self.expires_at.tzinfo is None:
+            raise ValueError("expires_at must be timezone-aware")
         if self.calibrated_at is None:
             return self
         if self.calibrated_at.tzinfo is None:
             raise ValueError("calibrated_at must be timezone-aware")
-        if self.expires_at.tzinfo is not None and self.calibrated_at > self.expires_at:
+        if self.calibrated_at > self.expires_at:
             raise ValueError("calibrated_at must not be after expires_at")
         return self
 
@@ -199,9 +203,19 @@ class CalibrationArtifact(FrozenModel):
                 f"calibration {self.calibration_id!r} has no calibrated_at; "
                 f"cannot verify age within {PROJECT_MAX_CALIBRATION_AGE_DAYS} days"
             )
-        if (now or datetime.now(UTC)) - self.calibrated_at > timedelta(
-            days=PROJECT_MAX_CALIBRATION_AGE_DAYS
-        ):
+        effective_now = now or datetime.now(UTC)
+        if self.calibrated_at > effective_now:
+            # A future-dated calibration is self-contradictory evidence, not
+            # merely "fresh": ``effective_now - calibrated_at`` would be
+            # negative and never exceed the max-age bound below, silently
+            # treating an impossible timestamp as trustworthy. Construction
+            # only rejects calibrated_at *after* expires_at, which does not
+            # catch a future calibrated_at still comfortably before expiry.
+            return (
+                f"calibration {self.calibration_id!r} calibrated_at "
+                f"{self.calibrated_at.isoformat()} is in the future"
+            )
+        if effective_now - self.calibrated_at > timedelta(days=PROJECT_MAX_CALIBRATION_AGE_DAYS):
             return (
                 f"calibration {self.calibration_id!r} age exceeds the maximum of "
                 f"{PROJECT_MAX_CALIBRATION_AGE_DAYS} days"

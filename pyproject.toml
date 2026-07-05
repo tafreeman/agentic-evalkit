@@ -66,7 +66,13 @@ dev = [
 packages = ["src/agentic_evalkit"]
 
 [tool.pytest.ini_options]
-addopts = "--strict-config --strict-markers -m 'not live'"
+# --cov-config is pinned explicitly (not left to coverage.py's own file
+# auto-discovery): without it, pytest-cov's internal parallel-mode data file
+# and coverage.py's combine-time accumulator can each resolve the branch
+# setting differently on some platforms, crashing with
+# "coverage.exceptions.DataError: Can't combine ... coverage data with ...
+# data" -- see pytest-dev/pytest-cov#479 and nedbat/coveragepy#512.
+addopts = "--strict-config --strict-markers -m 'not live' --cov-config=pyproject.toml"
 asyncio_mode = "auto"
 markers = [
   "integration: component integration tests",
