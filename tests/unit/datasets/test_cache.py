@@ -290,3 +290,110 @@ def test_concurrent_writes_to_distinct_offsets_are_all_readable(tmp_path: Path) 
 
     for key in keys:
         assert cache.read(key) == f"payload-for-offset-{key.offset}".encode()
+
+
+# --- Story 4.1 (R-001): Windows concurrent-write & corruption guard ---------
+#
+# These close the gaps left above: a reader racing live writers (not just a
+# read after all writers have joined), a bounded in-test repeat loop so a
+# same-key write race surfaces as a suite failure without needing the
+# `--count` CLI flag, and the truncated-to-empty / equal-length bit-flip
+# corruption variants distinct from an offline miss. ADR-0004 requires
+# checksum + byte-count + key-identity verification on every read, so no
+# interleaving may ever surface a partially-written entry as valid.
+
+# A bounded iteration count: small enough that the whole loop stays well under
+# a second, large enough to make a genuine same-key write race improbable to
+# pass by luck on every iteration.
+_RACE_ITERATIONS = 12
+
+
+@pytest.mark.parametrize("iteration", range(_RACE_ITERATIONS))
+def test_reader_racing_concurrent_writers_never_sees_corruption(
+    tmp_path: Path, iteration: int
+) -> None:
+    """A reader interleaved with many same-key writers must, on every read,
+    either return one fully-valid written payload or raise a typed
+    ``OfflineCacheMiss`` / ``DatasetIntegrityError`` -- never a torn or
+    checksum-invalid result. Repeated a bounded number of times so a race is
+    unlikely to slip through every iteration.
+    """
+    cache = DatasetCache(tmp_path / f"iter-{iteration}")
+    key = _sample_key()
+    payloads = [f"payload-number-{i}".encode() for i in range(8)]
+    valid = set(payloads)
+    start = threading.Barrier(len(payloads) + 1)
+
+    def _write(payload: bytes) -> None:
+        start.wait()
+        cache.write(key, payload)
+
+    def _read_repeatedly() -> None:
+        start.wait()
+        for _ in range(40):
+            try:
+                result = cache.read(key)
+            except (OfflineCacheMiss, DatasetIntegrityError):
+                continue
+            # A successful read must be exactly one of the written payloads,
+            # never a partial byte string or a mix of two writes.
+            assert result in valid
+
+    with ThreadPoolExecutor(max_workers=len(payloads) + 1) as pool:
+        futures = [pool.submit(_write, payload) for payload in payloads]
+        futures.append(pool.submit(_read_repeatedly))
+        for future in futures:
+            future.result()
+
+    # After every writer has finished, exactly one valid entry remains.
+    assert cache.read(key) in valid
+
+
+def test_truncated_to_empty_payload_raises_integrity_error_not_offline_miss(
+    tmp_path: Path,
+) -> None:
+    """An entry whose payload has been truncated to zero bytes (but whose
+    manifest still records the original checksum/byte count) is corrupt, not
+    absent: it must raise ``DatasetIntegrityError``, distinct from the
+    ``OfflineCacheMiss`` a genuinely missing entry raises.
+    """
+    cache = DatasetCache(tmp_path)
+    key = _sample_key()
+    cache.write(key, b"a real payload of some length")
+    cache.payload_path(key).write_bytes(b"")
+    with pytest.raises(DatasetIntegrityError):
+        cache.read(key)
+
+
+def test_equal_length_bit_flip_raises_integrity_error(tmp_path: Path) -> None:
+    """A single-byte flip that preserves the payload length (so the byte-count
+    check alone would pass) is still caught by the checksum verification and
+    surfaces as ``DatasetIntegrityError`` -- byte count is not sufficient on
+    its own.
+    """
+    cache = DatasetCache(tmp_path)
+    key = _sample_key()
+    original = b"payload-with-a-known-length"
+    cache.write(key, original)
+    flipped = bytearray(original)
+    flipped[0] ^= 0x01
+    assert len(flipped) == len(original)
+    cache.payload_path(key).write_bytes(bytes(flipped))
+    with pytest.raises(DatasetIntegrityError):
+        cache.read(key)
+
+
+def test_missing_payload_but_present_manifest_is_offline_miss_not_corruption(
+    tmp_path: Path,
+) -> None:
+    """If the payload file is absent while the manifest survives, the read is
+    an ``OfflineCacheMiss`` (the entry is treated as not-present), never a
+    ``DatasetIntegrityError``: absence and corruption stay distinct even in
+    this partial-write shape.
+    """
+    cache = DatasetCache(tmp_path)
+    key = _sample_key()
+    cache.write(key, b"payload")
+    cache.payload_path(key).unlink()
+    with pytest.raises(OfflineCacheMiss):
+        cache.read(key)

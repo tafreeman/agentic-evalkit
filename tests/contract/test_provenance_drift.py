@@ -76,9 +76,7 @@ def test_every_manifest_field_is_categorized_for_comparability() -> None:
 
     # Nested sampling leaves are declared with dotted paths; collapse to the
     # top-level container name to compare against manifest field names.
-    provenance_top_level = {
-        name.split(".")[0] for name in EvalRunManifest.provenance_field_names()
-    }
+    provenance_top_level = {name.split(".")[0] for name in EvalRunManifest.provenance_field_names()}
     # Top-level manifest fields that intentionally do NOT affect whether a
     # run-to-run delta is meaningful. Comparability uses the *resolved* dataset
     # identity (on EvalRunResult.resolved_dataset), not the requested

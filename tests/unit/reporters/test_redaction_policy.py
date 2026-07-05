@@ -1,5 +1,9 @@
 """Tests for the shared redaction policy (design §12, plan Task 13)."""
 
+import re
+
+import pytest
+
 from agentic_evalkit.models import EvalRunResult
 from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY, RedactionPolicy, apply_redaction
 
@@ -115,3 +119,89 @@ def test_default_policy_leaves_benign_evidence_untouched(
     redacted_grade = redacted.samples[0].grade
     assert redacted_grade is not None
     assert redacted_grade.evidence == benign
+
+
+# --- Story 2.4 (R-002): RedactionPolicy construction edges ------------------
+#
+# The default pattern set must redact each representative credential shape in
+# isolation, and a malformed policy must fail loudly rather than silently
+# under-redact. See the report note on the "rejected at construction" AC:
+# ``RedactionPolicy()`` (empty) is the documented *opt-out* (the runner
+# defaults to ``DEFAULT_REDACTION_POLICY``, with empty as the explicit
+# opt-out), and patterns are compiled at the write boundary
+# (``apply_redaction``), not in the pydantic constructor -- so an invalid
+# regex is rejected at *write* time, not construction time. These guards pin
+# the behaviour the source actually provides: fail-loud, never silent
+# under-redaction.
+
+
+def _with_single_evidence_value(run: EvalRunResult, value: str) -> EvalRunResult:
+    """Return ``run`` with one grade's evidence replaced by ``{"note": value}``."""
+    grade = run.samples[0].grade
+    assert grade is not None
+    grade = grade.model_copy(update={"evidence": {"note": value}})
+    sample = run.samples[0].model_copy(update={"grade": grade})
+    return run.model_copy(update={"samples": (sample, *run.samples[1:])})
+
+
+@pytest.mark.parametrize(
+    ("secret", "sentinel"),
+    [
+        ("hf_AbCdEfGh0123456789", "hf_AbCdEfGh0123456789"),
+        ("sk-proj-abcDEF0123456789xy", "sk-proj-abcDEF0123456789xy"),
+        ("Authorization: Bearer eyJhbGciOiJIUzI1Ni.payload", "eyJhbGciOiJIUzI1Ni.payload"),
+    ],
+    ids=["openai-sk", "hf-token", "bearer"],
+)
+def test_each_default_pattern_redacts_its_representative_secret_in_isolation(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+    secret: str,
+    sentinel: str,
+) -> None:
+    """Every default secret pattern redacts its representative credential when
+    that credential is the only thing in the evidence value, so no default
+    pattern is dead or mis-anchored.
+    """
+    run = _with_single_evidence_value(
+        pass_error_timeout_and_provenance_run, f"captured {secret} in output"
+    )
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY)
+    redacted_grade = redacted.samples[0].grade
+    assert redacted_grade is not None
+    rendered = str(redacted_grade.evidence["note"])
+    assert sentinel not in rendered
+    assert "[REDACTED]" in rendered
+
+
+def test_empty_policy_is_a_valid_opt_out_not_a_construction_error() -> None:
+    """``RedactionPolicy()`` (no patterns, no evidence keys) is a valid,
+    constructible opt-out -- it is the documented way to disable redaction,
+    not a malformed policy. Construction must succeed and leave both tuples
+    empty.
+    """
+    policy = RedactionPolicy()
+    assert policy.secret_patterns == ()
+    assert policy.evidence_keys == ()
+
+
+def test_invalid_regex_pattern_fails_loudly_at_the_write_boundary(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
+    """A policy carrying an unparseable regex must not silently under-redact:
+    it fails loudly (``re.error``) when applied at the write boundary. (Note:
+    the source compiles patterns in ``apply_redaction``, so this is enforced
+    at write time, not in the constructor -- see the Story 2.4 report note.)
+    """
+    bad_policy = RedactionPolicy(secret_patterns=("[unterminated",))
+    with pytest.raises(re.error):
+        apply_redaction(pass_error_timeout_and_provenance_run, bad_policy)
+
+
+def test_construction_accepts_an_invalid_regex_but_write_rejects_it() -> None:
+    """Documents the AC deviation explicitly: an invalid regex is accepted at
+    construction (pydantic does not compile it) and only rejected when the
+    policy is used. Constructing it must not raise.
+    """
+    policy = RedactionPolicy(secret_patterns=("(",))
+    # Constructed fine; the pattern is stored verbatim as a string.
+    assert policy.secret_patterns == ("(",)

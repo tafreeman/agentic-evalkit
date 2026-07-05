@@ -120,9 +120,7 @@ def _artifact(**overrides: object) -> CalibrationArtifact:
 async def test_below_project_tnr_floor_cannot_gate() -> None:
     # TNR = TN/(TN+FP) = 90/100 = 0.90, below the 0.95 project floor, even
     # though it clears the artifact's own threshold=0.7. TPR is high (0.99).
-    calibration = _artifact(
-        true_negative=90, false_positive=10, true_positive=99, false_negative=1
-    )
+    calibration = _artifact(true_negative=90, false_positive=10, true_positive=99, false_negative=1)
     assert calibration.true_negative_rate == pytest.approx(0.90)
     grader = JudgeGrader(_FakeJudge(), calibration=calibration, gate=True)
     result = await grader.grade(_sample(), _execution())
@@ -132,9 +130,7 @@ async def test_below_project_tnr_floor_cannot_gate() -> None:
 
 async def test_below_project_tpr_floor_cannot_gate() -> None:
     # TPR = TP/(TP+FN) = 80/100 = 0.80, below the 0.85 project floor; TNR high.
-    calibration = _artifact(
-        true_positive=80, false_negative=20, true_negative=99, false_positive=1
-    )
+    calibration = _artifact(true_positive=80, false_negative=20, true_negative=99, false_positive=1)
     assert calibration.true_positive_rate == pytest.approx(0.80)
     grader = JudgeGrader(_FakeJudge(), calibration=calibration, gate=True)
     result = await grader.grade(_sample(), _execution())
@@ -178,9 +174,7 @@ async def test_calibration_clearing_the_floor_still_gates() -> None:
     # Guard against over-restriction: a calibration above BOTH floors
     # (TNR=0.97, TPR=0.90) and fresh must still be allowed to gate, so the new
     # floor does not silently disable otherwise-valid calibrations.
-    calibration = _artifact(
-        true_positive=90, false_negative=10, true_negative=97, false_positive=3
-    )
+    calibration = _artifact(true_positive=90, false_negative=10, true_negative=97, false_positive=3)
     assert calibration.true_negative_rate == pytest.approx(0.97)
     assert calibration.true_positive_rate == pytest.approx(0.90)
     grader = JudgeGrader(_FakeJudge(), calibration=calibration, gate=True)

@@ -99,6 +99,30 @@ The cache lives in the platform user-cache directory by default (honoring
 `AGENTIC_EVALKIT_CACHE_DIR` as an override, then `%LOCALAPPDATA%` on
 Windows or `$XDG_CACHE_HOME`/`~/.cache` elsewhere).
 
+### Parallel and multi-process runs
+
+The supported pattern for running evaluations in parallel — multiple
+processes or CI workers at once — is to give **each worker its own cache
+directory** via a distinct `AGENTIC_EVALKIT_CACHE_DIR`. Per-worker
+directories are fully isolated on disk, so workers never contend on the same
+entry and one worker's in-progress write can never be observed by another:
+
+```bash
+# Worker 1
+AGENTIC_EVALKIT_CACHE_DIR=/cache/worker-1 agentic-evalkit run eval.yaml --yes
+# Worker 2 (in parallel)
+AGENTIC_EVALKIT_CACHE_DIR=/cache/worker-2 agentic-evalkit run eval.yaml --yes
+```
+
+Sharing a single cache root across parallel workers is **not recommended**.
+It remains correct — every read verifies checksum, byte count, and key
+identity, so a racing write is fail-closed (a partially-applied entry
+surfaces as a typed `DatasetIntegrityError`, never as silently corrupt data)
+— but concurrent writers to the same entry serialize on a per-key lock and
+`Path.replace()` atomicity is not guaranteed on every Windows filesystem, so
+a shared root trades away the isolation the per-worker pattern gives you for
+no benefit. Prefer one `AGENTIC_EVALKIT_CACHE_DIR` per worker.
+
 ### The `parquet` extra
 
 For datasets or workflows where the Dataset Viewer's row-by-row pagination

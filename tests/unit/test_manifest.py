@@ -17,8 +17,19 @@ import yaml
 from pydantic import ValidationError
 
 from agentic_evalkit.errors import ManifestValidationError
-from agentic_evalkit.manifest import CliTarget, ManifestDocument, dump_manifest, load_manifest
+from agentic_evalkit.manifest import (
+    CliTarget,
+    HttpTargetConfig,
+    ManifestDocument,
+    dump_manifest,
+    load_manifest,
+)
 from agentic_evalkit.models import DatasetRef, EvalRunManifest, SamplingPolicy
+
+#: A distinctive sentinel that must never be persisted anywhere: it is the
+#: *value* an ``HttpTargetConfig.credential_hook`` env var holds at run time.
+_HOOK_SECRET = "hook-secret-XYZZY-do-not-persist"
+_HOOK_ENV_NAME = "AGENTIC_EVALKIT_TEST_CRED_HOOK"
 
 
 def _write(tmp_path: Path, content: str) -> Path:
@@ -258,3 +269,82 @@ attempts: 1
     errors = excinfo.value.context.get("errors")
     assert errors
     assert any("equal" in entry["message"] for entry in errors)  # type: ignore[union-attr]
+
+
+# --- Story 2.3 (R-002): credential-hook runtime resolution never recorded ---
+#
+# ``HttpTargetConfig.credential_hook`` stores the *name* of an env var the CLI
+# reads at run time (``agentic_evalkit.cli.runs._load_http_target`` does
+# ``os.environ.get(credential_hook)``); the resolved secret must never be
+# persisted. These manifest-level guards prove the persistence half of the
+# AC: with the env var actually set to the sentinel secret, neither the dumped
+# YAML nor a JSON round-trip of the document carries the resolved value -- only
+# the hook reference (the env-var name). The CLI-path (build + report)
+# assertions live in ``tests/integration/test_cli.py``.
+
+
+def _http_hook_document() -> ManifestDocument:
+    manifest = EvalRunManifest(
+        run_name="http-hook",
+        dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+        adapter="gsm8k@1",
+        grader="normalized-exact@1",
+        target_name="cli-target",
+    )
+    return ManifestDocument(
+        manifest=manifest,
+        target=HttpTargetConfig(url="https://example.test/eval", credential_hook=_HOOK_ENV_NAME),
+    )
+
+
+def test_manifest_stores_only_the_credential_hook_name_never_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with the hook's env var set to a real secret, the manifest target
+    carries only the hook *name*; the resolved value is nowhere on the model.
+    """
+    monkeypatch.setenv(_HOOK_ENV_NAME, _HOOK_SECRET)
+    document = _http_hook_document()
+    assert isinstance(document.target, HttpTargetConfig)
+    assert document.target.credential_hook == _HOOK_ENV_NAME
+    # The whole document, serialized, references the hook name but not the value.
+    serialized = document.model_dump_json()
+    assert _HOOK_ENV_NAME in serialized
+    assert _HOOK_SECRET not in serialized
+
+
+def test_dumped_manifest_yaml_never_contains_the_resolved_hook_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``dump_manifest`` writes the hook name into the ``target`` block but
+    never the resolved secret, so a dumped manifest committed to disk cannot
+    leak the credential.
+    """
+    monkeypatch.setenv(_HOOK_ENV_NAME, _HOOK_SECRET)
+    dumped = dump_manifest(_http_hook_document())
+    assert _HOOK_ENV_NAME in dumped
+    assert _HOOK_SECRET not in dumped
+    # And the parsed YAML confirms the hook is stored as the credential_hook
+    # reference, not an inlined token/value.
+    parsed = yaml.safe_load(dumped)
+    assert parsed["target"]["credential_hook"] == _HOOK_ENV_NAME
+    assert "authorization" not in dumped.lower()
+
+
+def test_manifest_round_trip_preserves_hook_name_and_drops_no_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dump -> load round-trip of an HTTP-hook manifest preserves the hook
+    name exactly and introduces no secret value at any point.
+    """
+    monkeypatch.setenv(_HOOK_ENV_NAME, _HOOK_SECRET)
+    document = _http_hook_document()
+    dumped = dump_manifest(document)
+    round_trip_path = tmp_path / "http-hook.yaml"
+    round_trip_path.write_text(dumped, encoding="utf-8")
+
+    reloaded = load_manifest(round_trip_path)
+    assert isinstance(reloaded.target, HttpTargetConfig)
+    assert reloaded.target.credential_hook == _HOOK_ENV_NAME
+    # The on-disk file never held the secret.
+    assert _HOOK_SECRET not in round_trip_path.read_text(encoding="utf-8")
