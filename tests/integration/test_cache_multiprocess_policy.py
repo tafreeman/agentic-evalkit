@@ -19,6 +19,7 @@ the cache as a whole, not a single function in isolation.
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -26,6 +27,34 @@ import pytest
 
 from agentic_evalkit.datasets.cache import CacheKey, DatasetCache
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
+
+#: Bounded retry budget for a Windows sharing violation on ``Path.replace()``.
+_WRITE_RETRY_ATTEMPTS = 3
+_WRITE_RETRY_SLEEP_SECONDS = 0.01
+#: Generous wall-clock deadline for a racing reader to observe at least one
+#: checksum-valid read once writers have published.
+_READER_OBSERVE_DEADLINE_SECONDS = 5.0
+
+
+def _write_with_windows_retry(cache: DatasetCache, key: CacheKey, payload: bytes) -> None:
+    """Write ``payload`` under ``key``, retrying a Windows sharing violation.
+
+    On Windows, ``Path.replace()`` onto a payload/manifest that a concurrent
+    reader (or racing writer) currently holds open raises ``PermissionError``
+    (a sharing violation) -- POSIX rename has no such restriction. That
+    collision is transient: retry a bounded number of times with a tiny sleep
+    so the write lands once the open handle is released. Only
+    ``PermissionError`` is retried; any other exception propagates so a real
+    bug is never masked.
+    """
+    for attempt in range(_WRITE_RETRY_ATTEMPTS):
+        try:
+            cache.write(key, payload)
+            return
+        except PermissionError:
+            if attempt == _WRITE_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(_WRITE_RETRY_SLEEP_SECONDS)
 
 
 def _key(offset: int = 0) -> CacheKey:
@@ -109,7 +138,7 @@ def test_shared_root_racing_writers_stay_fail_closed(tmp_path: Path) -> None:
 
     def _write(payload: bytes) -> None:
         start.wait()
-        cache.write(key, payload)
+        _write_with_windows_retry(cache, key, payload)
 
     with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
         futures = [pool.submit(_write, payload) for payload in payloads]
@@ -136,10 +165,13 @@ def test_shared_root_reader_never_sees_a_torn_write(tmp_path: Path) -> None:
     payloads = [f"shared-payload-{i}".encode() for i in range(6)]
     valid = set(payloads)
     start = threading.Barrier(len(payloads) + 1)
+    # Only the single reader thread mutates this, so a bare counter in a
+    # one-element list is safe without a lock; it stays visible after join.
+    successful_reads = [0]
 
     def _write(payload: bytes) -> None:
         start.wait()
-        cache.write(key, payload)
+        _write_with_windows_retry(cache, key, payload)
 
     def _read_repeatedly() -> None:
         start.wait()
@@ -149,6 +181,7 @@ def test_shared_root_reader_never_sees_a_torn_write(tmp_path: Path) -> None:
             except (OfflineCacheMiss, DatasetIntegrityError):
                 continue
             assert result in valid
+            successful_reads[0] += 1
 
     with ThreadPoolExecutor(max_workers=len(payloads) + 1) as pool:
         futures = [pool.submit(_write, payload) for payload in payloads]
@@ -157,3 +190,18 @@ def test_shared_root_reader_never_sees_a_torn_write(tmp_path: Path) -> None:
             future.result()
 
     assert reader.read(key) in valid
+
+    # Vacuity guard: if every in-race read missed before the first write
+    # published, the torn-read assertion above never ran. Writers have all
+    # joined and a valid entry provably exists, so read until at least one
+    # checksum-valid result is observed (bounded by a generous deadline) and
+    # assert the contested path was actually exercised.
+    deadline = time.monotonic() + _READER_OBSERVE_DEADLINE_SECONDS
+    while successful_reads[0] == 0 and time.monotonic() < deadline:
+        try:
+            result = reader.read(key)
+        except (OfflineCacheMiss, DatasetIntegrityError):
+            continue
+        assert result in valid
+        successful_reads[0] += 1
+    assert successful_reads[0] > 0, "no checksum-valid read was ever observed"

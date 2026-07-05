@@ -151,7 +151,7 @@ def _with_single_evidence_value(run: EvalRunResult, value: str) -> EvalRunResult
         ("sk-proj-abcDEF0123456789xy", "sk-proj-abcDEF0123456789xy"),
         ("Authorization: Bearer eyJhbGciOiJIUzI1Ni.payload", "eyJhbGciOiJIUzI1Ni.payload"),
     ],
-    ids=["openai-sk", "hf-token", "bearer"],
+    ids=["hf-token", "openai-sk", "bearer"],
 )
 def test_each_default_pattern_redacts_its_representative_secret_in_isolation(
     pass_error_timeout_and_provenance_run: EvalRunResult,
@@ -197,11 +197,19 @@ def test_invalid_regex_pattern_fails_loudly_at_the_write_boundary(
         apply_redaction(pass_error_timeout_and_provenance_run, bad_policy)
 
 
-def test_construction_accepts_an_invalid_regex_but_write_rejects_it() -> None:
+def test_construction_accepts_an_invalid_regex_but_write_rejects_it(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
     """Documents the AC deviation explicitly: an invalid regex is accepted at
     construction (pydantic does not compile it) and only rejected when the
-    policy is used. Constructing it must not raise.
+    *same* policy is used at the write boundary. This exercises both halves of
+    its name: construction must not raise, and applying that constructed policy
+    must raise ``re.error`` rather than silently under-redacting.
     """
     policy = RedactionPolicy(secret_patterns=("(",))
     # Constructed fine; the pattern is stored verbatim as a string.
     assert policy.secret_patterns == ("(",)
+    # The same policy, applied at the write boundary, fails loudly when the
+    # pattern is finally compiled -- not a silent no-op.
+    with pytest.raises(re.error):
+        apply_redaction(pass_error_timeout_and_provenance_run, policy)

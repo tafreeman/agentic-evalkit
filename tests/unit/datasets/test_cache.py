@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,6 +20,36 @@ import pytest
 
 from agentic_evalkit.datasets.cache import CacheKey, DatasetCache
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
+
+#: Bounded retry budget for the Windows sharing-violation collision below.
+_WRITE_RETRY_ATTEMPTS = 3
+_WRITE_RETRY_SLEEP_SECONDS = 0.01
+#: Generous wall-clock deadline for a racing reader to observe at least one
+#: checksum-valid read once writers have published (guards against a vacuous
+#: pass where every in-race read missed before the first write landed).
+_READER_OBSERVE_DEADLINE_SECONDS = 5.0
+
+
+def _write_with_windows_retry(cache: DatasetCache, key: CacheKey, payload: bytes) -> None:
+    """Write ``payload`` under ``key``, retrying a Windows sharing violation.
+
+    On Windows, ``Path.replace()`` onto a payload/manifest that another
+    thread (a concurrent reader or a racing writer) currently holds open
+    raises ``PermissionError`` (a sharing violation) -- POSIX rename has no
+    such restriction. That collision is transient: retry a bounded number of
+    times with a tiny sleep and let the write land once the open handle is
+    released. Only ``PermissionError`` is treated as retryable; any other
+    exception propagates immediately so a real bug is never masked.
+    """
+    for attempt in range(_WRITE_RETRY_ATTEMPTS):
+        try:
+            cache.write(key, payload)
+            return
+        except PermissionError:
+            if attempt == _WRITE_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(_WRITE_RETRY_SLEEP_SECONDS)
+
 
 # --- Step 2 (plan verbatim): cache key identity and corruption tests -------
 
@@ -267,7 +298,7 @@ def test_concurrent_same_key_writes_leave_exactly_one_valid_entry(tmp_path: Path
 
     def _write(payload: bytes) -> None:
         barrier.wait()
-        cache.write(key, payload)
+        _write_with_windows_retry(cache, key, payload)
 
     with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
         list(pool.map(_write, payloads))
@@ -323,10 +354,13 @@ def test_reader_racing_concurrent_writers_never_sees_corruption(
     payloads = [f"payload-number-{i}".encode() for i in range(8)]
     valid = set(payloads)
     start = threading.Barrier(len(payloads) + 1)
+    # Only the single reader thread mutates this, so a bare counter in a
+    # one-element list is safe without a lock; it stays visible after join.
+    successful_reads = [0]
 
     def _write(payload: bytes) -> None:
         start.wait()
-        cache.write(key, payload)
+        _write_with_windows_retry(cache, key, payload)
 
     def _read_repeatedly() -> None:
         start.wait()
@@ -338,6 +372,7 @@ def test_reader_racing_concurrent_writers_never_sees_corruption(
             # A successful read must be exactly one of the written payloads,
             # never a partial byte string or a mix of two writes.
             assert result in valid
+            successful_reads[0] += 1
 
     with ThreadPoolExecutor(max_workers=len(payloads) + 1) as pool:
         futures = [pool.submit(_write, payload) for payload in payloads]
@@ -347,6 +382,21 @@ def test_reader_racing_concurrent_writers_never_sees_corruption(
 
     # After every writer has finished, exactly one valid entry remains.
     assert cache.read(key) in valid
+
+    # Vacuity guard: if every in-race read happened to miss before the first
+    # write published, the contested-path assertion above never ran. All
+    # writers have now joined and a valid entry provably exists, so keep
+    # reading (bounded by a generous deadline) until at least one checksum-
+    # valid read is observed, then assert the test actually exercised it.
+    deadline = time.monotonic() + _READER_OBSERVE_DEADLINE_SECONDS
+    while successful_reads[0] == 0 and time.monotonic() < deadline:
+        try:
+            result = cache.read(key)
+        except (OfflineCacheMiss, DatasetIntegrityError):
+            continue
+        assert result in valid
+        successful_reads[0] += 1
+    assert successful_reads[0] > 0, "no checksum-valid read was ever observed"
 
 
 def test_truncated_to_empty_payload_raises_integrity_error_not_offline_miss(

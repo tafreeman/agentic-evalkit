@@ -110,9 +110,11 @@ RunEvent = (
 )
 
 #: Enumerable, reflection-friendly counterpart to the :data:`RunEvent` union:
-#: every concrete event type the runner may emit, in emission order. A new
-#: event type must be listed here to be recognised, so structural contracts
-#: (e.g. "every event field is wire-safe") cannot be bypassed (Story 2.2).
+#: every concrete event type the runner may emit, in emission order. The
+#: redaction-enumeration contract asserts this tuple equals the union's
+#: members exactly, so adding an event type to one but not the other fails CI
+#: -- that binding is what makes structural contracts over events (e.g.
+#: "every field is wire-safe") impossible to bypass (Story 2.2).
 ALL_EVENT_TYPES: tuple[type[FrozenModel], ...] = (
     RunStarted,
     DatasetResolved,

@@ -117,13 +117,20 @@ calibration = CalibrationArtifact(
 grader = JudgeGrader(my_judge_client, calibration=calibration, gate=True)
 ```
 
-An uncalibrated, expired, or stale (older than 90 days) judge — or one whose
-held-out TNR/TPR falls below the project floor — cannot gate a release. If any
-calibration condition fails, the grader demotes its result to a non-gating,
-`UNAVAILABLE` outcome and records the specific reason in
-`evidence["reason"]` (for example, `"calibration expired"` or
-`"insufficient held-out samples"`) — it never silently converts a
-calibration failure into a task failure or a false pass.
+Calibration failures demote in two tiers (D-1 as amended 2026-07-04), and the
+specific reason is always recorded in `evidence["reason"]`:
+
+- **Affirmatively bad evidence → `UNAVAILABLE` outright.** An expired
+  calibration, or one whose held-out TNR/TNR falls below the project floor,
+  is unusable: the result carries no score and can never be mistaken for a
+  verdict.
+- **Absent evidence → advisory only, never gates.** An uncalibrated judge, an
+  undated or stale (older than 90 days) calibration, insufficient held-out
+  samples, a fingerprint mismatch, or a position-bias disagreement still
+  yields an advisory score, but `hard_gate` stays `False`.
+
+Either way the grader never silently converts a calibration failure into a
+task failure or a false pass.
 
 ## Abstention and error semantics
 

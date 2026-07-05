@@ -19,8 +19,10 @@ below rather than silently escaping it.
 
 from __future__ import annotations
 
+import types
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Literal, Union, get_args, get_origin
 
 import pytest
 
@@ -109,6 +111,40 @@ _EVENT_FACTORIES: dict[type[FrozenModel], Callable[[], RunEvent]] = {
 _WIRE_SAFE_FIELD_TYPES = (str, int, float, datetime, ExecutionStatus, GradeStatus)
 
 
+def _annotation_member_types(annotation: object) -> tuple[object, ...]:
+    """Decompose a field annotation into its member types.
+
+    A union (``X | None`` or ``Optional[X]``) yields its args; a bare type
+    yields just itself. ``None`` (``NoneType``) is stripped, so the caller
+    checks only the value-bearing members of an optional field.
+    """
+    origin = get_origin(annotation)
+    members = get_args(annotation) if origin in (Union, types.UnionType) else (annotation,)
+    return tuple(member for member in members if member is not type(None))
+
+
+def _assert_annotation_is_wire_safe(event_type: type[FrozenModel], field_name: str) -> None:
+    """Assert every value-bearing member of a field's annotation is wire-safe.
+
+    This is the annotation-level guarantee: an optional container-typed field
+    (e.g. ``dict[str, str] | None``) would be caught here even when its runtime
+    value is ``None`` -- exactly the case the old per-instance ``continue``
+    skipped silently.
+    """
+    for member in _annotation_member_types(event_type.model_fields[field_name].annotation):
+        if get_origin(member) is Literal:
+            # The schema_version discriminator every FrozenModel inherits is
+            # Literal["1"] -- a Literal of wire-safe scalars is wire-safe.
+            assert all(isinstance(arg, (str, int, float, bool)) for arg in get_args(member)), (
+                f"{event_type.__name__}.{field_name} is a Literal of non-scalar values"
+            )
+            continue
+        assert member in _WIRE_SAFE_FIELD_TYPES, (
+            f"{event_type.__name__}.{field_name} is annotated with "
+            f"{getattr(member, '__name__', member)}, which is not wire-safe"
+        )
+
+
 def _all_events() -> list[RunEvent]:
     return [factory() for factory in _EVENT_FACTORIES.values()]
 
@@ -175,9 +211,17 @@ def test_every_event_field_is_a_wire_safe_primitive(event_type: type[FrozenModel
     """
     event = _EVENT_FACTORIES[event_type]()
     for field_name in event_type.model_fields:
+        # Annotation-level guarantee, checked for every field (not just the
+        # populated ones): the declared type admits only wire-safe members, so
+        # an optional container-typed field is rejected even when its runtime
+        # value is None. This is what the old `continue`-on-None loop skipped.
+        _assert_annotation_is_wire_safe(event_type, field_name)
+
         value = getattr(event, field_name)
         if value is None:
-            continue  # an unset optional field carries nothing
+            # An unset optional field carries no value to type-check at
+            # runtime; the annotation assertion above already covered it.
+            continue
         assert isinstance(value, _WIRE_SAFE_FIELD_TYPES), (
             f"{event_type.__name__}.{field_name} is {type(value).__name__}, "
             "which is not a wire-safe primitive"

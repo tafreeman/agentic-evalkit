@@ -13,12 +13,19 @@ framework never silently converts judge errors into task failures" (design
 set ``hard_gate=True`` on a returned :class:`GradeResult`:
 
 - the judge's live ``fingerprint`` must equal ``CalibrationArtifact.judge_fingerprint``;
-- the calibration must not be expired;
-- the calibration must be dated and within the ratified maximum age of 90 days;
+- the calibration must not be expired (an expired artifact is unusable
+  outright: the result is ``GradeStatus.UNAVAILABLE``);
+- the ratified project floor must hold: TNR >= 0.95 and TPR >= 0.85 (decision
+  D-1) -- a sub-floor calibration is affirmatively bad evidence and likewise
+  demotes the result to ``GradeStatus.UNAVAILABLE``, so a lax caller-supplied
+  ``threshold`` can never gate below the floor;
+- the calibration must be dated (timezone-aware ``calibrated_at``) and within
+  the ratified maximum age of 90 days -- an undated or stale artifact cannot
+  prove its age, so it can never gate, though it may still grade advisorily
+  (D-1 as amended 2026-07-04: absent evidence blocks gating; only
+  affirmatively bad evidence is UNAVAILABLE);
 - held-out positives (TP+FN) and negatives (TN+FP) must each be >= 30;
 - TPR and TNR must each be >= ``CalibrationArtifact.threshold``;
-- the ratified project floor must hold: TNR >= 0.95 and TPR >= 0.85 (decision
-  D-1), so a lax caller-supplied ``threshold`` can never gate below it;
 - a reversed-order ("position-bias") probe must agree with the primary verdict;
 - the judge must return a parseable, non-abstained structured response
   (parse failures retry at most twice, i.e. three attempts total).
@@ -137,6 +144,23 @@ class CalibrationArtifact(FrozenModel):
             raise ValueError(f"threshold must be within [0, 1], got {self.threshold}")
         return self
 
+    @model_validator(mode="after")
+    def _validate_calibrated_at(self) -> "CalibrationArtifact":
+        """Reject a ``calibrated_at`` that cannot support the age floor.
+
+        A naive timestamp would make the age arithmetic against the UTC
+        clock raise at grade time -- and a crash is not a demotion (D-1 is
+        fail-closed, never fail-crashed). A calibration taken after its own
+        expiry is self-contradictory data and is rejected outright.
+        """
+        if self.calibrated_at is None:
+            return self
+        if self.calibrated_at.tzinfo is None:
+            raise ValueError("calibrated_at must be timezone-aware")
+        if self.expires_at.tzinfo is not None and self.calibrated_at > self.expires_at:
+            raise ValueError("calibrated_at must not be after expires_at")
+        return self
+
     @property
     def positive_count(self) -> int:
         return self.true_positive + self.false_negative
@@ -161,12 +185,14 @@ class CalibrationArtifact(FrozenModel):
         return self.expires_at <= (now or datetime.now(UTC))
 
     def age_failure_reason(self, *, now: datetime | None = None) -> str | None:
-        """Return why this calibration is too old (or undated) to gate, or
-        ``None`` if its age is within the ratified maximum (decision D-1).
+        """Return why this calibration's age disqualifies it from gating, or
+        ``None`` if it is dated and within the ratified maximum (decision D-1).
 
-        An artifact with no ``calibrated_at`` cannot prove its age and is
-        rejected outright, so a laxer caller cannot bypass the age floor by
-        simply omitting the timestamp.
+        An artifact with no ``calibrated_at`` cannot prove its age, so it can
+        never gate -- a laxer caller cannot bypass the age floor by simply
+        omitting the timestamp. Age failures block gating only; advisory
+        grading continues (D-1 as amended 2026-07-04: absent evidence is not
+        the same as affirmatively bad evidence).
         """
         if self.calibrated_at is None:
             return (
@@ -180,6 +206,31 @@ class CalibrationArtifact(FrozenModel):
                 f"calibration {self.calibration_id!r} age exceeds the maximum of "
                 f"{PROJECT_MAX_CALIBRATION_AGE_DAYS} days"
             )
+        return None
+
+    def floor_failure_reason(self) -> str | None:
+        """Return why this calibration sits below the ratified project floor
+        (decision D-1), or ``None`` when it clears the floor or its rates are
+        not yet statistically meaningful.
+
+        A sub-floor calibration is affirmatively bad evidence: the judge's
+        result demotes to ``GradeStatus.UNAVAILABLE`` outright, so a lax
+        caller-supplied ``threshold`` can never gate below the project
+        minimums. With fewer than the minimum held-out samples per class the
+        rates are noise, not evidence, so the floor defers to
+        ``usability_failure_reason``'s insufficient-sample report.
+        """
+        if (
+            self.positive_count < _MINIMUM_CLASS_SAMPLE_COUNT
+            or self.negative_count < _MINIMUM_CLASS_SAMPLE_COUNT
+        ):
+            return None
+        tnr = self.true_negative_rate
+        if tnr is not None and tnr < PROJECT_MIN_TNR:
+            return f"calibration TNR={tnr} is below the project minimum {PROJECT_MIN_TNR}"
+        tpr = self.true_positive_rate
+        if tpr is not None and tpr < PROJECT_MIN_TPR:
+            return f"calibration TPR={tpr} is below the project minimum {PROJECT_MIN_TPR}"
         return None
 
     def usability_failure_reason(self, *, now: datetime | None = None) -> str | None:
@@ -204,15 +255,13 @@ class CalibrationArtifact(FrozenModel):
         tnr = self.true_negative_rate
         if tnr is None or tnr < self.threshold:
             return f"calibration TNR={tnr} is below threshold={self.threshold}"
-        # Enforce the ratified project floor AFTER the artifact's own
-        # threshold: a lax caller ``threshold`` can never lower the bar below
-        # these project minimums (decision D-1). ``tpr``/``tnr`` are non-None
-        # here since both class counts are >= 30.
-        if tnr < PROJECT_MIN_TNR:
-            return f"calibration TNR={tnr} is below the project minimum {PROJECT_MIN_TNR}"
-        if tpr < PROJECT_MIN_TPR:
-            return f"calibration TPR={tpr} is below the project minimum {PROJECT_MIN_TPR}"
-        return None
+        # The age floor lives here, in the documented "can this calibration
+        # gate" seam, so no caller can bypass it (D-1 as amended: undated or
+        # stale artifacts never gate but may still grade advisorily). The
+        # PROJECT_MIN_TNR/TPR floor is deliberately NOT here -- a sub-floor
+        # calibration is unusable outright and is enforced as UNAVAILABLE via
+        # ``floor_failure_reason`` in ``JudgeGrader.grade``.
+        return self.age_failure_reason(now=now)
 
 
 def _passing_score_to_status(score: float | None, threshold: float) -> GradeStatus:
@@ -301,30 +350,33 @@ class JudgeGrader:
             )
 
         if self._calibration is not None:
-            # An expired, stale (>90d), or undated calibration is not merely
-            # "untrustworthy for gating" (hard_gate=False) -- the calibration
-            # artifact itself is unusable, so grading capability is UNAVAILABLE
-            # outright (plan Task 10 Step 6 for expiry; decision D-1 for the
-            # ratified age floor). This runs BEFORE the usability/floor path so
-            # an unusable artifact never yields an advisory PASS.
+            # Affirmatively bad calibration evidence makes grading capability
+            # UNAVAILABLE outright (plan Task 10 Step 6 for expiry; ratified
+            # decision D-1 for the project floor): an expired artifact is
+            # unusable, and a sub-floor TNR/TNR overclaim is precisely the
+            # failure R-003 exists to prevent. This runs BEFORE the advisory
+            # path so bad evidence never yields an advisory PASS. Absent
+            # evidence (undated or stale ``calibrated_at``) is different: it
+            # only blocks gating, via ``usability_failure_reason`` below
+            # (D-1 as amended 2026-07-04).
             if self._calibration.is_expired(now=now):
-                stale_reason: str | None = (
+                unusable_reason: str | None = (
                     f"calibration {self._calibration.calibration_id!r} expired at "
                     f"{self._calibration.expires_at.isoformat()}"
                 )
             else:
-                stale_reason = self._calibration.age_failure_reason(now=now)
-            if stale_reason is not None:
+                unusable_reason = self._calibration.floor_failure_reason()
+            if unusable_reason is not None:
                 return self._result(
                     sample,
                     now,
                     status=GradeStatus.UNAVAILABLE,
                     score=None,
                     hard_gate=False,
-                    reason=stale_reason,
+                    reason=unusable_reason,
                 )
 
-        calibration_failure = self._calibration_failure_reason()
+        calibration_failure = self._calibration_failure_reason(now=now)
         position_bias_reason = await self._position_bias_failure_reason(request, response)
 
         status = _passing_score_to_status(response.score, self._pass_score_threshold)
@@ -354,7 +406,7 @@ class JudgeGrader:
     def _judge_fingerprint(self) -> str:
         return self._judge.fingerprint
 
-    def _calibration_failure_reason(self) -> str | None:
+    def _calibration_failure_reason(self, *, now: datetime | None = None) -> str | None:
         if self._calibration is None:
             return "no calibration artifact was supplied; judge is advisory-only"
         if self._calibration.judge_fingerprint != self._judge_fingerprint():
@@ -362,7 +414,7 @@ class JudgeGrader:
                 f"calibration fingerprint {self._calibration.judge_fingerprint!r} does not "
                 f"match live judge fingerprint {self._judge_fingerprint()!r}"
             )
-        return self._calibration.usability_failure_reason()
+        return self._calibration.usability_failure_reason(now=now)
 
     async def _position_bias_failure_reason(
         self, request: JudgeRequest, primary: JudgeResponse

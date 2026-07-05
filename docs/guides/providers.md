@@ -117,11 +117,16 @@ AGENTIC_EVALKIT_CACHE_DIR=/cache/worker-2 agentic-evalkit run eval.yaml --yes
 Sharing a single cache root across parallel workers is **not recommended**.
 It remains correct — every read verifies checksum, byte count, and key
 identity, so a racing write is fail-closed (a partially-applied entry
-surfaces as a typed `DatasetIntegrityError`, never as silently corrupt data)
-— but concurrent writers to the same entry serialize on a per-key lock and
-`Path.replace()` atomicity is not guaranteed on every Windows filesystem, so
-a shared root trades away the isolation the per-worker pattern gives you for
-no benefit. Prefer one `AGENTIC_EVALKIT_CACHE_DIR` per worker.
+surfaces as a typed `DatasetIntegrityError`, never as silently corrupt data).
+But the per-key write lock serializes writers **within one process only**;
+across processes there is no lock at all — correctness comes solely from
+checksum-on-read — and `Path.replace()` atomicity is not guaranteed on every
+Windows filesystem. A shared root does buy a warm shared cache (each dataset
+downloaded once instead of once per worker), at the price of transient
+re-downloads and integrity retries under write contention; when that trade
+matters, warm the shared cache in a single process first, then fan out
+read-only. For concurrent writes, prefer one `AGENTIC_EVALKIT_CACHE_DIR` per
+worker.
 
 ### The `parquet` extra
 

@@ -20,7 +20,9 @@ is being structurally hard to overclaim a result — treat every rule below as l
 - Every wire model: `frozen=True`, `extra="forbid"`, `schema_version="1"`, `tuple` collections,
   `StrEnum` status — never a boolean status, never in-place mutation (ADR-0002).
 - A judge may `hard_gate=True` only under full calibration **and** the ratified floor
-  (TNR ≥ 0.95, TPR ≥ 0.85, age ≤ 90 days); anything less demotes to `UNAVAILABLE` (ADR-0007).
+  (TNR ≥ 0.95, TPR ≥ 0.85, age ≤ 90 days). Two-tier demotion (D-1 as amended 2026-07-04):
+  bad evidence (expired, sub-floor TNR/TPR) ⇒ `UNAVAILABLE`; absent evidence (undated/stale)
+  ⇒ advisory only, never gates (ADR-0007).
 - Operational failures (error/timeout/cancel) are never folded into task failures;
   `compare_runs` is provenance-gated (ADR-0008).
 - Redaction routes every persisted format through `apply_redaction` exactly once;

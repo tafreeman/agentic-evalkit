@@ -151,13 +151,18 @@ async def test_multi_attempt_results_are_ordered_by_task_not_completion(
     finishes them out of order. The pre-sized result list must place each
     (sample, attempt) at its task-order slot, not its completion-order slot.
     """
+    # Records each (sample_id, attempt) at the moment its execution returns.
+    # All tasks run on one event loop, so a plain-list append (no await mid-
+    # append) is safe without a lock.
+    completion_order: list[tuple[str, int]] = []
 
     class _ScrambledOrderTarget:
         """Sleeps by a delay keyed to (sample, attempt) so completion order is
-        deliberately unrelated to task order: sample 0 finishes *after*
-        sample 1, and later attempts finish before earlier ones. A
-        completion-order collector would visibly misorder the results; the
-        runner's pre-sized, task-indexed list must not.
+        deliberately unrelated to task order: within a sample, later attempts
+        finish before earlier ones. A completion-order collector would visibly
+        misorder the results; the runner's pre-sized, task-indexed list must
+        not. Each call records its actual completion so the test can prove the
+        scramble really happened rather than assuming it.
         """
 
         async def execute(
@@ -168,6 +173,7 @@ async def test_multi_attempt_results_are_ordered_by_task_not_completion(
             sample_rank = 0 if sample.sample_id == "identity:1" else 1
             delay = 0.01 + 0.02 * sample_rank + 0.005 * (3 - attempt)
             await asyncio.sleep(delay)
+            completion_order.append((sample.sample_id, attempt))
             now = datetime.now(UTC)
             return NormalizedExecutionResult(
                 sample_id=sample.sample_id,
@@ -178,13 +184,7 @@ async def test_multi_attempt_results_are_ordered_by_task_not_completion(
                 finished_at=now,
             )
 
-    runner = _determinism_runner(records=2, target=_ScrambledOrderTarget(), tmp_path=tmp_path)
-    result = await runner.run(_determinism_manifest(concurrency=3, attempts=3))
-
-    # 2 samples x 3 attempts = 6 results, in sample-major, attempt-minor order.
-    assert result.summary.total == 6
-    observed = [(item.sample.sample_id, item.execution.attempt) for item in result.samples]
-    assert observed == [
+    submission_order = [
         ("identity:0", 1),
         ("identity:0", 2),
         ("identity:0", 3),
@@ -192,6 +192,23 @@ async def test_multi_attempt_results_are_ordered_by_task_not_completion(
         ("identity:1", 2),
         ("identity:1", 3),
     ]
+
+    runner = _determinism_runner(records=2, target=_ScrambledOrderTarget(), tmp_path=tmp_path)
+    result = await runner.run(_determinism_manifest(concurrency=3, attempts=3))
+
+    # 2 samples x 3 attempts = 6 results, in sample-major, attempt-minor order.
+    assert result.summary.total == 6
+    observed = [(item.sample.sample_id, item.execution.attempt) for item in result.samples]
+    assert observed == submission_order
+
+    # The scramble provably happened: every task completed, but not in task/
+    # submission order (within a sample, later attempts finish first), so the
+    # in-order result above is the runner's doing, not a no-op. The exact
+    # completion order past sample 0's attempts is semaphore-timing-clustered
+    # and therefore not asserted as a fixed sequence; the inequality is the
+    # robust, non-flaky witness that completion order and task order diverged.
+    assert sorted(completion_order) == sorted(submission_order)
+    assert completion_order != submission_order
 
 
 @pytest.mark.integration
@@ -279,10 +296,20 @@ async def test_cancelling_a_multi_attempt_run_leaves_no_task_running(
 
     runner = _determinism_runner(records=3, target=_BlockingTarget(), tmp_path=tmp_path)
     run_task = asyncio.ensure_future(runner.run(_determinism_manifest(concurrency=2, attempts=2)))
-    await asyncio.wait_for(first_started.wait(), timeout=2.0)
-    run_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await run_task
+    try:
+        # If ``first_started.wait()`` exceeds its bound on slow CI, the
+        # ``finally`` below still cancels and drains ``run_task`` so a pending-
+        # task teardown warning can never orphan the run or mask the real
+        # ``TimeoutError``.
+        await asyncio.wait_for(first_started.wait(), timeout=2.0)
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+    finally:
+        run_task.cancel()
+        # Suppress the CancelledError (and any teardown exception) so no
+        # pending-task noise leaks; the assertions below carry the verdict.
+        await asyncio.gather(run_task, return_exceptions=True)
 
     # Every task that started must have either finished or observed the
     # cancellation -- none left running as an orphan. A brief yield lets the

@@ -585,8 +585,17 @@ def test_building_target_resolves_hook_without_persisting_the_secret(
     target = build_target_for_document(document)
     try:
         assert isinstance(target, HttpTarget)
-        # The document that produced the target is unchanged: it references
-        # only the hook name and never the resolved secret value.
+        # Resolution actually happened: the hook's env var was read at build
+        # time and the resolved secret reached the target's header provider
+        # (an Authorization: Bearer <token> header), which is the mechanism a
+        # real request would carry. Without this the test could pass on a
+        # target that silently never resolved the hook at all.
+        header_provider = target._headers  # type: ignore[attr-defined]
+        assert header_provider is not None
+        resolved_headers = header_provider()
+        assert _CRED_HOOK_SECRET in resolved_headers["Authorization"]
+        # ...yet the document that produced the target is unchanged: it
+        # references only the hook name and never the resolved secret value.
         assert isinstance(document.target, HttpTargetConfig)
         assert document.target.credential_hook == _CRED_HOOK_ENV_NAME
         serialized = document.model_dump_json()
@@ -594,21 +603,41 @@ def test_building_target_resolves_hook_without_persisting_the_secret(
         assert _CRED_HOOK_SECRET not in serialized
     finally:
         # build_target_for_document constructs its own httpx client; close it
-        # so no unclosed-client ResourceWarning leaks into the suite.
-        asyncio.run(target._client.aclose())  # type: ignore[attr-defined]
+        # so no unclosed-client ResourceWarning leaks into the suite. Guard the
+        # attribute access with getattr so a failed isinstance/assertion above
+        # is never masked by an AttributeError here.
+        client = getattr(target, "_client", None)
+        if client is not None:
+            asyncio.run(client.aclose())
 
 
 def test_canonical_report_of_a_hook_run_contains_no_resolved_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Even with the hook's env var set while the report is written, the
-    canonical report of a run whose manifest references the hook contains no
-    trace of the resolved secret: the wire manifest simply has no field that
-    could carry it.
+    """A canonical report whose manifest *references the hook by name* (here in
+    ``run_name``, a serialized free-text field) records that hook NAME but never
+    the resolved secret VALUE, even though the hook's env var is set while the
+    report is written.
+
+    Anchoring the hook name into the serialized report makes the discrimination
+    real rather than vacuous: the persisted bytes provably carry a hook
+    reference, so if the pipeline ever resolved-and-persisted the secret it
+    could plausibly appear -- and it must not. What this does *not* cover: the
+    actual ``_load_http_target`` env-var resolution path (that is exercised by
+    ``test_building_target_resolves_hook_without_persisting_the_secret`` above);
+    here the run result is constructed directly, so no resolution runs.
     """
     monkeypatch.setenv(_CRED_HOOK_ENV_NAME, _CRED_HOOK_SECRET)
-    run = _run_result(run_id="hook-run")
+    base = _run_result(run_id="hook-run")
+    hook_referencing_manifest = base.manifest.model_copy(
+        update={"run_name": f"hook-run-using-{_CRED_HOOK_ENV_NAME}"}
+    )
+    run = base.model_copy(update={"manifest": hook_referencing_manifest})
 
     written = write_canonical_report(run, tmp_path)
     text = written.read_text(encoding="utf-8")
+    # The report carries the hook NAME (proving it can carry hook-related
+    # text)...
+    assert _CRED_HOOK_ENV_NAME in text
+    # ...but never the resolved secret VALUE.
     assert _CRED_HOOK_SECRET not in text
