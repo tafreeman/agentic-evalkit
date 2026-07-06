@@ -1,10 +1,10 @@
 """Opt-in live Hugging Face verification (design §14, plan Task 6 Step 5).
 
-Behind the ``live`` marker (``uv run pytest tests/live/test_huggingface_live.py
--m live -v``): both verified presets must resolve against the real Hub and
+Behind the ``live`` marker (``uv run pytest tests/live -m live -v``): both
+verified presets must resolve against the real Hub and
 Dataset Viewer and preview two real rows. Mocks prove local behavior but
-never live source integration, so this file is the only place that exercises
-the real network path end to end.
+never live source integration, so the modules in this directory are the only
+tests that exercise the real network path end to end.
 """
 
 import pytest
@@ -12,8 +12,9 @@ import pytest
 from agentic_evalkit.datasets.huggingface import HuggingFaceDatasetProvider
 from agentic_evalkit.models import DatasetRef
 
+pytestmark = pytest.mark.live
 
-@pytest.mark.live
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("dataset_id", "config", "split"),

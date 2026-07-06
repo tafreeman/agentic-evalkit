@@ -2,8 +2,9 @@ name: Live provider
 
 # Weekly scheduled evidence that the real Hugging Face Hub / Dataset Viewer
 # path still works for both verified presets (openai/gsm8k and
-# princeton-nlp/SWE-bench_Verified), plus an on-demand trigger for use
-# before a release. This is the *only* place in CI that exercises the real
+# princeton-nlp/SWE-bench_Verified) and for the provider-facing CLI paths,
+# plus an on-demand trigger for use before a release. This is the *only*
+# place in CI that exercises the real
 # network path (design §14: "Mocks prove local behavior but not live
 # source integration"). It never converts a provider outage into a
 # passing run and never retries indefinitely -- Task 6's bounded backoff
@@ -46,4 +47,4 @@ jobs:
       # successful run of this workflow), which is a release-time policy,
       # not something this workflow itself implements.
       - name: Live Hugging Face provider tests
-        run: uv run pytest tests/live/test_huggingface_live.py -m live -v
+        run: uv run pytest tests/live -m live -v
