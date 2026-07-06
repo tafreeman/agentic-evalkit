@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Made the default `not live` CLI test suite fully hermetic by replacing its
+  remaining Dataset Viewer-backed run path with a canned provider, while
+  retaining provider-error and exit-code coverage. Real provider CLI checks
+  now live under `tests/live/` and run only in the opt-in live workflow.
+
 ### Added
 
 - Repository foundation: packaging metadata, CI matrix, MIT license,

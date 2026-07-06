@@ -34,7 +34,10 @@ Tests marked `live` require network access to Hugging Face and are excluded
 from the default local and CI runs; they are run separately (see
 `tests/live/`). Tests marked `integration` exercise component boundaries
 (providers, targets, the pipeline) without external network calls unless the
-test itself is also marked `live`.
+test lives under `tests/live/`. The contract test
+`tests/contract/test_live_test_boundary.py` enforces that directory and
+marker boundary. Default CLI integration tests inject canned providers and
+fail immediately if they accidentally construct the real provider catalog.
 
 ## Coverage
 
@@ -99,13 +102,13 @@ Task 15):
 uv run pytest tests/contract/test_dependency_boundary.py tests/contract/test_adrs.py tests/contract/test_public_docs.py -v
 uv run mkdocs build --strict
 uv run pytest tests/integration/test_clean_wheel.py -v   # slow: builds a real wheel + venv
-uv run pytest tests/live/test_huggingface_live.py -m live -v   # requires network access
+uv run pytest tests/live -m live -v   # requires network access
 ```
 
 The clean-wheel test builds the wheel, installs *only* the wheel into a
 temporary virtual environment outside the repository, and confirms the CLI
 and Python import work with no host repository on `sys.path`. The live
-Hugging Face test is also run on a weekly schedule and on demand via
+Hugging Face suite is also run on a weekly schedule and on demand via
 `.github/workflows/live-provider.yml`; a classified transient outage there
 is a known issue to document, not something to silently retry into a false
 pass.

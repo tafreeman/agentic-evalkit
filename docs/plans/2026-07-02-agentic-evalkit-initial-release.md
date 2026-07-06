@@ -727,7 +727,7 @@ async def test_verified_presets_resolve_and_preview(
 
 ```powershell
 uv run pytest tests/unit/datasets/test_huggingface_provider.py -v
-uv run pytest tests/live/test_huggingface_live.py -m live -v
+uv run pytest tests/live -m live -v
 ```
 
 Expected: unit fixtures PASS; both live presets resolve and return two rows. If Hugging Face is unavailable, record the provider error and rerun before claiming the task complete; do not replace the live gate with mocks.
@@ -1613,7 +1613,7 @@ Write guides with executable commands:
 
 Update README and `docs/index.md` with the approved positioning statement: `agentic-evalkit` separates datasets, grading, and reporting from the system under test through callable/subprocess/HTTP targets, and objective checks gate before judges. Add a coexistence note: legacy evaluation code may remain in host repositories, but this package neither imports nor migrates it.
 
-Create `.github/workflows/live-provider.yml` with `workflow_dispatch` and a weekly schedule. It installs the locked environment and runs only `uv run pytest tests/live/test_huggingface_live.py -m live -v`. The provider client applies Task 6's bounded backoff. Provider outages fail visibly with classified diagnostics; the workflow does not retry indefinitely or convert failures to success.
+Create `.github/workflows/live-provider.yml` with `workflow_dispatch` and a weekly schedule. It installs the locked environment and runs only `uv run pytest tests/live -m live -v`. The provider client applies Task 6's bounded backoff. Provider outages fail visibly with classified diagnostics; the workflow does not retry indefinitely or convert failures to success.
 
 Create `.github/workflows/publish.yml` using PyPI trusted publishing with GitHub OIDC (`id-token: write`), an environment named `pypi`, artifact build/verification before upload, and a release-only trigger. Store no PyPI API token. Publishing remains inert until the repository/environment is configured and a GitHub release is intentionally created.
 
@@ -1645,7 +1645,7 @@ Expected: every command exits 0, pytest reports at least 80% branch-aware covera
 - [ ] **Step 6: Run live Hugging Face and clean-wheel gates**
 
 ```powershell
-uv run pytest tests/live/test_huggingface_live.py -m live -v
+uv run pytest tests/live -m live -v
 uv run pytest tests/integration/test_clean_wheel.py -v
 ```
 
@@ -1690,7 +1690,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest -m "not live" --cov=agentic_evalkit --cov-branch --cov-report=term-missing
-uv run pytest tests/live/test_huggingface_live.py -m live -v
+uv run pytest tests/live -m live -v
 uv run mkdocs build --strict
 uv build
 ```

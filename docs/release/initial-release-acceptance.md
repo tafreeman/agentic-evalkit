@@ -61,7 +61,7 @@ inspection.
 ## Known issues
 
 - `doctor` prints Hugging Face latency unrounded (cosmetic); tracked in `v0.1-checkpoint.md`.
-- Several CLI integration tests exercise the live Hugging Face Dataset Viewer while in the default (`not live`) suite; acceptable per plan intent, flagged for a future live-gate hygiene pass.
+- **Resolved 2026-07-05:** all default CLI integration coverage is hermetic, provider failures and exit code 4 are exercised with canned providers, and real provider/CLI checks are confined to the opt-in `tests/live/` workflow.
 - The self-contained HTML report embeds a provenance parquet URL as *data* (not a loaded resource); the report loads nothing remote and renders fully offline.
 
 ## Follow-on boundary

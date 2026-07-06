@@ -76,7 +76,7 @@ addopts = "--strict-config --strict-markers -m 'not live' --cov-config=pyproject
 asyncio_mode = "auto"
 markers = [
   "integration: component integration tests",
-  "live: requires network access",
+  "live: opt-in network tests confined to tests/live",
 ]
 
 [tool.coverage.run]
