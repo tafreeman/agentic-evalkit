@@ -18,25 +18,25 @@ exclude_docs: |
 
 theme:
   name: material
+  # Console design system is a g100 dark-only language — no light scheme.
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: indigo
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: indigo
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
+    scheme: slate
+    primary: black
+    accent: cyan
   features:
     - navigation.instant
     - navigation.tracking
     - navigation.top
     - content.code.copy
     - content.action.edit
+  font:
+    text: IBM Plex Sans
+    code: IBM Plex Mono
+
+extra_css:
+  - stylesheets/tokens.css
+  - stylesheets/console.css
+  - stylesheets/landing.css
 
 nav:
   - Home: index.md
@@ -61,6 +61,8 @@ nav:
       - HTTP agent example: guides/http-agent-example.md
 
 markdown_extensions:
+  - attr_list
+  - md_in_html
   - admonition
   - pymdownx.details
   - pymdownx.superfences
