@@ -7,6 +7,10 @@ This directory holds the implementation planning record for `agentic-evalkit`.
   accepted (see [`../release/initial-release-acceptance.md`](../release/initial-release-acceptance.md)).
 - [`2026-07-02-agentic-evalkit-plan-modifications.md`](2026-07-02-agentic-evalkit-plan-modifications.md)
   — review-driven amendments applied to that plan.
+- [`2026-07-04-arp-integration-analysis.md`](2026-07-04-arp-integration-analysis.md)
+  — analysis and phased migration plan for adopting this package inside the
+  ARP monorepo, harvesting its eval tooling of value, and retiring its legacy
+  in-repo evaluation package (not yet executed; see the follow-on gate below).
 
 The corresponding design is
 [`../specs/2026-07-02-agentic-evalkit-design.md`](../specs/2026-07-02-agentic-evalkit-design.md);
@@ -31,6 +35,35 @@ passed, and it must include:
 - full build/test log capture as artifacts;
 - **no changes to the public contracts** — it plugs in behind the existing
   `HarnessExecutor` protocol.
+
+## Follow-on gate: ARP integration
+
+The initial release deliberately ships with **zero references from or to the
+ARP monorepo** — the dependency-boundary contract test forbids importing
+`agentic_v2`, `tools`, or `executionkit`, and a fresh cross-repo sweep
+(2026-07-04) confirms no dependency, import, CI reference, or doc mention
+connects the repositories in either direction. Adoption *by* ARP is therefore
+a from-scratch integration, and it is **out of scope** for this release.
+
+That integration now has its own plan:
+[`2026-07-04-arp-integration-analysis.md`](2026-07-04-arp-integration-analysis.md)
+(analysis complete, execution not started). It may begin only on the accepted
+v0.1 contracts, and it must preserve:
+
+- the **one-way dependency invariant**, enforced from both sides (the existing
+  contract test here; a mirror AST test added in the consumer);
+- a **distribution decision before any consumer change** — publish to PyPI
+  (recommended; consumer's own precedent) or a private git dependency with an
+  explicitly provisioned CI read credential;
+- the **offline-contract reconciliation** (the deferred `offline=True` gaps
+  below) before any consumer CI job claims or relies on enforced hermeticity;
+- a **harvest gate**: the consumer's legacy evaluation package is deleted only
+  after every tooling-of-value item in the plan's harvest inventory is
+  dispositioned (ported, upstreamed, or consciously dropped in writing);
+- **no changes to the public contracts** — ARP integrates through the existing
+  `ExecutionTarget`, `Grader`, `JudgeClient`, and `DatasetProvider` protocols
+  via its own driver modules; upstream contributions arrive as separate plans
+  through this repository's normal TDD/ADR process.
 
 ## Deferred to v0.2
 
