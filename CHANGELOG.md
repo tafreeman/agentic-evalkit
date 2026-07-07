@@ -7,12 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-06
+
 ### Fixed
 
 - Made the default `not live` CLI test suite fully hermetic by replacing its
   remaining Dataset Viewer-backed run path with a canned provider, while
   retaining provider-error and exit-code coverage. Real provider CLI checks
   now live under `tests/live/` and run only in the opt-in live workflow.
+- The datasets CLI and runner now honor `--offline` end-to-end; previously
+  the flag was accepted but silently ignored. The network-free `local`
+  provider is exempt from offline rejection, and `OfflineCacheMiss` gains a
+  retryable discriminator distinguishing a warm-the-cache miss from a
+  categorically uncacheable one.
+
+### Changed
+
+- Package identity for public release: project URLs now point at
+  `github.com/tafreeman/agentic-evalkit`, author metadata set. README
+  documents the reserved optional extras.
+
+## [0.1.0] - 2026-07-03
 
 ### Added
 

@@ -31,6 +31,15 @@ download, `datasets`, `pyarrow`, or Docker is required. See
 including the standalone `report` command that regenerates a self-contained
 HTML report from that JSON.
 
+## Optional extras
+
+The `parquet`, `judges`, and `swebench` extras (e.g.
+`pip install agentic-evalkit[swebench]`) are currently reserved placeholders
+per [ADR-0009](docs/adr/0009-optional-dependencies-and-plugins.md): installing
+them adds nothing today. They reserve the capability names that
+`agentic-evalkit doctor` reports on, ahead of their own future
+implementation.
+
 ## Documentation
 
 - [Quickstart](docs/guides/quickstart.md) — install to first report

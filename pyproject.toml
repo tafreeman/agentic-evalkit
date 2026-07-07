@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-authors = [{ name = "agentic-evalkit contributors" }]
+authors = [{ name = "Andy Freeman", email = "tandfreeman@gmail.com" }]
 keywords = ["evaluation", "agents", "benchmarking", "llm"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -34,11 +34,11 @@ dependencies = [
 ]
 
 [project.urls]
-Changelog = "https://github.com/agentic-evalkit/agentic-evalkit/blob/main/CHANGELOG.md"
-Homepage = "https://github.com/agentic-evalkit/agentic-evalkit"
-Issues = "https://github.com/agentic-evalkit/agentic-evalkit/issues"
-Repository = "https://github.com/agentic-evalkit/agentic-evalkit"
-Security = "https://github.com/agentic-evalkit/agentic-evalkit/blob/main/SECURITY.md"
+Changelog = "https://github.com/tafreeman/agentic-evalkit/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/tafreeman/agentic-evalkit"
+Issues = "https://github.com/tafreeman/agentic-evalkit/issues"
+Repository = "https://github.com/tafreeman/agentic-evalkit"
+Security = "https://github.com/tafreeman/agentic-evalkit/blob/main/SECURITY.md"
 
 [project.scripts]
 agentic-evalkit = "agentic_evalkit.cli:app"
