@@ -18,9 +18,10 @@ import pytest
 
 ADR_DIR = Path("docs/adr")
 
-#: The nine ADRs design §16 and the plan's ADR/task table require, in
-#: filename-prefix order. Each prefix matches exactly one file under
-#: docs/adr/ (Task 1-10 committed them with these exact numeric prefixes).
+#: Every ratified ADR this suite enforces, in filename-prefix order: the
+#: nine ADRs design §16 and the plan's ADR/task table require (Task 1-10
+#: committed them with these exact numeric prefixes), plus 0010 (offline
+#: dataset contract). Each prefix matches exactly one file under docs/adr/.
 REQUIRED_ADR_PREFIXES = (
     "0001",
     "0002",
@@ -31,6 +32,7 @@ REQUIRED_ADR_PREFIXES = (
     "0007",
     "0008",
     "0009",
+    "0010",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"

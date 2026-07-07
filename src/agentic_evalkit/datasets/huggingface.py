@@ -218,6 +218,12 @@ class HuggingFaceDatasetProvider:
     """
 
     api_version: Final[str] = "1"
+    #: Every method here calls the Hub or the Dataset Viewer HTTP API
+    #: (ADR-0010); this provider can never honestly satisfy ``offline=True``
+    #: itself, so ``DatasetCatalog`` continues to reject offline calls to it
+    #: (except ``preview``, already served from the content-addressed cache
+    #: when a cache is configured).
+    requires_network: Final[bool] = True
 
     def __init__(
         self,

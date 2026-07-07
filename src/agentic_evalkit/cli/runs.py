@@ -73,24 +73,30 @@ class _RunnerCatalogAdapter:
     AsyncIterator[SourceRecord]`` (see ``agentic_evalkit.runner._CatalogProtocol``).
     ``DatasetCatalog.iter_records`` additionally requires the original
     ``DatasetRef`` for provider routing (a page/record-iteration call has no
-    other way to know which provider a ``ResolvedDataset`` came from). This
-    adapter closes over the one ``ref`` a CLI run always has fixed for its
-    whole duration and forwards to the real catalog with it, so
-    ``DatasetCatalog`` never needs to satisfy a protocol it cannot
-    structurally satisfy on its own.
+    other way to know which provider a ``ResolvedDataset`` came from), and
+    both ``DatasetCatalog.resolve``/``iter_records`` take a per-call
+    ``offline`` flag that ``_CatalogProtocol`` has no slot for at all. This
+    adapter closes over both the one ``ref`` and the one ``offline`` value a
+    CLI run always has fixed for its whole duration (ADR-0010) and forwards
+    them to the real catalog, so neither ``DatasetCatalog`` nor
+    ``EvalRunner``/``_CatalogProtocol`` needs to change shape to satisfy the
+    other.
     """
 
-    def __init__(self, catalog: DatasetCatalog, ref: DatasetRef) -> None:
+    def __init__(self, catalog: DatasetCatalog, ref: DatasetRef, *, offline: bool = False) -> None:
         self._catalog = catalog
         self._ref = ref
+        self._offline = offline
 
     async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
-        return await self._catalog.resolve(ref)
+        return await self._catalog.resolve(ref, offline=self._offline)
 
     def iter_records(
         self, dataset: ResolvedDataset, *, offset: int = 0, limit: int | None = None
     ) -> AsyncIterator[SourceRecord]:
-        return self._catalog.iter_records(self._ref, dataset, offset=offset, limit=limit)
+        return self._catalog.iter_records(
+            self._ref, dataset, offset=offset, limit=limit, offline=self._offline
+        )
 
 
 _DEMO_TARGET_IMPORT_STRING = "agentic_evalkit.examples.zero_target:zero_target"
@@ -360,7 +366,7 @@ def run(
             progress.advance(task_id)
 
     def _action():  # type: ignore[no-untyped-def]
-        catalog = _RunnerCatalogAdapter(build_catalog(offline=offline), ref)
+        catalog = _RunnerCatalogAdapter(build_catalog(offline=offline), ref, offline=offline)
         artifact_store = ArtifactStore(
             (output_dir or _default_output_dir()) / "artifacts" / _run_stamp()
         )

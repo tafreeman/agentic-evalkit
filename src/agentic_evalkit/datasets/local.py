@@ -162,9 +162,18 @@ def _rows_to_records(rows: list[dict[str, JsonValue]]) -> tuple[SourceRecord, ..
 
 
 class LocalDatasetProvider:
-    """Dataset provider for local JSON/JSONL/CSV/YAML files (design §6.1)."""
+    """Dataset provider for local JSON/JSONL/CSV/YAML files (design §6.1).
+
+    Every method here is pure filesystem I/O (``Path.read_bytes``,
+    directory checks) -- there is no code path in this class that ever
+    opens a socket. ``requires_network = False`` (ADR-0010) declares that
+    structurally, so :class:`~agentic_evalkit.datasets.catalog.DatasetCatalog`
+    can safely route ``offline=True`` calls straight through to this
+    provider instead of rejecting them.
+    """
 
     api_version: Final[str] = "1"
+    requires_network: Final[bool] = False
 
     def __init__(self, allowed_roots: tuple[Path, ...]) -> None:
         self._allowed_roots: tuple[Path, ...] = tuple(root.resolve() for root in allowed_roots)

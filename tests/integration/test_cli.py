@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -22,9 +24,16 @@ from agentic_evalkit.cli import datasets as cli_datasets
 from agentic_evalkit.cli import runs as cli_runs
 from agentic_evalkit.cli.runs import build_target_for_document, write_canonical_report
 from agentic_evalkit.datasets.base import ProviderHealth
+from agentic_evalkit.datasets.cache import DatasetCache
 from agentic_evalkit.datasets.catalog import DatasetCatalog
+from agentic_evalkit.datasets.local import LocalDatasetProvider
 from agentic_evalkit.errors import DatasetNotFound
-from agentic_evalkit.manifest import HttpTargetConfig, ManifestDocument
+from agentic_evalkit.manifest import (
+    CallableTargetConfig,
+    HttpTargetConfig,
+    ManifestDocument,
+    dump_manifest,
+)
 from agentic_evalkit.models import (
     DatasetRef,
     EvalRunManifest,
@@ -357,6 +366,209 @@ def test_datasets_search_json_shape_without_network(monkeypatch: pytest.MonkeyPa
     assert payload["total_hits"] == 1
 
 
+# --- --offline CLI coverage (ADR-0010, plan Task 2 Step 3) -------------------
+
+
+def _local_only_catalog(tmp_path: Path, *, with_cache: bool = False) -> DatasetCatalog:
+    """A real ``DatasetCatalog`` wired to only the genuine local provider.
+
+    Deliberately registers no ``huggingface`` provider at all, so any code
+    path that mistakenly tried to route to it would fail with a ``KeyError``
+    rather than silently succeeding -- this catalog can only ever serve the
+    real, network-free ``local`` provider.
+
+    ``with_cache``: ``preview`` is deliberately NOT gated by a provider's
+    ``requires_network`` declaration (ADR-0010) -- it is always
+    cache-backed, for every provider, so an offline ``preview`` still needs
+    a configured ``DatasetCache`` even when the underlying provider is
+    ``local``. Callers exercising ``search``/``resolve``/``iter_records``
+    offline against ``local`` do not need one (the exemption applies
+    directly); callers exercising ``preview`` offline do, matching how the
+    real CLI's ``build_catalog`` always configures one.
+    """
+    provider = LocalDatasetProvider(allowed_roots=(tmp_path,))
+    cache = DatasetCache(tmp_path / ".cache") if with_cache else None
+    return DatasetCatalog(providers={"local": provider}, cache=cache, builtin_provider_names=())
+
+
+@pytest.mark.usefixtures("_forbid_outbound_network")
+def test_run_offline_over_local_dataset_succeeds_with_zero_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run --offline`` over a local-provider dataset must reach the real
+    ``DatasetCatalog``/``LocalDatasetProvider`` and complete successfully
+    without ever attempting an outbound network connection (spec item 3a).
+    """
+    monkeypatch.setattr(cli_runs, "build_catalog", lambda *, offline: _local_only_catalog(tmp_path))
+
+    manifest_path = _local_gsm8k_style_manifest_path(tmp_path)
+    output_dir = tmp_path / "results"
+    result = runner.invoke(
+        app,
+        ["run", str(manifest_path), "--output-dir", str(output_dir), "--yes", "--offline"],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    report_files = list(output_dir.glob("*.json"))
+    assert len(report_files) == 1
+    envelope = json.loads(report_files[0].read_text(encoding="utf-8"))
+    assert envelope["summary"]["total"] == 1
+    assert envelope["samples"][0]["execution"]["status"] == "completed"
+
+
+def test_run_offline_over_uncached_hf_dataset_fails_with_typed_error_not_silence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run --offline`` against a network-requiring provider with nothing
+    cached must fail loudly with the typed ``OfflineCacheMiss`` error
+    surfaced through the CLI's normal error boundary (a nonzero, mapped
+    exit code and the error's code/message in output) -- never silently
+    proceed as if offline had no effect (spec item 3b; this is the exact
+    "worse than absent" failure mode ADR-0010 exists to close).
+    """
+    catalog = _canned_hub_catalog()
+    monkeypatch.setattr(cli_runs, "build_catalog", lambda *, offline: catalog)
+
+    manifest = EvalRunManifest(
+        run_name="hf-offline-failure",
+        dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+        adapter="gsm8k@1",
+        grader="normalized-exact@1",
+        target_name="cli-target",
+        attempts=1,
+    )
+    document = ManifestDocument(
+        manifest=manifest,
+        target=CallableTargetConfig(
+            import_string="agentic_evalkit.examples.zero_target:zero_target"
+        ),
+    )
+    manifest_path = tmp_path / "eval.yaml"
+    manifest_path.write_text(dump_manifest(document), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["run", str(manifest_path), "--yes", "--offline"],
+    )
+    # The runner's own catalog.resolve() failure is an infrastructure-level
+    # abort of the run (agentic_evalkit.runner.EvalRunner.run re-raises the
+    # original exception unchanged after emitting RunFailed), which the
+    # CLI's error boundary maps like any other OfflineCacheMiss: exit code 4
+    # (PROVIDER_ERROR), never exit 0 as if --offline had simply been
+    # ignored.
+    assert result.exit_code == 4, result.stdout
+    assert "offline_cache_miss" in result.stdout
+
+
+def test_datasets_search_offline_over_local_provider_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        cli_datasets, "build_catalog", lambda *, offline: _local_only_catalog(tmp_path)
+    )
+    result = runner.invoke(
+        app,
+        ["datasets", "search", "anything", "--provider", "local", "--offline", "--format", "json"],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["total_hits"] == 0
+
+
+def test_datasets_search_offline_over_network_provider_fails_with_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _canned_hub_catalog()
+    monkeypatch.setattr(cli_datasets, "build_catalog", lambda *, offline: catalog)
+    result = runner.invoke(
+        app,
+        ["datasets", "search", "gsm8k", "--provider", "huggingface", "--offline"],
+    )
+    assert result.exit_code == 4
+    assert "offline_cache_miss" in result.stdout
+
+
+def test_datasets_inspect_offline_over_local_provider_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_path = tmp_path / "local.jsonl"
+    dataset_path.write_text('{"question":"1+1?","answer":"#### 2"}\n')
+    monkeypatch.setattr(
+        cli_datasets, "build_catalog", lambda *, offline: _local_only_catalog(tmp_path)
+    )
+    result = runner.invoke(
+        app,
+        ["datasets", "inspect", f"local:{dataset_path}", "--offline", "--format", "json"],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["revision"].startswith("sha256:")
+
+
+def test_datasets_inspect_offline_over_network_provider_fails_with_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _canned_hub_catalog()
+    monkeypatch.setattr(cli_datasets, "build_catalog", lambda *, offline: catalog)
+    result = runner.invoke(
+        app,
+        ["datasets", "inspect", "hf:openai/gsm8k", "--offline"],
+    )
+    assert result.exit_code == 4
+    assert "offline_cache_miss" in result.stdout
+
+
+def test_datasets_preview_offline_over_local_provider_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers the previously-half-hermetic bug directly: before this task,
+    ``preview --offline``'s inner ``resolve()`` call never received
+    ``offline=True`` at all, so this exact scenario would have made a live
+    (albeit locally-served) resolve even though ``local`` never needs one.
+
+    ``preview`` is not exempted by provider (ADR-0010 -- it is always
+    cache-backed for every provider), so this test first warms the cache
+    with one online preview (the same "resolve once online, then offline
+    calls succeed" story ADR-0004/ADR-0010 describe), then repeats the
+    exact call with ``--offline`` and expects success.
+    """
+    dataset_path = tmp_path / "local.jsonl"
+    dataset_path.write_text(
+        '{"question":"1+1?","answer":"#### 2"}\n{"question":"2+2?","answer":"#### 4"}\n'
+    )
+    monkeypatch.setattr(
+        cli_datasets,
+        "build_catalog",
+        lambda *, offline: _local_only_catalog(tmp_path, with_cache=True),
+    )
+
+    warmup = runner.invoke(
+        app, ["datasets", "preview", f"local:{dataset_path}", "--format", "json"]
+    )
+    assert warmup.exit_code == 0, warmup.stdout
+
+    result = runner.invoke(
+        app,
+        ["datasets", "preview", f"local:{dataset_path}", "--offline", "--format", "json"],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["page"]["total_rows"] == 2
+
+
+def test_datasets_preview_offline_over_network_provider_fails_with_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _canned_hub_catalog()
+    monkeypatch.setattr(cli_datasets, "build_catalog", lambda *, offline: catalog)
+    result = runner.invoke(
+        app,
+        ["datasets", "preview", "hf:openai/gsm8k", "--offline"],
+    )
+    assert result.exit_code == 4
+    assert "offline_cache_miss" in result.stdout
+
+
 # --- compare (plan Task 14 Step 10) -----------------------------------------
 
 
@@ -598,6 +810,79 @@ def test_building_target_resolves_hook_without_persisting_the_secret(
         client = getattr(target, "_client", None)
         if client is not None:
             asyncio.run(client.aclose())
+
+
+# --- Offline CLI coverage (ADR-0010, plan Task 2 Step 3) --------------------
+#
+# Loopback-allowlisting socket guard, duplicated (not imported) from
+# ``tests/unit/datasets/test_offline_socket_guard.py``'s more heavily
+# commented version -- see that module for the full two-round Windows
+# debugging rationale (a naive "block every socket call" guard breaks
+# ``pytest-asyncio``'s own event-loop setup on this platform via
+# ``ProactorEventLoop``'s ``socketpair()`` emulation). Kept local to this
+# module rather than shared via a new ``conftest.py`` fixture, matching this
+# test suite's existing convention of each module being self-sufficient (no
+# cross-module fixture sharing exists elsewhere in ``tests/``).
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback_address(address: object) -> bool:
+    if isinstance(address, tuple) and len(address) >= 2 and isinstance(address[0], str):
+        return address[0] in _LOOPBACK_HOSTS
+    return False
+
+
+def _raise_unless_loopback(real: Any) -> Any:
+    def _guarded(self: socket.socket, address: object, *args: Any, **kwargs: Any) -> Any:
+        if _is_loopback_address(address):
+            return real(self, address, *args, **kwargs)
+        raise AssertionError(
+            f"outbound network connection attempted during a --offline CLI "
+            f"invocation (target={address!r})"
+        )
+
+    return _guarded
+
+
+@pytest.fixture
+def _forbid_outbound_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(socket.socket, "connect", _raise_unless_loopback(socket.socket.connect))
+    monkeypatch.setattr(
+        socket.socket, "connect_ex", _raise_unless_loopback(socket.socket.connect_ex)
+    )
+
+
+def _local_gsm8k_style_manifest_path(tmp_path: Path) -> Path:
+    """Write a local GSM8K-shaped dataset file plus a manifest pointing at it.
+
+    Mirrors ``agentic-evalkit init --preset gsm8k``'s manifest shape but
+    with ``dataset_ref.provider = "local"`` instead of ``"huggingface"``, so
+    a real (non-fake) :class:`~agentic_evalkit.datasets.local.LocalDatasetProvider`
+    -- exercised through the CLI's real ``build_catalog`` -- is the code path
+    under test, not a canned double. Returns the manifest YAML path.
+    """
+    dataset_path = tmp_path / "gsm8k_local.jsonl"
+    dataset_path.write_text('{"question":"2+2?","answer":"work\\n#### 4"}\n')
+    manifest = EvalRunManifest(
+        run_name="local-offline-quickstart",
+        dataset_ref=DatasetRef(provider="local", dataset_id=str(dataset_path)),
+        adapter="gsm8k@1",
+        grader="normalized-exact@1",
+        target_name="cli-target",
+        attempts=1,
+        timeout_seconds=30.0,
+        concurrency=1,
+    )
+    document = ManifestDocument(
+        manifest=manifest,
+        target=CallableTargetConfig(
+            import_string="agentic_evalkit.examples.zero_target:zero_target"
+        ),
+    )
+    manifest_path = tmp_path / "eval.yaml"
+    manifest_path.write_text(dump_manifest(document), encoding="utf-8")
+    return manifest_path
 
 
 def test_canonical_report_of_a_hook_run_contains_no_resolved_secret(

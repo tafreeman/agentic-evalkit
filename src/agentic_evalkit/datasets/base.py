@@ -4,6 +4,14 @@ Design §6.1: every provider implements ``search``, ``resolve``, ``preview``,
 ``iter_records``, and ``healthcheck``. The protocol is structural, so host
 adapters do not inherit framework classes; providers register through the
 ``agentic_evalkit.providers.v1`` entry-point group.
+
+Per ADR-0010, every provider also declares ``requires_network`` -- a
+structural marker parallel to ``api_version`` that says whether the provider
+can ever legitimately be called while ``offline=True`` is in effect.
+``DatasetCatalog`` reads this attribute (defaulting an unmarked provider to
+``True``, the conservative assumption) to decide whether an offline call may
+reach the provider at all, rather than special-casing the literal name
+``"local"``.
 """
 
 from collections.abc import AsyncIterator, Mapping
@@ -27,6 +35,13 @@ class DatasetProvider(Protocol):
     """The provider boundary (design §6.1)."""
 
     api_version: str
+    #: Whether this provider ever needs network access to satisfy any of its
+    #: methods. ``False`` marks a provider as safe to call under
+    #: ``offline=True`` (ADR-0010) -- for example, a filesystem-only
+    #: provider. ``True`` (or the attribute being absent on an older
+    #: provider) means ``DatasetCatalog`` continues to reject
+    #: ``offline=True`` calls to it.
+    requires_network: bool
 
     async def search(
         self,

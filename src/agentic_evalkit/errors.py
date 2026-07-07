@@ -180,7 +180,45 @@ class DatasetRateLimited(AgenticEvalkitError):
 
 
 class OfflineCacheMiss(AgenticEvalkitError):
-    """Offline mode requested a page/dataset with no exact cache entry."""
+    """Offline mode requested a page/dataset with no exact cache entry.
+
+    Attributes:
+        retryable: Discriminates two distinct offline failures that a caller
+            (and a human reading a CLI error message) must not conflate:
+
+            - ``True`` -- "warm the cache and retry": a plain cache miss for
+              an otherwise cacheable key. Going online once (e.g. dropping
+              ``--offline`` for one run, or an explicit ``datasets pull``)
+              and then repeating the *exact same* offline call succeeds,
+              because the operation's cache identity model has a stable key
+              for this request shape.
+            - ``False`` -- "categorically uncacheable": the requested
+              operation has no stable cache key at all for this call shape
+              (free-text search, an unbacked resolution, unpaginated
+              iteration, or no cache configured on the catalog) or the
+              provider genuinely requires network access it was asked not to
+              use. No amount of prior or future warming makes the *same*
+              offline call succeed; a different action (changing what is
+              asked for, or accepting a network round trip) is required.
+
+            Defaults to ``True`` because the most common raise site --
+            :meth:`agentic_evalkit.datasets.cache.DatasetCache.read` finding
+            no manifest/payload for an otherwise-cacheable key -- is exactly
+            the retryable case. Raise sites that know better (see
+            :mod:`agentic_evalkit.datasets.catalog`) pass ``retryable=False``
+            explicitly.
+    """
+
+    def __init__(
+        self,
+        *,
+        message: str,
+        code: str | None = None,
+        context: dict[str, JsonValue | SecretValue] | None = None,
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message=message, code=code, context=context)
+        self.retryable: bool = retryable
 
 
 # --- Plugin errors -----------------------------------------------------------

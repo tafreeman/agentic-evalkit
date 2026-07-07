@@ -99,8 +99,17 @@ def build_catalog(*, offline: bool) -> DatasetCatalog:
 
     Uses :func:`default_cache_dir` (design §6.3's standalone default) so
     ``--offline`` runs can serve exact previously-cached pages.
+
+    ``offline`` is accepted here (rather than dropped) purely to keep every
+    call site's shape uniform -- ``DatasetCatalog`` itself takes ``offline``
+    per-call, never at construction time (ADR-0010; see
+    ``agentic_evalkit.datasets.catalog``'s module docstring), so this
+    function has nothing to *do* with the flag beyond accepting it. The bug
+    this task fixes was never this parameter's mere existence -- it was
+    every caller below silently failing to forward its own ``offline``
+    value into the ``DatasetCatalog`` method calls it makes. Each command
+    function below now does that forwarding explicitly.
     """
-    del offline  # DatasetCatalog itself takes offline per-call, not at construction.
     cache = DatasetCache(default_cache_dir())
     client = httpx.AsyncClient(timeout=30.0)
     # HfApi structurally satisfies datasets.huggingface's private _HubClient
@@ -205,7 +214,9 @@ def search(
 
     def _action() -> SearchPage:
         catalog = build_catalog(offline=offline)
-        return _run_async(lambda: catalog.search(query, provider=provider, limit=limit))
+        return _run_async(
+            lambda: catalog.search(query, provider=provider, limit=limit, offline=offline)
+        )
 
     page = run_cli_command(_action, debug=debug)
     if format_ == "json":
@@ -240,7 +251,7 @@ def inspect(
 
     def _action() -> ResolvedDataset:
         catalog = build_catalog(offline=offline)
-        return _run_async(lambda: catalog.resolve(ref))
+        return _run_async(lambda: catalog.resolve(ref, offline=offline))
 
     resolved = run_cli_command(_action, debug=debug)
     if format_ == "json":
@@ -283,7 +294,12 @@ def preview(
         catalog = build_catalog(offline=offline)
 
         async def _run() -> tuple[ResolvedDataset, SamplePage]:
-            resolved = await catalog.resolve(ref)
+            # Both the resolve and the preview must honor --offline: a
+            # network-requiring provider's resolve() would otherwise still
+            # make a live call even though the visible page-fetch below
+            # already correctly rejected/served from cache. Without this,
+            # `preview --offline` was only half-hermetic (ADR-0010).
+            resolved = await catalog.resolve(ref, offline=offline)
             page = await catalog.preview(ref, resolved, offset=offset, limit=limit, offline=offline)
             return resolved, page
 

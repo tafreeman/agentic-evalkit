@@ -268,3 +268,155 @@ def test_list_presets_returns_all_builtins() -> None:
     catalog = DatasetCatalog(providers={})
     names = {preset.name for preset in catalog.list_presets()}
     assert names == {"gsm8k", "swe-bench-verified"}
+
+
+# --- requires_network provider exemption (ADR-0010) --------------------------
+
+
+class _NetworkFreeFakeProvider(_CountingFakeProvider):
+    """A fake that declares network independence, unlike its parent class.
+
+    Reuses ``_CountingFakeProvider``'s bodies (in-memory, already network-free
+    in practice) but adds the ``requires_network = False`` declaration so
+    ``DatasetCatalog`` treats it the way it treats the real
+    ``LocalDatasetProvider``: exempt from offline rejection on every method.
+    """
+
+    requires_network = False
+
+
+@pytest.mark.asyncio
+async def test_search_offline_succeeds_for_a_network_free_provider() -> None:
+    provider = _NetworkFreeFakeProvider()
+    catalog = DatasetCatalog(providers={"fake": provider})
+    page = await catalog.search("x", provider="fake", offline=True)
+    assert page.total_hits == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_offline_succeeds_for_a_network_free_provider() -> None:
+    provider = _NetworkFreeFakeProvider()
+    catalog = DatasetCatalog(providers={"fake": provider})
+    resolved = await catalog.resolve(_fake_ref(), offline=True)
+    assert resolved.dataset_id == "fake/dataset"
+
+
+@pytest.mark.asyncio
+async def test_iter_records_offline_does_not_raise_for_a_network_free_provider() -> None:
+    """Confirms the offline rejection is skipped entirely for such a provider
+    -- reaching the fake's real (non-``NotImplementedError``-raising)
+    ``iter_records`` body would still fail if this test's fixture provider
+    did not override it, so the parent's ``NotImplementedError`` stand-in is
+    replaced here with a working body to prove the call actually proceeds."""
+
+    class _IterableNetworkFreeProvider(_NetworkFreeFakeProvider):
+        def iter_records(
+            self, dataset: ResolvedDataset, *, offset: int = 0, limit: int | None = None
+        ) -> AsyncIterator[SourceRecord]:
+            async def _gen() -> AsyncIterator[SourceRecord]:
+                yield SourceRecord(row_id="0", data={"value": 0}, digest="sha256:0")
+
+            return _gen()
+
+    provider = _IterableNetworkFreeProvider()
+    catalog = DatasetCatalog(providers={"fake": provider})
+    dataset = await catalog.resolve(_fake_ref(), offline=True)
+    records = [record async for record in catalog.iter_records(_fake_ref(), dataset, offline=True)]
+    assert len(records) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_without_requires_network_attribute_still_rejects_offline() -> None:
+    """Pre-ADR-0010 fakes (like ``_CountingFakeProvider`` itself, which
+    declares no ``requires_network`` at all) must keep today's behavior: the
+    safe getattr-default is ``True`` (network-required), so offline is still
+    rejected rather than silently becoming exempt."""
+    assert not hasattr(_CountingFakeProvider(), "requires_network")
+    catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
+    with pytest.raises(OfflineCacheMiss):
+        await catalog.search("x", provider="fake", offline=True)
+
+
+# --- retryable discriminator values (ADR-0010) --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_offline_rejection_is_not_retryable() -> None:
+    """A query-keyed search has no stable cache key at all -- no amount of
+    warming ever makes the exact same offline call succeed."""
+    catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        await catalog.search("x", provider="fake", offline=True)
+    assert excinfo.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_offline_rejection_is_not_retryable() -> None:
+    catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        await catalog.resolve(_fake_ref(), offline=True)
+    assert excinfo.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_iter_records_offline_rejection_is_not_retryable() -> None:
+    catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        catalog.iter_records(ref, dataset, offline=True)
+    assert excinfo.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_preview_offline_with_no_cache_configured_is_not_retryable() -> None:
+    """No cache exists on this catalog at all -- there is nothing to warm."""
+    provider = _CountingFakeProvider()
+    catalog = DatasetCatalog(providers={"fake": provider})  # no cache=...
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        await catalog.preview(ref, dataset, offline=True)
+    assert excinfo.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_preview_offline_cache_miss_is_retryable(tmp_path: Path) -> None:
+    """A genuine cache miss on an otherwise-cacheable key IS retryable: one
+    online preview of this exact page would populate the cache and let the
+    same offline call succeed afterward."""
+    provider = _CountingFakeProvider()
+    cache = DatasetCache(tmp_path)
+    catalog = DatasetCatalog(providers={"fake": provider}, cache=cache)
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        await catalog.preview(ref, dataset, offset=5, limit=5, offline=True)
+    assert excinfo.value.retryable is True
+
+
+# --- unbounded query truncation in error context (ADR-0010) ------------------
+
+
+@pytest.mark.asyncio
+async def test_search_offline_rejection_truncates_long_query_in_context_only() -> None:
+    """The structured ``context["query"]`` value is bounded; the free-text
+    error message is left untruncated for a human reading it directly."""
+    long_query = "q" * 5000
+    catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        await catalog.search(long_query, provider="fake", offline=True)
+    context_query = excinfo.value.context["query"]
+    assert isinstance(context_query, str)
+    assert len(context_query) < len(long_query)
+    assert context_query.endswith(f"...(truncated, {len(long_query)} chars total)")
+    # The message itself keeps the full, untruncated query text.
+    assert long_query in excinfo.value.message
+
+
+@pytest.mark.asyncio
+async def test_search_offline_rejection_leaves_short_query_untouched() -> None:
+    catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        await catalog.search("short query", provider="fake", offline=True)
+    assert excinfo.value.context["query"] == "short query"

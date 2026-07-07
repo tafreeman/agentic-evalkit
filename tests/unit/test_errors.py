@@ -107,3 +107,36 @@ def test_all_subclasses_are_catchable_as_agentic_evalkit_error() -> None:
 def test_context_without_secrets_round_trips_into_message() -> None:
     error = DatasetNotFound(message="dataset not found", context={"dataset_id": "openai/gsm8k"})
     assert error.context["dataset_id"] == "openai/gsm8k"
+
+
+# --- OfflineCacheMiss.retryable (ADR-0010) -----------------------------------
+
+
+def test_offline_cache_miss_retryable_defaults_to_true() -> None:
+    """The common case -- a plain cache miss on an otherwise-cacheable key --
+    is retryable by default: going online once and repeating the exact same
+    call succeeds."""
+    error = OfflineCacheMiss(message="no cache entry for digest sha256:abc")
+    assert error.retryable is True
+
+
+def test_offline_cache_miss_retryable_can_be_set_false() -> None:
+    """A categorically-uncacheable rejection (e.g. a query-keyed search
+    against a network-requiring provider) explicitly opts out of the
+    retryable default."""
+    error = OfflineCacheMiss(message="search results are never cached", retryable=False)
+    assert error.retryable is False
+
+
+def test_offline_cache_miss_retryable_does_not_disturb_base_error_shape() -> None:
+    """Adding the retryable discriminator must not change code/message/context
+    behavior inherited from AgenticEvalkitError."""
+    error = OfflineCacheMiss(
+        message="offline preview requested but this catalog has no cache configured",
+        context={"provider": "huggingface", "dataset_id": "openai/gsm8k"},
+        retryable=False,
+    )
+    assert error.code == "offline_cache_miss"
+    assert error.context["dataset_id"] == "openai/gsm8k"
+    assert "offline preview requested" in str(error)
+    assert isinstance(error, AgenticEvalkitError)
