@@ -31,6 +31,36 @@ download, `datasets`, `pyarrow`, or Docker is required. See
 including the standalone `report` command that regenerates a self-contained
 HTML report from that JSON.
 
+## Python API
+
+The CLI is built on a small, curated Python API for integrations that need
+more than the built-in presets: wrap your own system as a target, then
+describe a run with a typed manifest.
+
+```python
+from agentic_evalkit import CallableTarget, DatasetRef, EvalRunManifest, EvalRunner
+
+def my_system(sample_input: dict) -> dict:
+    return {"answer": solve(sample_input["question"])}
+
+target = CallableTarget(my_system, name="my-system")
+manifest = EvalRunManifest(
+    run_name="quickstart", adapter="gsm8k@1", grader="normalized-exact@1",
+    target_name="my-system", dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+)
+```
+
+`EvalRunner(...).run(manifest)` then drives dataset resolution, execution,
+and grading end to end. `CallableTarget` satisfies `ExecutionTarget` —
+agentic-evalkit's only system-under-test boundary — which is also exported
+at the top level for anyone implementing a custom target. Everything
+else — additional targets, graders, reporters, dataset providers,
+benchmark adapters, and statistics — is one import away under its own
+subpackage (`agentic_evalkit.graders`, `agentic_evalkit.reporters`, and so
+on); see [the HTTP agent example](docs/guides/http-agent-example.md) for a
+complete, runnable Python-API script with the catalog/adapter/grader/
+artifact-store wiring this snippet omits for brevity.
+
 ## Optional extras
 
 The `parquet`, `judges`, and `swebench` extras (e.g.
