@@ -1,10 +1,11 @@
 """ADR shape and cross-ADR consistency (plan Task 15 Step 1, design §16).
 
-This module *verifies* the nine ADRs already committed under
-`docs/adr/0001-standalone-boundary.md` through
-`docs/adr/0009-optional-dependencies-and-plugins.md`; it never edits their
-content. Every ADR conforms to the required seven-heading template (Status,
-Context, Decision, Alternatives, Consequences, Validation, Supersession) and
+This module *verifies* the ADR log already committed under `docs/adr/`
+(``REQUIRED_ADR_PREFIXES`` below names each ratified record, and a
+completeness check below asserts that tuple matches the committed file
+listing); it never edits ADR content. Every ADR conforms to the required
+seven-heading template (Status, Context, Decision, Alternatives,
+Consequences, Validation, Supersession) and
 is `Accepted` -- Tasks 1-10 recorded each ADR before its governing production
 code, per the plan's "Every ADR is committed before the production code it
 governs" table. If any check here fails, that is a real documentation defect
@@ -74,7 +75,7 @@ def _normalize_whitespace(text: str) -> str:
 
 #: Phrases that would directly contradict the dependency-boundary or
 #: Hugging-Face-baseline decisions if found in any ADR body. None of these
-#: may appear anywhere in the nine ADRs.
+#: may appear anywhere in any committed ADR.
 _CONTRADICTING_PHRASES = (
     "may import agentic_v2",
     "may import executionkit",
@@ -136,7 +137,7 @@ def test_adr_headings_appear_in_canonical_order(prefix: str, adr_paths: dict[str
 def test_no_adr_contradicts_dependency_or_baseline_decisions(
     adr_paths: dict[str, Path],
 ) -> None:
-    """None of the nine ADRs may contain text contradicting ADR-0001/ADR-0003."""
+    """No committed ADR may contain text contradicting ADR-0001/ADR-0003."""
     violations: list[str] = []
     for prefix, path in adr_paths.items():
         lowered = _normalize_whitespace(path.read_text(encoding="utf-8").lower())
@@ -157,4 +158,71 @@ def test_adr_0003_states_the_hugging_face_baseline(adr_paths: dict[str, Path]) -
     missing = [marker for marker in _HUGGING_FACE_BASELINE_MARKERS if marker not in text]
     assert missing == [], (
         f"docs/adr/0003-provider-plugins-and-hugging-face-baseline.md is missing markers: {missing}"
+    )
+
+
+#: Word-form numbers docs prose may use for the ADR count claim.
+NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+
+
+def _committed_adr_prefixes() -> tuple[str, ...]:
+    """Numeric prefixes of every ADR file actually committed under docs/adr/."""
+    return tuple(sorted(path.name[:4] for path in ADR_DIR.glob("[0-9][0-9][0-9][0-9]-*.md")))
+
+
+def test_required_prefixes_cover_every_committed_adr_file() -> None:
+    """``REQUIRED_ADR_PREFIXES`` cannot lag the ADR log.
+
+    A new docs/adr/ file must be added to the tuple above in the same
+    change, or every shape/status/heading check in this module silently
+    skips it.
+    """
+    assert _committed_adr_prefixes() == REQUIRED_ADR_PREFIXES
+
+
+def test_landing_page_adr_claims_match_committed_adr_count() -> None:
+    """docs/index.md's ADR stat tile and prose must track docs/adr/.
+
+    The 2026-07-08 audit found the landing page still claiming nine ADRs
+    (stat tile "9", prose "0001 through 0009") after
+    0010-offline-dataset-contract.md landed. Both claims are derived here
+    from the committed file listing so the undercount cannot recur
+    silently. CLAUDE.md repeats the range claim but is gitignored, so a CI
+    checkout deliberately cannot assert on it.
+    """
+    prefixes = _committed_adr_prefixes()
+    count = len(prefixes)
+    index = Path("docs/index.md").read_text(encoding="utf-8")
+
+    tile = re.search(
+        r'<div class="stat-value">(\d+)</div>\s*<div class="stat-label">ADRs</div>',
+        index,
+    )
+    assert tile is not None, "docs/index.md: ADR stat tile not found"
+    assert int(tile.group(1)) == count, (
+        f"docs/index.md ADR stat tile says {tile.group(1)}; docs/adr/ ships {count}"
+    )
+
+    prose = re.search(r"(\w+) architecture decision records, 0001 through (\d{4})", index)
+    assert prose is not None, "docs/index.md: ADR-index prose claim not found"
+    assert NUMBER_WORDS.get(prose.group(1).lower()) == count, (
+        f"docs/index.md prose says {prose.group(1)!r} architecture decision records; "
+        f"docs/adr/ ships {count}"
+    )
+    assert prose.group(2) == prefixes[-1], (
+        f"docs/index.md prose says the ADR log ends at {prose.group(2)}; "
+        f"the last committed ADR is {prefixes[-1]}"
     )
