@@ -274,6 +274,26 @@ def test_doctor_runs_offline_and_reports_checks() -> None:
     assert all("status" in entry for entry in payload)
 
 
+def test_doctor_reserved_placeholder_extras_have_no_install_remediation() -> None:
+    """AEK-02: ``parquet``/``swebench`` back empty extras (ADR-0009).
+
+    ``pip install 'agentic-evalkit[parquet|swebench]'`` satisfies nothing
+    today, so ``doctor`` must never print that install command for either
+    -- only an informational, reserved-placeholder detail.
+    """
+    result = runner.invoke(app, ["doctor", "--offline", "--format", "json"])
+    assert result.exit_code in (0, 3)
+    payload = json.loads(result.stdout)
+    placeholder_names = {"capability_parquet", "capability_swebench"}
+    placeholder_checks = [entry for entry in payload if entry["name"] in placeholder_names]
+    assert {entry["name"] for entry in placeholder_checks} == placeholder_names
+    for entry in placeholder_checks:
+        remediation = entry.get("remediation")
+        assert remediation is None or "pip install" not in remediation
+        if entry["status"] != "ok":
+            assert "reserved placeholder" in entry["detail"]
+
+
 def test_datasets_curated_table_format_lists_both_presets() -> None:
     result = runner.invoke(app, ["datasets", "curated"])
     assert result.exit_code == 0

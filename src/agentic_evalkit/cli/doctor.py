@@ -105,7 +105,21 @@ async def _check_huggingface_health() -> DoctorCheck:
     )
 
 
-def _check_optional_capability(name: str, module: str) -> DoctorCheck:
+def _check_reserved_placeholder_capability(name: str, module: str) -> DoctorCheck:
+    """Report a capability whose extra is a still-empty placeholder (ADR-0009, AEK-02).
+
+    Every capability ``doctor`` currently checks this way (``parquet``,
+    ``swebench``) backs a ``pyproject.toml`` ``[project.optional-dependencies]``
+    extra that installs nothing yet, so ``pip install 'agentic-evalkit[{name}]'``
+    would satisfy nothing -- this never emits that install-command
+    remediation. A module found via ``find_spec`` still reports ``ok`` (it
+    reflects the environment, not package-gated functionality); a module
+    *not* found is purely informational, not an actionable warning with a
+    fix the user can run today. If a future extra gains real packages, its
+    doctor check should not reuse this helper -- write one that keeps the
+    install-command remediation, since that extra would then have a real
+    fix to suggest.
+    """
     if find_spec(module) is not None:
         return DoctorCheck(
             name=f"capability_{name}",
@@ -115,8 +129,7 @@ def _check_optional_capability(name: str, module: str) -> DoctorCheck:
     return DoctorCheck(
         name=f"capability_{name}",
         status="warning",
-        detail=f"optional capability {name!r} is not installed",
-        remediation=f"Install with: pip install 'agentic-evalkit[{name}]'",
+        detail=f"optional capability {name!r} is a reserved placeholder, no capability today",
     )
 
 
@@ -146,8 +159,8 @@ def run_doctor_checks(*, offline: bool) -> list[DoctorCheck]:
         )
     else:
         checks.append(asyncio.run(_check_huggingface_health()))
-    checks.append(_check_optional_capability("parquet", "pyarrow"))
-    checks.append(_check_optional_capability("swebench", "swebench"))
+    checks.append(_check_reserved_placeholder_capability("parquet", "pyarrow"))
+    checks.append(_check_reserved_placeholder_capability("swebench", "swebench"))
     checks.append(_check_judge_calibration())
     return checks
 
