@@ -199,10 +199,10 @@ class _CannedHubProvider:
     async def preview(
         self, dataset: ResolvedDataset, *, offset: int = 0, limit: int = 10
     ) -> SamplePage:
-        records = tuple(
+        records = [
             record async for record in self.iter_records(dataset, offset=offset, limit=limit)
-        )
-        return SamplePage(records=records, offset=offset, total_rows=1)
+        ]
+        return SamplePage(records=tuple(records), offset=offset, total_rows=1)
 
     async def iter_records(
         self, dataset: ResolvedDataset, *, offset: int = 0, limit: int | None = None
@@ -587,6 +587,29 @@ def test_datasets_preview_offline_over_network_provider_fails_with_typed_error(
     )
     assert result.exit_code == 4
     assert "offline_cache_miss" in result.stdout
+
+
+def test_canned_hub_preview_consumes_async_records_directly() -> None:
+    """Regression: ``_CannedHubProvider.preview()`` built its records with a
+    synchronous ``tuple()`` over an ``async for`` generator expression, which
+    raises ``TypeError: 'async_generator' object is not iterable`` the moment
+    ``preview()`` is awaited. Every other canned-hub preview test uses
+    ``--offline`` and fails early (``offline_cache_miss``) before reaching the
+    body, so the defect stayed latent. Drive the real coroutine to prove the
+    async records are consumed and a page is returned.
+    """
+    provider = _CannedHubProvider()
+    dataset = ResolvedDataset(
+        dataset_id="openai/gsm8k",
+        revision="canned-gsm8k-revision",
+        config=None,
+        split=None,
+        row_count=1,
+    )
+    page = asyncio.run(provider.preview(dataset))
+    assert page.total_rows == 1
+    assert len(page.records) == 1
+    assert page.records[0].data["answer"] == "#### 0"
 
 
 # --- compare (plan Task 14 Step 10) -----------------------------------------
