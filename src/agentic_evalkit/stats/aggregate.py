@@ -18,17 +18,30 @@ unavailable counts.
 
 ``wilson_interval`` computes a 95% Wilson score interval for a binary rate
 using :class:`statistics.NormalDist` -- no numpy/scipy dependency.
+
+``build_report_aggregates`` and ``pass_at_k_by_sample`` are the CLI-facing
+seam that closes the gap between this module existing and a report actually
+carrying its numbers: every reporter's ``write()`` accepts an optional
+``aggregates: dict[str, JsonValue] | None`` (``agentic_evalkit.reporters.base.Reporter``),
+documented there as "supplied by a caller that already ran
+``agentic_evalkit.stats``" -- ``build_report_aggregates`` is exactly that
+call, so ``agentic_evalkit.cli.runs.write_canonical_report`` and
+``agentic_evalkit.cli.reports.report`` can both produce it with one line
+rather than each re-deriving the same shape.
 """
 
 from __future__ import annotations
 
 import math
 from statistics import NormalDist
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+from pydantic import JsonValue
 
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.models.execution import ExecutionStatus
 from agentic_evalkit.models.grades import GradeStatus
+from agentic_evalkit.stats.reliability import pass_at_k
 
 if TYPE_CHECKING:
     from agentic_evalkit.models.runs import EvalRunResult, SampleResult
@@ -38,6 +51,8 @@ __all__ = [
     "RateEstimate",
     "ResourceDistribution",
     "aggregate_run",
+    "build_report_aggregates",
+    "pass_at_k_by_sample",
     "wilson_interval",
 ]
 
@@ -283,3 +298,81 @@ def aggregate_run(run: EvalRunResult) -> AggregateStats:
         output_tokens=_distribution(output_tokens),
         cost_usd=_distribution(costs),
     )
+
+
+def pass_at_k_by_sample(run: EvalRunResult, *, k: int) -> dict[str, float]:
+    """Return each sample's ``pass@k`` estimate over its actually-run attempts.
+
+    Groups ``run.samples`` by ``sample.sample.sample_id`` (a manifest with
+    ``attempts > 1`` produces one :class:`~agentic_evalkit.models.SampleResult`
+    per attempt, all sharing the same sample ID) and calls
+    :func:`~agentic_evalkit.stats.reliability.pass_at_k` once per group with
+    ``total_attempts`` set to that group's actual attempt count and
+    ``successful_attempts`` set to how many of them graded
+    :attr:`~agentic_evalkit.models.GradeStatus.PASS`.
+
+    A sample whose group has fewer than ``k`` attempts is silently omitted
+    (never fabricated as ``0.0`` or ``1.0``): ``pass_at_k`` requires
+    ``1 <= k <= total_attempts``, and a sample that was not actually
+    attempted ``k`` times has no defined ``pass@k`` estimate.
+
+    Args:
+        run: The complete run to compute per-sample ``pass@k`` for.
+        k: Number of attempts hypothetically sampled per sample; typically
+            ``run.manifest.attempts`` (every sample's full attempt budget).
+
+    Returns:
+        A mapping from ``sample_id`` to its ``pass@k`` estimate, covering
+        only sample IDs whose attempt count is at least ``k``.
+    """
+    attempts_by_sample: dict[str, list[SampleResult]] = {}
+    for sample in run.samples:
+        attempts_by_sample.setdefault(sample.sample.sample_id, []).append(sample)
+
+    estimates: dict[str, float] = {}
+    for sample_id, attempts in attempts_by_sample.items():
+        total_attempts = len(attempts)
+        if total_attempts < k:
+            continue
+        successful_attempts = sum(
+            1
+            for attempt in attempts
+            if attempt.grade is not None and attempt.grade.status is GradeStatus.PASS
+        )
+        estimates[sample_id] = pass_at_k(
+            total_attempts=total_attempts, successful_attempts=successful_attempts, k=k
+        )
+    return estimates
+
+
+def build_report_aggregates(run: EvalRunResult) -> dict[str, JsonValue]:
+    """Compute the full ``aggregates`` payload a report should carry for ``run``.
+
+    Combines :func:`aggregate_run` (exact outcome counts, the Wilson-bounded
+    pass rate, and latency/token/cost distributions) with
+    :func:`pass_at_k_by_sample` (only when ``run.manifest.attempts > 1`` --
+    with a single attempt per sample, ``pass@1`` over one attempt is exactly
+    the pass/fail bit already in ``aggregate_run``'s counts, so reporting it
+    a second time would be redundant, not informative) into the one
+    JSON-compatible mapping every :class:`~agentic_evalkit.reporters.base.Reporter`
+    accepts as its optional ``aggregates`` argument.
+
+    Never fabricates a ``pass_at_k`` entry when no sample actually ran ``k``
+    attempts: if :func:`pass_at_k_by_sample` returns an empty mapping (e.g.
+    ``manifest.attempts > 1`` was configured but every sample errored before
+    any attempt count could reach ``k``), the ``"pass_at_k"`` key is omitted
+    entirely rather than reporting a mean of zero samples.
+    """
+    aggregates = cast("dict[str, JsonValue]", aggregate_run(run).model_dump(mode="json"))
+
+    attempts = run.manifest.attempts
+    if attempts > 1:
+        per_sample = pass_at_k_by_sample(run, k=attempts)
+        if per_sample:
+            values = list(per_sample.values())
+            aggregates["pass_at_k"] = {
+                "k": attempts,
+                "mean": sum(values) / len(values),
+                "by_sample_id": cast("JsonValue", per_sample),
+            }
+    return aggregates
