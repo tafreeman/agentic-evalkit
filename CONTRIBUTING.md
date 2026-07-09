@@ -89,8 +89,8 @@ uv run mkdocs serve   # live-reloading local preview
 `mkdocs.yml` excludes internal process records (plan review/modification
 records, `docs/plans/README.md`, and `docs/release/`) from the published
 site via `exclude_docs`; everything else under `docs/` — the design, the
-implementation plan, all nine ADRs, and the guides — is part of the
-published site and must build without strict-mode warnings.
+implementation plan, every ADR (`docs/adr/`), and the guides — is part of
+the published site and must build without strict-mode warnings.
 
 ## Release gates
 

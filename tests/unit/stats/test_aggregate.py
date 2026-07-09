@@ -26,8 +26,15 @@ from agentic_evalkit.models import (
     ResolvedDataset,
     RunSummary,
     SampleResult,
+    SamplingPolicy,
 )
-from agentic_evalkit.stats.aggregate import aggregate_run, wilson_interval
+from agentic_evalkit.stats.aggregate import (
+    aggregate_run,
+    build_report_aggregates,
+    pass_at_k_by_sample,
+    wilson_interval,
+)
+from agentic_evalkit.stats.reliability import pass_at_k
 
 _STARTED_AT = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
 _FINISHED_AT = datetime(2026, 7, 2, 12, 5, 0, tzinfo=UTC)
@@ -60,6 +67,22 @@ def _run(samples: tuple[SampleResult, ...]) -> EvalRunResult:
         # Deliberately wrong/stale summary: aggregate_run must recount from
         # samples rather than trusting this value.
         summary=RunSummary(total=999, passed=999),
+        started_at=_STARTED_AT,
+        finished_at=_FINISHED_AT,
+    )
+
+
+def _run_with_attempts(samples: tuple[SampleResult, ...], *, attempts: int) -> EvalRunResult:
+    """Like ``_run`` but with a manifest whose ``attempts`` (and the
+    validator-mirrored ``sampling.attempts``) is caller-controlled, for
+    ``pass_at_k_by_sample``/``build_report_aggregates`` coverage that needs
+    ``attempts > 1``."""
+    manifest = _manifest(attempts=attempts, sampling=SamplingPolicy(attempts=attempts))
+    return EvalRunResult(
+        run_id="run-002",
+        manifest=manifest,
+        resolved_dataset=_resolved_dataset(),
+        samples=samples,
         started_at=_STARTED_AT,
         finished_at=_FINISHED_AT,
     )
@@ -330,3 +353,122 @@ def test_aggregate_run_token_and_cost_distributions_ignore_missing_values() -> N
     assert stats.cost_usd is not None
     assert stats.cost_usd.count == 1
     assert stats.cost_usd.mean == pytest.approx(0.01)
+
+
+# --- pass_at_k_by_sample: per-sample grouping and forwarding to pass_at_k ----
+
+
+def _repeated_attempts(
+    sample_id: str, *, statuses: tuple[GradeStatus, ...]
+) -> tuple[SampleResult, ...]:
+    return tuple(
+        SampleResult(
+            sample=_sample(sample_id),
+            execution=_execution(sample_id, attempt=attempt, status=ExecutionStatus.COMPLETED),
+            grade=_grade(
+                sample_id, status=status, score=1.0 if status is GradeStatus.PASS else 0.0
+            ),
+        )
+        for attempt, status in enumerate(statuses, start=1)
+    )
+
+
+def test_pass_at_k_by_sample_matches_directly_computed_pass_at_k_per_group() -> None:
+    # s0: 2 of 3 attempts pass; s1: 0 of 3 attempts pass. Independently
+    # counted here (not copied from the implementation) so the assertion
+    # exercises pass_at_k_by_sample's own grouping/counting, cross-checked
+    # against a direct pass_at_k call over the same (n, c) rather than a
+    # hardcoded numeric literal.
+    s0_statuses = (GradeStatus.PASS, GradeStatus.PASS, GradeStatus.FAIL)
+    s1_statuses = (GradeStatus.FAIL, GradeStatus.FAIL, GradeStatus.FAIL)
+    samples = _repeated_attempts("s0", statuses=s0_statuses) + _repeated_attempts(
+        "s1", statuses=s1_statuses
+    )
+    run = _run_with_attempts(samples, attempts=3)
+
+    estimates = pass_at_k_by_sample(run, k=3)
+
+    expected_s0 = pass_at_k(
+        total_attempts=len(s0_statuses),
+        successful_attempts=sum(1 for status in s0_statuses if status is GradeStatus.PASS),
+        k=3,
+    )
+    expected_s1 = pass_at_k(
+        total_attempts=len(s1_statuses),
+        successful_attempts=sum(1 for status in s1_statuses if status is GradeStatus.PASS),
+        k=3,
+    )
+    assert estimates == {"s0": pytest.approx(expected_s0), "s1": pytest.approx(expected_s1)}
+
+
+def test_pass_at_k_by_sample_omits_samples_with_fewer_than_k_attempts() -> None:
+    # Only 2 attempts actually ran for this sample; pass_at_k requires
+    # 1 <= k <= total_attempts, so k=3 must be omitted rather than raising
+    # or fabricating an estimate.
+    samples = _repeated_attempts("s0", statuses=(GradeStatus.PASS, GradeStatus.FAIL))
+    run = _run_with_attempts(samples, attempts=2)
+    estimates = pass_at_k_by_sample(run, k=3)
+    assert estimates == {}
+
+
+def test_pass_at_k_by_sample_empty_run_returns_empty_mapping() -> None:
+    run = _run_with_attempts((), attempts=2)
+    assert pass_at_k_by_sample(run, k=2) == {}
+
+
+# --- build_report_aggregates: the CLI-facing envelope ------------------------
+
+
+def test_build_report_aggregates_carries_aggregate_run_fields() -> None:
+    samples = (
+        SampleResult(
+            sample=_sample("s0"),
+            execution=_execution("s0", status=ExecutionStatus.COMPLETED),
+            grade=_grade("s0", status=GradeStatus.PASS, score=1.0),
+        ),
+    )
+    run = _run(samples)
+    aggregates = build_report_aggregates(run)
+    expected = aggregate_run(run).model_dump(mode="json")
+    for key, value in expected.items():
+        assert aggregates[key] == value
+
+
+def test_build_report_aggregates_omits_pass_at_k_with_a_single_attempt() -> None:
+    # _run() builds a manifest with the default attempts=1; pass@1 over one
+    # attempt is exactly the pass/fail bit aggregate_run already reports, so
+    # reporting it a second time would be redundant, not informative.
+    samples = (
+        SampleResult(
+            sample=_sample("s0"),
+            execution=_execution("s0", status=ExecutionStatus.COMPLETED),
+            grade=_grade("s0", status=GradeStatus.PASS, score=1.0),
+        ),
+    )
+    aggregates = build_report_aggregates(_run(samples))
+    assert "pass_at_k" not in aggregates
+
+
+def test_build_report_aggregates_includes_pass_at_k_with_repeated_attempts() -> None:
+    samples = _repeated_attempts("s0", statuses=(GradeStatus.PASS, GradeStatus.FAIL))
+    run = _run_with_attempts(samples, attempts=2)
+    aggregates = build_report_aggregates(run)
+    assert "pass_at_k" in aggregates
+    pass_at_k_payload = aggregates["pass_at_k"]
+    assert isinstance(pass_at_k_payload, dict)
+    assert pass_at_k_payload["k"] == 2
+    assert "s0" in pass_at_k_payload["by_sample_id"]
+    expected_estimates = pass_at_k_by_sample(run, k=2)
+    expected_mean = sum(expected_estimates.values()) / len(expected_estimates)
+    assert pass_at_k_payload["mean"] == pytest.approx(expected_mean)
+
+
+def test_build_report_aggregates_result_is_json_serializable() -> None:
+    import json
+
+    samples = _repeated_attempts("s0", statuses=(GradeStatus.PASS, GradeStatus.FAIL))
+    run = _run_with_attempts(samples, attempts=2)
+    # Must not raise: every value in the mapping is JSON-compatible, which
+    # matters because this is exactly what a Reporter.write(aggregates=...)
+    # call serializes to disk.
+    json.dumps(build_report_aggregates(run))

@@ -19,6 +19,7 @@ from agentic_evalkit.datasets.base import ProviderHealth
 from agentic_evalkit.datasets.cache import DatasetCache
 from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.datasets.presets import BUILTIN_PRESETS
+from agentic_evalkit.datasets.resolution_cache import ResolutionCache
 from agentic_evalkit.errors import OfflineCacheMiss, PluginCompatibilityError
 from agentic_evalkit.models import (
     DatasetRef,
@@ -100,6 +101,7 @@ class _CountingFakeProvider:
 
     def __init__(self) -> None:
         self.preview_calls = 0
+        self.resolve_calls = 0
 
     async def search(
         self,
@@ -112,6 +114,7 @@ class _CountingFakeProvider:
         return SearchPage(hits=(), cursor=None, total_hits=0)
 
     async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
+        self.resolve_calls += 1
         return ResolvedDataset(
             dataset_id=ref.dataset_id,
             revision="abc123",
@@ -420,3 +423,237 @@ async def test_search_offline_rejection_leaves_short_query_untouched() -> None:
     with pytest.raises(OfflineCacheMiss) as excinfo:
         await catalog.search("short query", provider="fake", offline=True)
     assert excinfo.value.context["query"] == "short query"
+
+
+# --- resolution_cache: offline resolve after a prior online resolve (ADR-0011) --
+
+
+@pytest.mark.asyncio
+async def test_resolve_offline_succeeds_via_resolution_cache_after_online_resolve(
+    tmp_path: Path,
+) -> None:
+    provider = _CountingFakeProvider()
+    resolution_cache = ResolutionCache(tmp_path)
+    catalog = DatasetCatalog(providers={"fake": provider}, resolution_cache=resolution_cache)
+    ref = _fake_ref()
+
+    online = await catalog.resolve(ref)
+    assert provider.resolve_calls == 1
+
+    offline = await catalog.resolve(ref, offline=True)
+    assert offline == online
+    # The offline resolve must be served entirely from the resolution cache:
+    # the provider's own resolve() is never called a second time.
+    assert provider.resolve_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_offline_without_prior_online_resolve_is_retryable_when_configured(
+    tmp_path: Path,
+) -> None:
+    """Unlike the no-``resolution_cache`` case (``retryable=False``, covered by
+    ``test_resolve_offline_rejection_is_not_retryable`` above), a configured
+    but not-yet-warmed resolution cache means the exact same offline call
+    *would* succeed after one online resolve -- the genuine "warm the cache"
+    case."""
+    catalog = DatasetCatalog(
+        providers={"fake": _CountingFakeProvider()}, resolution_cache=ResolutionCache(tmp_path)
+    )
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        await catalog.resolve(_fake_ref(), offline=True)
+    assert excinfo.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_offline_via_resolution_cache_still_rejects_a_different_dataset(
+    tmp_path: Path,
+) -> None:
+    """A resolution cache warmed for one dataset must not leak into serving
+    an offline resolve for a different, never-resolved dataset."""
+    provider = _CountingFakeProvider()
+    resolution_cache = ResolutionCache(tmp_path)
+    catalog = DatasetCatalog(providers={"fake": provider}, resolution_cache=resolution_cache)
+    await catalog.resolve(_fake_ref())
+
+    other_ref = DatasetRef(provider="fake", dataset_id="other/dataset", config="main", split="test")
+    with pytest.raises(OfflineCacheMiss):
+        await catalog.resolve(other_ref, offline=True)
+    assert provider.resolve_calls == 1
+
+
+class _RevisionEchoingFakeProvider(_CountingFakeProvider):
+    """A fake whose ``resolve`` echoes the *requested* ``ref.revision`` into
+    the resolved dataset, so a test can tell which pinned revision was served.
+
+    ``ResolvedDataset.revision`` is a required, non-null field: an unpinned
+    (``ref.revision is None``) request still resolves to a concrete revision
+    ("latest at resolution time"), modeled here by a fixed sentinel.
+    """
+
+    _LATEST_SENTINEL = "sha256:" + "0" * 64
+
+    async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
+        self.resolve_calls += 1
+        return ResolvedDataset(
+            dataset_id=ref.dataset_id,
+            revision=ref.revision if ref.revision is not None else self._LATEST_SENTINEL,
+            config=ref.config,
+            split=ref.split,
+        )
+
+
+@pytest.mark.asyncio
+async def test_offline_resolve_of_a_pinned_revision_never_returns_a_different_pin(
+    tmp_path: Path,
+) -> None:
+    """CRITICAL regression (2026-07-09): resolving ``ref@revA`` online then
+    ``ref@revB`` online (same provider/dataset/config/split, different
+    pinned revision) must cache BOTH; an offline ``resolve(ref@revA)`` must
+    return ``revA``'s resolution, never be silently served ``revB``'s. The
+    revision-blind key this fix replaced collapsed both pins into one slot,
+    so the second online resolve overwrote the first and the offline resolve
+    returned the wrong pinned revision with no error."""
+    provider = _RevisionEchoingFakeProvider()
+    catalog = DatasetCatalog(
+        providers={"fake": provider}, resolution_cache=ResolutionCache(tmp_path)
+    )
+    ref_a = DatasetRef(provider="fake", dataset_id="fake/dataset", revision="revA")
+    ref_b = DatasetRef(provider="fake", dataset_id="fake/dataset", revision="revB")
+
+    resolved_a = await catalog.resolve(ref_a)
+    resolved_b = await catalog.resolve(ref_b)
+    assert resolved_a.revision == "revA"
+    assert resolved_b.revision == "revB"
+    assert provider.resolve_calls == 2
+
+    # The offline resolve of revA must return revA's resolution, served
+    # entirely from cache (no third provider call), never revB's.
+    offline_a = await catalog.resolve(ref_a, offline=True)
+    assert offline_a.revision == "revA"
+    assert offline_a == resolved_a
+    assert provider.resolve_calls == 2
+
+    # And revB's offline resolve independently returns revB's, not revA's.
+    offline_b = await catalog.resolve(ref_b, offline=True)
+    assert offline_b.revision == "revB"
+    assert provider.resolve_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_offline_resolve_of_an_uncached_pinned_revision_raises_not_wrong_data(
+    tmp_path: Path,
+) -> None:
+    """A pinned revision that was never resolved online must raise
+    ``OfflineCacheMiss`` rather than being served a *different* revision's
+    cached resolution -- a miss is safe; wrong data is the defect."""
+    provider = _RevisionEchoingFakeProvider()
+    catalog = DatasetCatalog(
+        providers={"fake": provider}, resolution_cache=ResolutionCache(tmp_path)
+    )
+    # Warm only revA online.
+    await catalog.resolve(DatasetRef(provider="fake", dataset_id="fake/dataset", revision="revA"))
+
+    # revB was never resolved: offline must miss, not return revA's data.
+    ref_b = DatasetRef(provider="fake", dataset_id="fake/dataset", revision="revB")
+    with pytest.raises(OfflineCacheMiss):
+        await catalog.resolve(ref_b, offline=True)
+
+
+@pytest.mark.asyncio
+async def test_offline_resolve_of_the_unpinned_request_still_round_trips(
+    tmp_path: Path,
+) -> None:
+    """The pre-fix common path (``revision is None``) is unchanged: an
+    unpinned online resolve is cached and an unpinned offline resolve
+    returns it."""
+    provider = _RevisionEchoingFakeProvider()
+    catalog = DatasetCatalog(
+        providers={"fake": provider}, resolution_cache=ResolutionCache(tmp_path)
+    )
+    ref = DatasetRef(provider="fake", dataset_id="fake/dataset")  # revision=None
+    online = await catalog.resolve(ref)
+    offline = await catalog.resolve(ref, offline=True)
+    assert offline == online
+    assert provider.resolve_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_offline_still_raises_not_retryable_without_resolution_cache(
+    tmp_path: Path,
+) -> None:
+    """Backward compatibility: a catalog that opts into a page ``cache`` but
+    not a ``resolution_cache`` keeps ADR-0010's original resolve() behavior
+    unchanged -- the two caches are independent opt-ins."""
+    provider = _CountingFakeProvider()
+    catalog = DatasetCatalog(providers={"fake": provider}, cache=DatasetCache(tmp_path))
+    await catalog.resolve(_fake_ref())
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        await catalog.resolve(_fake_ref(), offline=True)
+    assert excinfo.value.retryable is False
+
+
+# --- cache: offline iter_records after a prior online preview (ADR-0011) --------
+
+
+@pytest.mark.asyncio
+async def test_iter_records_offline_succeeds_via_page_cache_after_online_preview(
+    tmp_path: Path,
+) -> None:
+    provider = _CountingFakeProvider()
+    cache = DatasetCache(tmp_path)
+    catalog = DatasetCatalog(providers={"fake": provider}, cache=cache)
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+
+    warmed_page = await catalog.preview(ref, dataset, offset=0, limit=5)
+    assert provider.preview_calls == 1
+
+    # `_CountingFakeProvider.iter_records` unconditionally raises
+    # NotImplementedError, so if the cache lookup below silently fell
+    # through to the provider instead of serving the warmed page, this
+    # would fail with that error rather than returning records.
+    records = [
+        record
+        async for record in catalog.iter_records(ref, dataset, offset=0, limit=5, offline=True)
+    ]
+    assert [record.row_id for record in records] == [r.row_id for r in warmed_page.records]
+    assert provider.preview_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_iter_records_offline_page_cache_miss_is_retryable(tmp_path: Path) -> None:
+    """A configured page cache with no matching (offset, limit) entry yet is
+    the genuine "warm it once online" case, unlike the no-cache-at-all case."""
+    provider = _CountingFakeProvider()
+    cache = DatasetCache(tmp_path)
+    catalog = DatasetCatalog(providers={"fake": provider}, cache=cache)
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+    await catalog.preview(ref, dataset, offset=0, limit=5)
+
+    # A *different* (offset, limit) than what was warmed above. The
+    # rejection must surface synchronously at the call (matching
+    # ``preview``/``resolve``), not only once iteration begins.
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        catalog.iter_records(ref, dataset, offset=5, limit=5, offline=True)
+    assert excinfo.value.retryable is True
+    assert "not cache-backed" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_iter_records_offline_with_no_limit_is_not_retryable_even_with_cache(
+    tmp_path: Path,
+) -> None:
+    """Unbounded iteration (``limit=None``) has no single-page cache key, so
+    it must keep raising ``retryable=False`` even when a page cache is
+    configured and warmed for *some* bounded page of the same dataset."""
+    provider = _CountingFakeProvider()
+    cache = DatasetCache(tmp_path)
+    catalog = DatasetCatalog(providers={"fake": provider}, cache=cache)
+    ref = _fake_ref()
+    dataset = await catalog.resolve(ref)
+    await catalog.preview(ref, dataset, offset=0, limit=5)
+
+    with pytest.raises(OfflineCacheMiss) as excinfo:
+        catalog.iter_records(ref, dataset, offline=True)
+    assert excinfo.value.retryable is False

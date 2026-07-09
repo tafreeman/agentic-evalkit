@@ -5,6 +5,8 @@ from agentic_evalkit.stats.aggregate import (
     RateEstimate,
     ResourceDistribution,
     aggregate_run,
+    build_report_aggregates,
+    pass_at_k_by_sample,
     wilson_interval,
 )
 from agentic_evalkit.stats.compare import ComparisonResult, compare_runs
@@ -16,8 +18,10 @@ __all__ = [
     "RateEstimate",
     "ResourceDistribution",
     "aggregate_run",
+    "build_report_aggregates",
     "compare_runs",
     "consistency_at_k",
     "pass_at_k",
+    "pass_at_k_by_sample",
     "wilson_interval",
 ]

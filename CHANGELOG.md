@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `datasets pull` now persists the resolved dataset identity (`name@revision`)
+  to a new offline resolution cache, so `run --offline`/`datasets
+  inspect|preview --offline` can resolve a Hugging Face-backed dataset
+  without contacting the provider again, as long as it was resolved online
+  at least once first. `iter_records` under `--offline` also now serves an
+  already-cached page (from `pull` or `preview`) at the exact `(offset,
+  limit)` the runner requests, instead of unconditionally rejecting.
+  Previously `run --offline` was categorically unusable for any
+  Hugging-Face-backed dataset, even immediately after `pull`. See
+  [ADR-0011](docs/adr/0011-offline-resolution-cache.md).
+- Canonical run reports (`run` and `report`) now carry a real `aggregates`
+  block: the Wilson-bounded pass rate, resource distributions, and (for
+  manifests with repeated attempts) per-sample `pass@k`, computed via
+  `agentic_evalkit.stats.build_report_aggregates`. Previously every
+  reporter accepted an `aggregates` parameter but nothing in the CLI ever
+  populated it.
+- `run` now computes and persists `environment_fingerprint`,
+  `code_fingerprint`, and `target_fingerprint` on every manifest via
+  `agentic_evalkit.provenance`. Previously these were declared, versioned
+  wire fields that no production code path ever populated, so every real
+  run's report carried `null` in all three.
+- Two opt-in graders, `judge-reference@1` and `composite-reference@1`, are
+  now selectable from a manifest's `grader` field, backed by a new packaged
+  `agentic_evalkit.examples.ReferenceJudgeClient` (a deterministic,
+  network-free `JudgeClient`). Makes the calibrated-judge and composite
+  grading pipelines runnable end to end from the quickstart without an LLM
+  provider configured. Both are wired in permanently uncalibrated, so
+  neither can ever hard-gate a release.
+
 ## [0.1.1] - 2026-07-06
 
 ### Fixed

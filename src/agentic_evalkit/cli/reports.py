@@ -30,7 +30,7 @@ from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.models import EvalRunResult
 from agentic_evalkit.reporters import REPORTER_FORMATS
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, Reporter, apply_redaction
-from agentic_evalkit.stats import ComparisonResult, compare_runs
+from agentic_evalkit.stats import ComparisonResult, build_report_aggregates, compare_runs
 
 __all__ = ["compare", "load_run_result", "report"]
 
@@ -212,6 +212,14 @@ def report(
     already writes redacted canonical JSON, so this is defense in depth for
     run files produced by older tools or edited by hand -- a credential-shaped
     evidence value can never reach a regenerated report either way.
+
+    ``aggregates`` is recomputed here via
+    :func:`agentic_evalkit.stats.build_report_aggregates` rather than read
+    back from the source file's own ``"aggregates"`` key (present only for
+    JSON reports written after that field was wired in): recomputing from
+    the reconstructed ``EvalRunResult`` means a regenerated report always
+    carries the statistics layer, even when regenerating from an older or
+    hand-edited canonical run file that predates it.
     """
 
     def _action() -> Path:
@@ -223,7 +231,7 @@ def report(
         run = apply_redaction(load_run_result(source), DEFAULT_REDACTION_POLICY)
         default_suffix = _SUFFIXES.get(format_, f".{format_}")
         destination = output if output is not None else source.with_suffix(default_suffix)
-        return _REPORTERS[format_].write(run, destination)
+        return _REPORTERS[format_].write(run, destination, aggregates=build_report_aggregates(run))
 
     destination = run_cli_command(_action, debug=debug)
     console.print(safe_text(f"report: {destination}"), soft_wrap=True)

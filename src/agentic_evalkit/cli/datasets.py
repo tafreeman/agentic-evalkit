@@ -31,6 +31,7 @@ from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.datasets.huggingface import HuggingFaceDatasetProvider
 from agentic_evalkit.datasets.local import LocalDatasetProvider
 from agentic_evalkit.datasets.presets import BUILTIN_PRESETS
+from agentic_evalkit.datasets.resolution_cache import ResolutionCache
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.models import DatasetRef, ResolvedDataset, SamplePage, SearchPage
 
@@ -40,6 +41,10 @@ app.add_typer(datasets_app, name="datasets")
 T = TypeVar("T")
 
 _CACHE_DIR_NAME = "agentic-evalkit"
+#: Subdirectory of the cache root reserved for the resolution-identity cache
+#: (ADR-0011), kept physically separate from the page cache's own digest
+#: fan-out directories so the two caches' entries can never collide.
+_RESOLUTION_CACHE_SUBDIR = "resolutions"
 
 
 def default_cache_dir() -> Path:
@@ -98,7 +103,12 @@ def build_catalog(*, offline: bool) -> DatasetCatalog:
     """Build a real ``DatasetCatalog`` wired to the local + Hugging Face providers.
 
     Uses :func:`default_cache_dir` (design §6.3's standalone default) so
-    ``--offline`` runs can serve exact previously-cached pages.
+    ``--offline`` runs can serve exact previously-cached pages, plus a
+    :class:`~agentic_evalkit.datasets.resolution_cache.ResolutionCache`
+    rooted at the same cache directory's ``resolutions/`` subdirectory
+    (ADR-0011) so ``--offline`` runs can also resolve a dataset that was
+    resolved online at least once (e.g. via ``datasets pull``) without
+    contacting the provider again.
 
     ``offline`` is accepted here (rather than dropped) purely to keep every
     call site's shape uniform -- ``DatasetCatalog`` itself takes ``offline``
@@ -111,6 +121,7 @@ def build_catalog(*, offline: bool) -> DatasetCatalog:
     function below now does that forwarding explicitly.
     """
     cache = DatasetCache(default_cache_dir())
+    resolution_cache = ResolutionCache(default_cache_dir() / _RESOLUTION_CACHE_SUBDIR)
     client = httpx.AsyncClient(timeout=30.0)
     # HfApi structurally satisfies datasets.huggingface's private _HubClient
     # protocol (verified at runtime by that module's own tests via
@@ -138,7 +149,12 @@ def build_catalog(*, offline: bool) -> DatasetCatalog:
     # collision guard that stops a *plugin* from shadowing a built-in name
     # does not apply -- pass an empty reserved-name tuple rather than
     # tripping PluginCompatibilityError on our own built-ins.
-    return DatasetCatalog(providers=providers, cache=cache, builtin_provider_names=())
+    return DatasetCatalog(
+        providers=providers,
+        cache=cache,
+        resolution_cache=resolution_cache,
+        builtin_provider_names=(),
+    )
 
 
 def _run_async(coroutine_factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
