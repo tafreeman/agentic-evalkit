@@ -439,3 +439,17 @@ def test_contamination_status_is_not_collapsed_to_boolean() -> None:
 def test_held_out_with_a_public_release_date_is_rejected_at_construction() -> None:
     with pytest.raises(ValidationError):
         ContaminationMetadata(held_out=True, public_since=datetime.now(UTC))
+
+
+def test_authored_after_a_public_release_date_is_rejected_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        ContaminationMetadata(
+            authored_after=datetime(2025, 1, 1, tzinfo=UTC),
+            public_since=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+    # Authored-before-or-equal is the consistent case and constructs fine.
+    ok = ContaminationMetadata(
+        authored_after=datetime(2024, 1, 1, tzinfo=UTC),
+        public_since=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+    assert ok.authored_after < ok.public_since  # type: ignore[operator]

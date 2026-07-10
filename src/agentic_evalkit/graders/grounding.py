@@ -105,11 +105,13 @@ def _leaked_canary_tokens(answer: GroundedAnswer, canary_tokens: tuple[str, ...]
     (ADR-0013). Haystacks are scanned separately, never concatenated, so a
     token can never be assembled across an answer/quote boundary.
     """
+    seen: set[str] = set()
     leaked: list[str] = []
     haystacks = [answer.answer, *(citation.quote for citation in answer.citations)]
     for haystack in haystacks:
         for token in find_canary_leaks(haystack, canary_tokens):
-            if token not in leaked:
+            if token not in seen:
+                seen.add(token)
                 leaked.append(token)
     return leaked
 

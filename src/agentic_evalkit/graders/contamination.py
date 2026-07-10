@@ -49,10 +49,12 @@ def find_canary_leaks(text: str, canary_ids: Sequence[str]) -> tuple[str, ...]:
     haystack = normalize_for_containment(text)
     if not haystack:
         return ()
+    seen: set[str] = set()
     leaked: list[str] = []
     for token in canary_ids:
-        if token in leaked:
+        if token in seen:
             continue
+        seen.add(token)
         normalized_token = normalize_for_containment(token)
         if normalized_token and normalized_token in haystack:
             leaked.append(token)

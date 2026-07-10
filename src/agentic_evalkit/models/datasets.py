@@ -63,12 +63,21 @@ class ContaminationMetadata(FrozenModel):
     held_out: bool = False
 
     @model_validator(mode="after")
-    def _validate_held_out_consistency(self) -> "ContaminationMetadata":
+    def _validate_consistency(self) -> "ContaminationMetadata":
         if self.held_out and self.public_since is not None:
             raise ValueError(
                 "held_out=True is inconsistent with a non-null public_since "
                 "(a dataset cannot be both withheld from publication and have "
                 "a known public-release date)"
+            )
+        if (
+            self.authored_after is not None
+            and self.public_since is not None
+            and self.authored_after > self.public_since
+        ):
+            raise ValueError(
+                "authored_after must not be later than public_since "
+                "(a dataset cannot be authored after its own public release date)"
             )
         return self
 
