@@ -4,6 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from agentic_evalkit.models import (
+    ContaminationMetadata,
+    ContaminationStatus,
     DatasetRef,
     DatasetSelection,
     EvalRunManifest,
@@ -407,3 +409,47 @@ def test_eval_run_result_supports_appending_sample_results() -> None:
     assert appended.summary.total == 1
     # The original is untouched, proving immutability was preserved.
     assert initial.samples == ()
+
+
+# --- Contamination metadata (ADR-0013) ---------------------------------------
+
+
+def test_contamination_metadata_round_trips_inside_resolved_dataset() -> None:
+    resolved = ResolvedDataset(
+        dataset_id="local:./private.jsonl",
+        revision="sha256:abc",
+        contamination=ContaminationMetadata(
+            status=ContaminationStatus.VERIFIED_CLEAN,
+            authored_after=datetime.now(UTC),
+            canary_ids=("TRIPWIRE-1",),
+            held_out=True,
+        ),
+    )
+    assert ResolvedDataset.model_validate_json(resolved.model_dump_json()) == resolved
+
+
+def test_contamination_status_is_not_collapsed_to_boolean() -> None:
+    metadata = ContaminationMetadata(status=ContaminationStatus.SUSPECT)
+    restored = ContaminationMetadata.model_validate_json(metadata.model_dump_json())
+    assert restored.status is ContaminationStatus.SUSPECT
+    # The honest default is "never checked", distinguishable from "clean".
+    assert ContaminationMetadata().status is ContaminationStatus.UNKNOWN
+
+
+def test_held_out_with_a_public_release_date_is_rejected_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        ContaminationMetadata(held_out=True, public_since=datetime.now(UTC))
+
+
+def test_authored_after_a_public_release_date_is_rejected_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        ContaminationMetadata(
+            authored_after=datetime(2025, 1, 1, tzinfo=UTC),
+            public_since=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+    # Authored-before-or-equal is the consistent case and constructs fine.
+    ok = ContaminationMetadata(
+        authored_after=datetime(2024, 1, 1, tzinfo=UTC),
+        public_since=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+    assert ok.authored_after < ok.public_since  # type: ignore[operator]

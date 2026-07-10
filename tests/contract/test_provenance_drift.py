@@ -106,6 +106,10 @@ def test_every_manifest_field_is_categorized_for_comparability() -> None:
         "environment_fingerprint",
         "code_fingerprint",
         "baseline_compatibility_rules",
+        # ADR-0013: an informative dataset-provenance label, deliberately not a
+        # comparability key -- two runs of the same dataset never differ in
+        # meaning because one carried a SUSPECT label and the other did not.
+        "contamination",
         "schema_version",
     }
     categorized = provenance_top_level | comparability_excluded

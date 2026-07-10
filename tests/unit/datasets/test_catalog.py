@@ -22,6 +22,7 @@ from agentic_evalkit.datasets.presets import BUILTIN_PRESETS
 from agentic_evalkit.datasets.resolution_cache import ResolutionCache
 from agentic_evalkit.errors import OfflineCacheMiss, PluginCompatibilityError
 from agentic_evalkit.models import (
+    ContaminationStatus,
     DatasetRef,
     ResolvedDataset,
     SamplePage,
@@ -73,6 +74,20 @@ def test_builtin_presets_full_field_set() -> None:
     assert swe.grader == "swebench-harness@1"
     assert swe.required_capabilities == ("swebench",)
     assert swe.ref.provider == "huggingface"
+
+    # Both are long-public benchmarks, honestly labeled SUSPECT (ADR-0013).
+    assert gsm.contamination is not None
+    assert gsm.contamination.status is ContaminationStatus.SUSPECT
+    assert swe.contamination is not None
+    assert swe.contamination.status is ContaminationStatus.SUSPECT
+
+
+def test_all_builtin_presets_declare_a_contamination_status() -> None:
+    """A future preset shipped without a contamination annotation fails here
+    immediately rather than silently shipping unlabeled (ADR-0013), mirroring
+    ``_build_builtin_presets``'s own eager-fail discipline for duplicates."""
+    for preset in BUILTIN_PRESETS.values():
+        assert preset.contamination is not None, preset.name
 
 
 def test_builtin_presets_are_frozen_and_forbid_unknown_fields() -> None:

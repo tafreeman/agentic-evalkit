@@ -29,7 +29,13 @@ from pydantic import JsonValue as ModelJsonValue
 
 from agentic_evalkit.errors import JsonValue as ErrorContextValue
 from agentic_evalkit.errors import ManifestValidationError
-from agentic_evalkit.models import DatasetRef, DatasetSelection, EvalRunManifest, SamplingPolicy
+from agentic_evalkit.models import (
+    ContaminationMetadata,
+    DatasetRef,
+    DatasetSelection,
+    EvalRunManifest,
+    SamplingPolicy,
+)
 from agentic_evalkit.models.base import FrozenModel
 
 # ``errors.JsonValue`` (the stdlib-only type ``AgenticEvalkitError.context``
@@ -123,6 +129,7 @@ class _ManifestFile(FrozenModel):
     code_fingerprint: str | None = None
     target_fingerprint: str | None = None
     baseline_compatibility_rules: dict[str, ModelJsonValue] = Field(default_factory=dict)
+    contamination: ContaminationMetadata | None = None
 
 
 #: The synthetic ``EvalRunManifest.target_name`` every CLI-loaded manifest
@@ -250,6 +257,7 @@ def load_manifest(path: str | Path) -> ManifestDocument:
             code_fingerprint=parsed.code_fingerprint,
             target_fingerprint=parsed.target_fingerprint,
             baseline_compatibility_rules=parsed.baseline_compatibility_rules,
+            contamination=parsed.contamination,
         )
     except ValidationError as error:
         raise ManifestValidationError(
@@ -298,5 +306,7 @@ def dump_manifest(document: ManifestDocument) -> str:
         payload["target_fingerprint"] = manifest.target_fingerprint
     if manifest.baseline_compatibility_rules:
         payload["baseline_compatibility_rules"] = manifest.baseline_compatibility_rules
+    if manifest.contamination is not None:
+        payload["contamination"] = manifest.contamination.model_dump(mode="json", exclude_none=True)
 
     return yaml.safe_dump(payload, sort_keys=True, default_flow_style=False)

@@ -17,7 +17,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Final
 
-from agentic_evalkit.models import DatasetRef
+from agentic_evalkit.models import ContaminationMetadata, ContaminationStatus, DatasetRef
 from agentic_evalkit.models.base import FrozenModel
 
 __all__ = ["BUILTIN_PRESETS", "DatasetPreset"]
@@ -31,6 +31,12 @@ class DatasetPreset(FrozenModel):
     that discovery, preview, and projection do not; an empty tuple means no
     optional capability is required for any readiness level this preset
     reaches.
+
+    ``contamination`` is the preset's best-effort C9 provenance label
+    (ADR-0013): informative, never enforcing. Both built-in presets are
+    long-public, widely mirrored datasets and are honestly labeled
+    ``SUSPECT`` -- a score on either must not back a capability claim
+    without a train/test-overlap or decontamination check first.
     """
 
     name: str
@@ -40,6 +46,7 @@ class DatasetPreset(FrozenModel):
     grader: str
     readiness: str
     required_capabilities: tuple[str, ...] = ()
+    contamination: ContaminationMetadata | None = None
 
 
 def _build_builtin_presets(*presets: DatasetPreset) -> MappingProxyType[str, DatasetPreset]:
@@ -72,6 +79,7 @@ _GSM8K_PRESET: Final[DatasetPreset] = DatasetPreset(
     adapter="gsm8k@1",
     grader="normalized-exact@1",
     readiness="runnable",
+    contamination=ContaminationMetadata(status=ContaminationStatus.SUSPECT),
 )
 
 _SWE_BENCH_VERIFIED_PRESET: Final[DatasetPreset] = DatasetPreset(
@@ -91,6 +99,7 @@ _SWE_BENCH_VERIFIED_PRESET: Final[DatasetPreset] = DatasetPreset(
     grader="swebench-harness@1",
     readiness="prediction_export",
     required_capabilities=("swebench",),
+    contamination=ContaminationMetadata(status=ContaminationStatus.SUSPECT),
 )
 
 BUILTIN_PRESETS: Final[MappingProxyType[str, DatasetPreset]] = _build_builtin_presets(

@@ -250,6 +250,9 @@ def _manifest_document_for_preset(preset: DatasetPreset) -> ManifestDocument:
         attempts=1,
         timeout_seconds=30.0,
         concurrency=1,
+        # Carry the preset's contamination label so it reaches the run
+        # report's resolved_dataset (ADR-0013), not just the preset catalog.
+        contamination=preset.contamination,
     )
     return ManifestDocument(
         manifest=manifest,
@@ -395,6 +398,28 @@ def _default_output_dir() -> Path:
     return Path("agentic-evalkit-runs")
 
 
+def _with_contamination(result: EvalRunResult, manifest: EvalRunManifest) -> EvalRunResult:
+    """Stamp the manifest's contamination label onto the report's resolved dataset.
+
+    A preset's ``SUSPECT`` label (ADR-0013) lives on ``DatasetPreset`` and is
+    carried through the manifest by ``_manifest_document_for_preset``, but the
+    provider's ``resolve`` never sees the preset, so without this the run
+    report's ``resolved_dataset.contamination`` stays ``None`` and the score
+    loses the prompt the label exists to add. A value the provider itself
+    resolved always wins; the manifest value only fills a gap. Never mutates
+    (ADR-0002): returns a new ``EvalRunResult`` via ``model_copy``.
+    """
+    if manifest.contamination is None or result.resolved_dataset.contamination is not None:
+        return result
+    return result.model_copy(
+        update={
+            "resolved_dataset": result.resolved_dataset.model_copy(
+                update={"contamination": manifest.contamination}
+            )
+        }
+    )
+
+
 def _raise_yes_required() -> None:
     raise ManifestValidationError(
         message="run is noninteractive; pass --yes to proceed without a prompt",
@@ -490,6 +515,7 @@ def run(
             return asyncio.run(runner.run(manifest, event_sink=_sink))
 
     result = run_cli_command(_action, debug=debug)
+    result = _with_contamination(result, manifest)
 
     report_path = write_canonical_report(result, output_dir or _default_output_dir())
 
