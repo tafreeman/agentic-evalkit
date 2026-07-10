@@ -46,6 +46,11 @@ from agentic_evalkit.artifacts import ArtifactStore
 from agentic_evalkit.benchmarks.base import BenchmarkAdapter
 from agentic_evalkit.benchmarks.grounding import GroundedCitationAdapter
 from agentic_evalkit.benchmarks.gsm8k import Gsm8kAdapter
+from agentic_evalkit.benchmarks.swebench import SweBenchVerifiedAdapter
+from agentic_evalkit.benchmarks.swebench_docker import (
+    SweBenchDockerHarnessExecutor,
+    swebench_prediction,
+)
 from agentic_evalkit.cli.app import ExitCode, app, console, run_cli_command, safe_text
 from agentic_evalkit.cli.datasets import build_catalog
 from agentic_evalkit.datasets.catalog import DatasetCatalog
@@ -57,6 +62,7 @@ from agentic_evalkit.graders.base import Grader
 from agentic_evalkit.graders.composite import CompositeGrader, WeightedGrader
 from agentic_evalkit.graders.exact import ExactMatchGrader
 from agentic_evalkit.graders.grounding import build_grounded_citation_grader
+from agentic_evalkit.graders.harness import HarnessGrader
 from agentic_evalkit.graders.judge import JudgeGrader
 from agentic_evalkit.manifest import (
     CallableTargetConfig,
@@ -128,15 +134,16 @@ class _RunnerCatalogAdapter:
 
 _DEMO_TARGET_IMPORT_STRING = "agentic_evalkit.examples.zero_target:zero_target"
 
-#: Adapters/graders the runnable objective-only CLI knows how to construct
-#: by name. This module intentionally hardcodes this small, fully-tested
-#: table rather than doing dynamic plugin discovery for adapters/graders
-#: (that is out of Task 14's scope). Every preset-referenced name resolves
-#: here; ``grounded-citation-tasks@1`` has no curated preset yet and is
-#: reachable from hand-authored manifests only (ADR-0012).
+#: Adapters/graders the runnable CLI knows how to construct by name. This
+#: module intentionally hardcodes this small, fully-tested table rather than
+#: doing dynamic plugin discovery for adapters/graders. Every preset-referenced
+#: name now resolves here (both ``gsm8k`` and ``swe-bench-verified``);
+#: ``grounded-citation-tasks@1`` has no curated preset yet and is reachable
+#: from hand-authored manifests only (ADR-0012).
 _KNOWN_ADAPTERS: dict[str, BenchmarkAdapter] = {
     "gsm8k@1": Gsm8kAdapter(),
     "grounded-citation-tasks@1": GroundedCitationAdapter(),
+    "swebench-verified@1": SweBenchVerifiedAdapter(),
 }
 
 
@@ -185,11 +192,22 @@ def _build_known_graders() -> dict[str, Grader]:
     # here, so it is score-inert (weight 0.0) and can never hard-gate; the
     # deterministic grounding-hygiene tier is the only gate.
     grounded_citation = build_grounded_citation_grader(judge_client=ReferenceJudgeClient())
+    # Authoritative SWE-bench grading (ADR-0014). The executor is importable
+    # with zero extras and reports UNAVAILABLE at run time until
+    # ``agentic-evalkit[swebench]`` + a Docker daemon are present, so
+    # registering it never forces a docker/swebench import on the base install.
+    swebench_harness = HarnessGrader(
+        executor=SweBenchDockerHarnessExecutor(),
+        predictor=swebench_prediction,
+        benchmark="swebench-verified@1",
+        name="swebench-harness@1",
+    )
     return {
         "normalized-exact@1": exact_match,
         "judge-reference@1": judge_reference,
         "composite-reference@1": composite_reference,
         "grounded-citation@1": grounded_citation,
+        "swebench-harness@1": swebench_harness,
     }
 
 

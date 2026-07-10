@@ -13,6 +13,8 @@ from a real :class:`~agentic_evalkit.benchmarks.harness.HarnessResult`
 
 import json
 
+from pydantic import JsonValue
+
 from agentic_evalkit.errors import DatasetSchemaMismatch
 from agentic_evalkit.models import EvalSample, GraderSpec, SourceRecord
 
@@ -160,7 +162,7 @@ class SweBenchVerifiedAdapter:
         instance_id = sample.metadata.get("instance_id")
         return isinstance(instance_id, str) and bool(instance_id)
 
-    def aggregate_metadata(self) -> dict[str, object]:
+    def aggregate_metadata(self) -> dict[str, JsonValue]:
         """Benchmark-specific metadata recorded on run aggregation (design §7)."""
         return {
             "benchmark": "swebench-verified",

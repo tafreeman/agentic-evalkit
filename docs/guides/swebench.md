@@ -81,28 +81,45 @@ The `swe-bench-verified` preset's `readiness` is `prediction_export`
 official prediction works out of the box, and the last authoritative step
 is deliberately gated behind a capability that is not yet installed.
 
-## The follow-on Docker executor
+## Authoritative grading: the Docker executor
 
-A pinned, official containerized SWE-bench executor is planned as a
-separate follow-on implementation, gated on this release's acceptance
-audit passing first (see the [implementation
-plan](../plans/2026-07-02-agentic-evalkit-initial-release.md)'s follow-on
-boundary notes). It will:
+The pinned, official containerized SWE-bench executor has landed
+([ADR-0014](../adr/0014-swebench-docker-harness-executor.md)). Install the
+extra and point a manifest at the SWE-bench pair:
 
-- record harness version, container image digests, patch application
-  results, and test logs;
-- pass one gold-patch (known-resolved) and one intentionally invalid-patch
-  smoke test through the same production path before being trusted;
-- report typed infrastructure failures (image pull failure, resource
-  exhaustion, timeout) distinctly from a genuine unresolved verdict;
-- introduce no changes to the public `HarnessRequest`/`HarnessResult`
-  contracts already shipped in this release — those contracts were
-  designed up front specifically so the executor is a pure implementation
-  addition, not a breaking change.
+```bash
+uv pip install "agentic-evalkit[swebench]"   # pulls swebench + the docker SDK
+```
 
-Until that follow-on lands, this preset is fully usable for dataset
-discovery, preview, sample projection, and prediction export; only the
-final authoritative resolution step is deferred.
+```yaml
+# eval.yaml
+adapter: swebench-verified@1
+grader: swebench-harness@1
+```
+
+With `agentic-evalkit[swebench]` installed and a reachable Docker daemon,
+`swebench-harness@1` runs the official harness for each instance and grades
+the real `resolved` verdict: `resolved=True` → a hard-gated `pass`,
+`resolved=False` → a hard-gated `fail`. Without the extra or a daemon, the
+grade is a typed `unavailable` (never a substitute score), and the run still
+completes — an unavailable capability is not a task failure.
+
+The executor keeps the fidelity discipline the contracts were designed for:
+
+- it drives the official `swebench` package rather than reimplementing patch
+  application or test execution;
+- infrastructure failures (image pull, timeout, resource exhaustion, a
+  malformed report) surface as `HarnessStatus.ERROR` with `resolved=None`,
+  distinct from a genuine unresolved verdict, and never a fabricated pass;
+- it changes none of the public `HarnessRequest`/`HarnessResult` contracts —
+  it is a pure implementation addition behind the existing
+  `HarnessExecutor` protocol.
+
+The gold-patch / invalid-patch fidelity check (design §7.1) runs via the
+opt-in `.github/workflows/live-swebench.yml`, which is the only CI that
+installs the extra and requires Docker; `ci.yml` stays Docker-free.
 
 See [ADR-0005](../adr/0005-benchmark-adapters-and-harnesses.md) for the
-full adapter/harness separation this guide summarizes.
+adapter/harness separation and
+[ADR-0014](../adr/0014-swebench-docker-harness-executor.md) for the executor
+and grader this section summarizes.

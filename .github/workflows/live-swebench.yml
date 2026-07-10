@@ -1,0 +1,51 @@
+name: Live SWE-bench harness
+
+# Opt-in, Docker-backed evidence that the official SWE-bench harness executor
+# (ADR-0014) resolves a gold patch and rejects a corrupted one through the
+# identical real execute() path (design §7.1 fidelity gate). Deliberately
+# NOT part of ci.yml/packaging -- those stay Docker-free and fast. This is the
+# only place in CI that installs the swebench extra and requires a Docker
+# daemon (present on GitHub-hosted ubuntu-latest runners).
+#
+# It never converts a missing capability into a passing run: the live tests
+# skip only when the swebench extra / Docker daemon is genuinely absent. The
+# gold patch is the dataset's own reference solution (no fixture file needed),
+# so a scheduled or dispatched run with Docker actually validates the harness
+# -- it does not pass vacuously. An optional instance_id input pins a specific
+# instance; otherwise the first dataset row is used.
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: "SWE-bench Verified instance id for the fidelity check"
+        required: false
+        type: string
+  schedule:
+    # Every Monday at 10:00 UTC (an hour after the live-provider workflow).
+    - cron: "0 10 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  live-swebench:
+    name: live SWE-bench harness fidelity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.13"
+
+      # The one place the swebench extra is installed: base CI never is.
+      - name: Sync locked environment with the swebench extra
+        run: uv sync --all-groups --extra swebench --locked
+
+      - name: Live SWE-bench harness tests
+        env:
+          AGENTIC_EVALKIT_SWEBENCH_INSTANCE: ${{ inputs.instance_id }}
+        run: uv run pytest tests/live/test_swebench_harness_live.py -m live -v

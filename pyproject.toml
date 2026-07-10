@@ -47,7 +47,7 @@ agentic-evalkit = "agentic_evalkit.cli:app"
 [project.optional-dependencies]
 parquet = []
 judges = []
-swebench = []
+swebench = ["swebench>=4.1,<5", "docker>=7.1,<8"]
 
 [dependency-groups]
 dev = [

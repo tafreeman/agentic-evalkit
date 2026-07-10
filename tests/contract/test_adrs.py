@@ -39,6 +39,7 @@ REQUIRED_ADR_PREFIXES = (
     "0011",
     "0012",
     "0013",
+    "0014",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
