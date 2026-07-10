@@ -2,6 +2,11 @@
 
 from agentic_evalkit.graders.base import Grader
 from agentic_evalkit.graders.composite import CompositeGrader, SchemaGrader, WeightedGrader
+from agentic_evalkit.graders.contamination import (
+    canary_leak_evidence,
+    find_canary_leaks,
+    normalize_for_containment,
+)
 from agentic_evalkit.graders.exact import ExactMatchGrader
 from agentic_evalkit.graders.grounding import (
     GRADING_SCOPE,
@@ -39,4 +44,7 @@ __all__ = [
     "WeightedGrader",
     "build_grounded_citation_grader",
     "build_grounding_rubric",
+    "canary_leak_evidence",
+    "find_canary_leaks",
+    "normalize_for_containment",
 ]

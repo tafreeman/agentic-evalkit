@@ -8,6 +8,8 @@ here is frozen, forbids unknown fields, carries an explicit
 
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.models.datasets import (
+    ContaminationMetadata,
+    ContaminationStatus,
     DatasetRef,
     ResolvedDataset,
     SamplePage,
@@ -32,6 +34,8 @@ from agentic_evalkit.models.runs import (
 from agentic_evalkit.models.samples import EvalSample, GraderSpec
 
 __all__ = [
+    "ContaminationMetadata",
+    "ContaminationStatus",
     "DatasetRef",
     "DatasetSelection",
     "EvalRunManifest",

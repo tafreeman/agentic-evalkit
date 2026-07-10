@@ -25,15 +25,15 @@ required-evidence coverage only when its normalized quote carries at least
 :data:`MIN_SUBSTANTIVE_QUOTE_TOKENS` tokens, so a degenerate answer citing
 one trivial verbatim word per required document cannot satisfy the gate.
 
-Containment normalization reuses ``exact``'s Unicode-NFC /
-whitespace-collapse / case-fold steps but **not** its numeric-shape
-rewrite: that rewrite is an equality rule ("5.0" == "5"), and applying it
-inside substring containment would corrupt quotes containing numbers.
+Containment normalization is the shared
+:func:`agentic_evalkit.graders.contamination.normalize_for_containment`
+(Unicode NFC / whitespace collapse / case fold, deliberately without
+``exact``'s numeric-shape rewrite -- an equality rule that would corrupt
+substring containment), so quote-faithfulness and canary-leak matching
+carry exactly one semantics across the package (ADR-0013).
 """
 
 import hashlib
-import re
-import unicodedata
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
@@ -41,6 +41,7 @@ from pydantic import ValidationError
 
 from agentic_evalkit.graders.base import Grader
 from agentic_evalkit.graders.composite import CompositeGrader, WeightedGrader
+from agentic_evalkit.graders.contamination import find_canary_leaks, normalize_for_containment
 from agentic_evalkit.graders.judge import (
     CalibrationArtifact,
     JudgeClient,
@@ -78,23 +79,9 @@ MIN_SUBSTANTIVE_QUOTE_TOKENS = 4
 #: read the deterministic tier as an answer-correctness verdict.
 GRADING_SCOPE = "grounding-hygiene floor (citation discipline), not answer correctness"
 
-_WHITESPACE_PATTERN = re.compile(r"\s+")
-
-
-def _normalize_for_containment(text: str) -> str:
-    """NFC-normalize, collapse whitespace, and case-fold for substring checks.
-
-    Mirrors ``exact._canonicalize``'s Unicode/whitespace/case steps but not
-    its numeric-shape rewrite (see module docstring). Canary-leak detection
-    uses the same normalization, so a case-mangled canary echo cannot evade
-    the tripwire.
-    """
-    normalized = unicodedata.normalize("NFC", text)
-    return _WHITESPACE_PATTERN.sub(" ", normalized).strip().casefold()
-
 
 def _token_count(text: str) -> int:
-    normalized = _normalize_for_containment(text)
+    normalized = normalize_for_containment(text)
     return len(normalized.split()) if normalized else 0
 
 
@@ -103,21 +90,27 @@ def _quote_is_faithful(quote: str, document_text: str) -> bool:
     of the normalized document text. An empty quote quotes nothing and is
     never faithful -- guarding Python's vacuous ``"" in text`` truth.
     """
-    normalized_quote = _normalize_for_containment(quote)
+    normalized_quote = normalize_for_containment(quote)
     if not normalized_quote:
         return False
-    return normalized_quote in _normalize_for_containment(document_text)
+    return normalized_quote in normalize_for_containment(document_text)
 
 
 def _leaked_canary_tokens(answer: GroundedAnswer, canary_tokens: tuple[str, ...]) -> list[str]:
-    """Canary tokens echoed (normalization-insensitively) in the answer or quotes."""
-    haystacks = [_normalize_for_containment(answer.answer)]
-    haystacks.extend(_normalize_for_containment(citation.quote) for citation in answer.citations)
+    """Canary tokens echoed in the answer or any quote.
+
+    Delegates matching to the shared, normalization-insensitive
+    :func:`agentic_evalkit.graders.contamination.find_canary_leaks` so this
+    grader and the reusable helper can never drift apart in semantics
+    (ADR-0013). Haystacks are scanned separately, never concatenated, so a
+    token can never be assembled across an answer/quote boundary.
+    """
     leaked: list[str] = []
-    for token in canary_tokens:
-        normalized_token = _normalize_for_containment(token)
-        if normalized_token and any(normalized_token in haystack for haystack in haystacks):
-            leaked.append(token)
+    haystacks = [answer.answer, *(citation.quote for citation in answer.citations)]
+    for haystack in haystacks:
+        for token in find_canary_leaks(haystack, canary_tokens):
+            if token not in leaked:
+                leaked.append(token)
     return leaked
 
 

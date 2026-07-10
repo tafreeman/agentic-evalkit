@@ -34,6 +34,38 @@ Local roots are not recursively indexed — `search` against the `local`
 provider always returns an empty page. Point commands at the exact file
 path you want to use.
 
+## Contamination and held-out datasets
+
+Both built-in presets (`gsm8k`, `swe-bench-verified`) are long-public,
+widely mirrored benchmarks and carry
+`contamination=ContaminationMetadata(status=ContaminationStatus.SUSPECT)`
+(ADR-0013): their scores must not back a capability claim without an
+overlap or decontamination check first. `SUSPECT` is informative, not
+enforcing — the framework never refuses to run a suspect preset; it refuses
+to let the risk stay unlabeled.
+
+The supported pattern for a defensible held-out set is the local provider:
+author your own rows, keep them unpublished, and declare that provenance:
+
+```python
+from agentic_evalkit.models import ContaminationMetadata
+
+metadata = ContaminationMetadata(
+    held_out=True,
+    canary_ids=("TRIPWIRE-ALPHA-001",),
+)
+```
+
+- `held_out=True` records that the dataset itself was never published, so
+  it cannot appear in any model's pretraining corpus by construction. (This
+  is not the judge-calibration held-out corpus from the calibration floor —
+  see the field's docstring for the disambiguation.)
+- Embed each `canary_ids` token inside your task content, then check model
+  outputs with `agentic_evalkit.graders.find_canary_leaks` and
+  `canary_leak_evidence`: a canary echoed back is a memorization/leakage
+  tripwire. Matching is normalization-insensitive, so case-mangled echoes
+  are still caught.
+
 ## Hugging Face
 
 The `huggingface` provider combines `huggingface_hub.HfApi` (search and

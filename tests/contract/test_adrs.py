@@ -22,9 +22,9 @@ ADR_DIR = Path("docs/adr")
 #: Every ratified ADR this suite enforces, in filename-prefix order: the
 #: nine ADRs design §16 and the plan's ADR/task table require (Task 1-10
 #: committed them with these exact numeric prefixes), plus 0010 (offline
-#: dataset contract), 0011 (offline resolution cache), and 0012
-#: (grounded-citation probe). Each prefix matches exactly one file under
-#: docs/adr/.
+#: dataset contract), 0011 (offline resolution cache), 0012
+#: (grounded-citation probe), and 0013 (contamination metadata and
+#: canaries). Each prefix matches exactly one file under docs/adr/.
 REQUIRED_ADR_PREFIXES = (
     "0001",
     "0002",
@@ -38,6 +38,7 @@ REQUIRED_ADR_PREFIXES = (
     "0010",
     "0011",
     "0012",
+    "0013",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
@@ -179,6 +180,8 @@ NUMBER_WORDS = {
     "ten": 10,
     "eleven": 11,
     "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
 }
 
 
