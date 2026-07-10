@@ -2,28 +2,25 @@
 
 Opt-in only: ``@pytest.mark.live``, excluded from the default hermetic suite
 and run solely by ``.github/workflows/live-swebench.yml`` (which installs
-``agentic-evalkit[swebench]`` and provides a Docker daemon). It skips cleanly
-when the capability or the required fixtures are absent, so it never converts
-a missing environment into a false pass.
+``agentic-evalkit[swebench]`` and provides a Docker daemon). It skips only
+when the capability is genuinely absent -- it does NOT skip for a missing
+fixture, so a scheduled/dispatch run actually validates the harness rather
+than passing vacuously.
 
 The design §7.1 fidelity gate: a known-resolved (gold) patch and an
-intentionally-corrupted patch must pass through the *identical* real
-``execute()`` code path and yield ``resolved=True`` / ``resolved=False``
-respectively. The specific instance and its gold patch are supplied via
-environment variables so this file commits no multi-megabyte fixture:
+intentionally-corrupted patch pass through the *identical* real ``execute()``
+code path and yield ``resolved=True`` / ``resolved=False`` respectively. The
+gold patch is the dataset's own reference solution (the ``patch`` field of
+each SWE-bench Verified row), so no external fixture file is needed:
 
-- ``AGENTIC_EVALKIT_SWEBENCH_INSTANCE`` -- a SWE-bench Verified instance id.
-- ``AGENTIC_EVALKIT_SWEBENCH_GOLD_PATCH`` -- path to that instance's gold patch.
-
-Until those are set in the workflow, the fidelity assertions skip (they do
-not pass vacuously); wiring a chosen instance is the remaining step to close
-acceptance criterion 6.
+- ``AGENTIC_EVALKIT_SWEBENCH_INSTANCE`` (optional) -- a specific instance id;
+  when unset, the first dataset row is used, so the check always runs against
+  a real instance under Docker.
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
@@ -35,6 +32,8 @@ from agentic_evalkit.benchmarks.swebench_docker import (
 
 pytestmark = pytest.mark.live
 
+_DATASET_NAME = "princeton-nlp/SWE-bench_Verified"
+
 
 def _require_capability() -> None:
     reason = _default_preflight()
@@ -42,16 +41,28 @@ def _require_capability() -> None:
         pytest.skip(f"SWE-bench harness capability unavailable: {reason}")
 
 
-def _gold_fixture() -> tuple[str, str]:
-    instance_id = os.environ.get("AGENTIC_EVALKIT_SWEBENCH_INSTANCE")
-    gold_patch_path = os.environ.get("AGENTIC_EVALKIT_SWEBENCH_GOLD_PATCH")
-    if not instance_id or not gold_patch_path:
-        pytest.skip(
-            "set AGENTIC_EVALKIT_SWEBENCH_INSTANCE and AGENTIC_EVALKIT_SWEBENCH_GOLD_PATCH "
-            "to run the gold/invalid-patch fidelity check"
-        )
-    patch = Path(gold_patch_path).read_text(encoding="utf-8")
-    return instance_id, patch
+def _gold_instance() -> tuple[str, str]:
+    """Return ``(instance_id, gold_patch)`` from SWE-bench Verified.
+
+    The dataset's own ``patch`` field IS the reference solution, so the
+    fidelity check needs no committed multi-megabyte fixture. Honors
+    ``AGENTIC_EVALKIT_SWEBENCH_INSTANCE`` when set, else the first row.
+    """
+    try:
+        from datasets import load_dataset  # provided by the swebench extra
+    except ImportError:  # pragma: no cover - live only
+        pytest.skip("the 'datasets' package (swebench extra) is required")
+
+    dataset = load_dataset(_DATASET_NAME, split="test")
+    wanted = os.environ.get("AGENTIC_EVALKIT_SWEBENCH_INSTANCE")
+    if wanted:
+        matches = [row for row in dataset if row["instance_id"] == wanted]
+        if not matches:
+            pytest.skip(f"instance {wanted!r} not found in {_DATASET_NAME}")
+        row = matches[0]
+    else:
+        row = dataset[0]
+    return str(row["instance_id"]), str(row["patch"])
 
 
 def _request(instance_id: str, patch: str) -> HarnessRequest:
@@ -70,7 +81,7 @@ def _request(instance_id: str, patch: str) -> HarnessRequest:
 @pytest.mark.asyncio
 async def test_gold_patch_resolves_through_the_real_execute_path() -> None:
     _require_capability()
-    instance_id, gold_patch = _gold_fixture()
+    instance_id, gold_patch = _gold_instance()
     result = await SweBenchDockerHarnessExecutor().execute(_request(instance_id, gold_patch))
     assert result.status is HarnessStatus.COMPLETED
     assert result.resolved is True
@@ -79,7 +90,7 @@ async def test_gold_patch_resolves_through_the_real_execute_path() -> None:
 @pytest.mark.asyncio
 async def test_corrupted_patch_does_not_resolve_through_the_same_path() -> None:
     _require_capability()
-    instance_id, gold_patch = _gold_fixture()
+    instance_id, gold_patch = _gold_instance()
     corrupted = gold_patch + "\n@@ this hunk does not apply @@\n"
     result = await SweBenchDockerHarnessExecutor().execute(_request(instance_id, corrupted))
     # Either the patch fails to apply or the tests still fail -- both are an

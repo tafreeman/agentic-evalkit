@@ -134,6 +134,28 @@ async def test_completed_execution_with_no_output_is_not_verifiable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spilled_output_is_a_diagnostic_error_not_a_silent_unavailable() -> None:
+    """A large patch spilled by the runner (output=None + an output_ref
+    artifact) must not be miscounted as capability-unavailable; it surfaces as
+    an explicit ERROR naming the spill (Codex review, P2)."""
+    grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
+    now = datetime.now(UTC)
+    spilled = NormalizedExecutionResult(
+        sample_id=_SAMPLE_ID,
+        attempt=1,
+        output=None,
+        artifacts={"output_ref": "sha256:deadbeef"},
+        status=ExecutionStatus.COMPLETED,
+        started_at=now,
+        finished_at=now,
+    )
+    result = await grader.grade(_sample(), spilled)
+    assert result.status is GradeStatus.ERROR
+    assert result.hard_gate is False
+    assert "spilled" in str(result.evidence["reason"])
+
+
+@pytest.mark.asyncio
 async def test_predictor_failure_is_an_error_not_a_fail() -> None:
     def _bad_predictor(
         sample: EvalSample, execution: NormalizedExecutionResult

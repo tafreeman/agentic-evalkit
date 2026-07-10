@@ -16,6 +16,7 @@ from pydantic import JsonValue
 from agentic_evalkit.benchmarks.harness import HarnessExecutor, HarnessRequest, HarnessStatus
 from agentic_evalkit.benchmarks.swebench_docker import (
     SweBenchDockerHarnessExecutor,
+    docker_safe_run_id,
     swebench_prediction,
 )
 from agentic_evalkit.models import EvalSample, ExecutionStatus, NormalizedExecutionResult
@@ -160,3 +161,18 @@ def test_swebench_prediction_falls_back_to_a_patch_key() -> None:
 def test_swebench_prediction_defaults_to_an_empty_patch_when_absent() -> None:
     prediction = swebench_prediction(_swebench_sample(), _completed({"answer": "no patch here"}))
     assert prediction["model_patch"] == ""
+
+
+# --- docker_safe_run_id (Codex P1: a ':' in run_id breaks container naming) --
+
+
+def test_docker_safe_run_id_strips_characters_docker_rejects() -> None:
+    # The CLI sample id is "swebench-verified:<instance>" -- the colon reaches
+    # Docker's container-name construction, which rejects it.
+    run_id = docker_safe_run_id("swebench-verified:astropy__astropy-1")
+    assert ":" not in run_id
+    assert run_id == "agentic-evalkit-swebench-verified-astropy__astropy-1"
+
+
+def test_docker_safe_run_id_preserves_a_clean_instance_id() -> None:
+    assert docker_safe_run_id("astropy__astropy-1") == "agentic-evalkit-astropy__astropy-1"

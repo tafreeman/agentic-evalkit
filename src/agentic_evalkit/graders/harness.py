@@ -81,7 +81,7 @@ class HarnessGrader:
 
     async def grade(self, sample: EvalSample, execution: NormalizedExecutionResult) -> GradeResult:
         now = datetime.now(UTC)
-        if execution.status is not ExecutionStatus.COMPLETED or execution.output is None:
+        if execution.status is not ExecutionStatus.COMPLETED:
             return self._result(
                 sample,
                 now,
@@ -89,6 +89,37 @@ class HarnessGrader:
                 score=None,
                 hard_gate=False,
                 evidence={"reason": "execution did not complete; nothing to verify"},
+            )
+        if execution.output is None:
+            # A None output carrying an ``output_ref`` artifact was SPILLED by
+            # the runner (a patch larger than the spill threshold), not empty.
+            # That is a real, gradable output the harness grader cannot yet
+            # recover, so surface an explicit ERROR rather than silently
+            # counting a valid large patch as "capability unavailable" (Codex
+            # review, P2). Genuinely-empty output stays UNAVAILABLE.
+            if "output_ref" in execution.artifacts:
+                return self._result(
+                    sample,
+                    now,
+                    status=GradeStatus.ERROR,
+                    score=None,
+                    hard_gate=False,
+                    evidence={
+                        "reason": (
+                            "execution output was spilled to artifact "
+                            f"{execution.artifacts['output_ref']!r}; the harness grader "
+                            "needs the inline patch. Raise the run's spill threshold or "
+                            "keep the patch inline until spill-aware recovery lands."
+                        )
+                    },
+                )
+            return self._result(
+                sample,
+                now,
+                status=GradeStatus.UNAVAILABLE,
+                score=None,
+                hard_gate=False,
+                evidence={"reason": "execution produced no output; nothing to verify"},
             )
         try:
             prediction = self._predictor(sample, execution)

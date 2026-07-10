@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -43,7 +44,12 @@ from agentic_evalkit.benchmarks.harness import HarnessRequest, HarnessResult, Ha
 from agentic_evalkit.benchmarks.swebench import SweBenchVerifiedAdapter
 from agentic_evalkit.models import EvalSample, NormalizedExecutionResult
 
-__all__ = ["DEFAULT_INSTALL_HINT", "SweBenchDockerHarnessExecutor", "swebench_prediction"]
+__all__ = [
+    "DEFAULT_INSTALL_HINT",
+    "SweBenchDockerHarnessExecutor",
+    "docker_safe_run_id",
+    "swebench_prediction",
+]
 
 DEFAULT_INSTALL_HINT = "install agentic-evalkit[swebench] and start a Docker daemon"
 
@@ -136,7 +142,7 @@ class SweBenchDockerHarnessExecutor:
             work_dir = Path(tmp)
             predictions_path = work_dir / "predictions.json"
             predictions_path.write_text(json.dumps([dict(request.prediction)]), encoding="utf-8")
-            run_id = f"agentic-evalkit-{request.sample_id}"
+            run_id = docker_safe_run_id(request.sample_id)
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -161,6 +167,19 @@ class SweBenchDockerHarnessExecutor:
                 check=True,
             )
             return _read_instance_report(work_dir, instance_id, stdout=completed.stdout)
+
+
+def docker_safe_run_id(sample_id: str) -> str:
+    """Build a Docker-safe SWE-bench ``run_id`` from a sample id.
+
+    The official harness threads ``run_id`` into container/image naming, and
+    Docker names reject characters like ``:`` -- exactly what the CLI's
+    ``swebench-verified:<instance_id>`` sample ids contain, which would fail
+    every real Docker-backed run at container creation. Every character
+    outside ``[A-Za-z0-9_.-]`` is replaced with ``-`` (Codex review, P1).
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", sample_id)
+    return f"agentic-evalkit-{safe}"
 
 
 def swebench_prediction(

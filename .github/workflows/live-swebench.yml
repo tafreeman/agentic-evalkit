@@ -8,8 +8,11 @@ name: Live SWE-bench harness
 # daemon (present on GitHub-hosted ubuntu-latest runners).
 #
 # It never converts a missing capability into a passing run: the live tests
-# skip cleanly when the extra/daemon or the gold-instance fixture is absent,
-# so a green run means the fidelity check actually executed.
+# skip only when the swebench extra / Docker daemon is genuinely absent. The
+# gold patch is the dataset's own reference solution (no fixture file needed),
+# so a scheduled or dispatched run with Docker actually validates the harness
+# -- it does not pass vacuously. An optional instance_id input pins a specific
+# instance; otherwise the first dataset row is used.
 
 on:
   workflow_dispatch:
