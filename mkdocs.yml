@@ -54,6 +54,7 @@ nav:
       - "0009: Optional dependencies and plugins": adr/0009-optional-dependencies-and-plugins.md
       - "0010: Offline dataset contract": adr/0010-offline-dataset-contract.md
       - "0011: Offline resolution cache": adr/0011-offline-resolution-cache.md
+      - "0012: Grounded-citation probe": adr/0012-grounded-citation-probe.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - Providers: guides/providers.md
