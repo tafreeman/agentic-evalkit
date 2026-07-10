@@ -96,7 +96,9 @@ class SweBenchDockerHarnessExecutor:
         self._evaluator = evaluator or self._run_official_harness
 
     async def execute(self, request: HarnessRequest) -> HarnessResult:
-        unavailable_reason = self._preflight()
+        # The default preflight pings the Docker daemon (blocking I/O); run it
+        # off the event loop so a slow/hung daemon never freezes concurrent runs.
+        unavailable_reason = await asyncio.to_thread(self._preflight)
         if unavailable_reason is not None:
             return HarnessResult(
                 status=HarnessStatus.UNAVAILABLE,
@@ -152,6 +154,9 @@ class SweBenchDockerHarnessExecutor:
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
+                # Harness/Docker logs can carry non-UTF-8 bytes or ANSI escapes;
+                # never let decoding a log crash the run.
+                errors="replace",
                 timeout=request.timeout_seconds,
                 check=True,
             )
@@ -243,7 +248,9 @@ def _read_instance_report(  # pragma: no cover - live Docker path only
     candidates = sorted(work_dir.rglob("*.json"))
     for candidate in candidates:
         try:
-            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            # errors="replace": a report file with stray non-UTF-8 bytes must
+            # not raise UnicodeDecodeError (a ValueError, not caught below).
+            payload = json.loads(candidate.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
             continue
         report = _extract_instance_report(payload, instance_id)
