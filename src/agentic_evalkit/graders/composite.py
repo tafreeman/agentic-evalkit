@@ -118,6 +118,12 @@ class CompositeGrader:
                     "score": child.score,
                     "weight": component.weight,
                     "hard_gate": component.hard_gate,
+                    # The child's own evidence rides along so a composite
+                    # report keeps each component's audit trail (e.g. the
+                    # grounded-citation per-check breakdown, ADR-0012) --
+                    # making the docstring's "preserves every child result"
+                    # claim true for evidence, not just status/score.
+                    "evidence": child.evidence,
                 }
                 for component, child in zip(self._graders, child_results, strict=True)
             ]

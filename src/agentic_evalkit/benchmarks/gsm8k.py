@@ -8,6 +8,8 @@ final-answer marker) into typed :class:`~agentic_evalkit.models.EvalSample`
 instances with a normalized numeric reference string.
 """
 
+from pydantic import JsonValue
+
 from agentic_evalkit.errors import DatasetSchemaMismatch
 from agentic_evalkit.models import EvalSample, GraderSpec, SourceRecord
 
@@ -89,7 +91,7 @@ class Gsm8kAdapter:
         """A GSM8K sample is oracle-valid iff it carries a nonempty reference."""
         return bool(sample.reference)
 
-    def aggregate_metadata(self) -> dict[str, object]:
+    def aggregate_metadata(self) -> dict[str, JsonValue]:
         """Benchmark-specific metadata recorded on run aggregation (design §7)."""
         return {
             "benchmark": "gsm8k",

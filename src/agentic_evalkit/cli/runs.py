@@ -43,6 +43,8 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
 from agentic_evalkit.artifacts import ArtifactStore
+from agentic_evalkit.benchmarks.base import BenchmarkAdapter
+from agentic_evalkit.benchmarks.grounding import GroundedCitationAdapter
 from agentic_evalkit.benchmarks.gsm8k import Gsm8kAdapter
 from agentic_evalkit.cli.app import ExitCode, app, console, run_cli_command, safe_text
 from agentic_evalkit.cli.datasets import build_catalog
@@ -54,6 +56,7 @@ from agentic_evalkit.examples.reference_judge import ReferenceJudgeClient
 from agentic_evalkit.graders.base import Grader
 from agentic_evalkit.graders.composite import CompositeGrader, WeightedGrader
 from agentic_evalkit.graders.exact import ExactMatchGrader
+from agentic_evalkit.graders.grounding import build_grounded_citation_grader
 from agentic_evalkit.graders.judge import JudgeGrader
 from agentic_evalkit.manifest import (
     CallableTargetConfig,
@@ -128,9 +131,13 @@ _DEMO_TARGET_IMPORT_STRING = "agentic_evalkit.examples.zero_target:zero_target"
 #: Adapters/graders the runnable objective-only CLI knows how to construct
 #: by name. This module intentionally hardcodes this small, fully-tested
 #: table rather than doing dynamic plugin discovery for adapters/graders
-#: (that is out of Task 14's scope); every name here matches a value used by
-#: a ``BUILTIN_PRESETS`` entry, so any preset-based manifest resolves.
-_KNOWN_ADAPTERS = {"gsm8k@1": Gsm8kAdapter()}
+#: (that is out of Task 14's scope). Every preset-referenced name resolves
+#: here; ``grounded-citation-tasks@1`` has no curated preset yet and is
+#: reachable from hand-authored manifests only (ADR-0012).
+_KNOWN_ADAPTERS: dict[str, BenchmarkAdapter] = {
+    "gsm8k@1": Gsm8kAdapter(),
+    "grounded-citation-tasks@1": GroundedCitationAdapter(),
+}
 
 
 def _extract_answer(output: object) -> str:
@@ -173,10 +180,16 @@ def _build_known_graders() -> dict[str, Grader]:
             ),
         ),
     )
+    # Deterministic-primary grounded-citation probe (ADR-0012). Its judge
+    # tier is the packaged reference client -- permanently uncalibrated
+    # here, so it is score-inert (weight 0.0) and can never hard-gate; the
+    # deterministic grounding-hygiene tier is the only gate.
+    grounded_citation = build_grounded_citation_grader(judge_client=ReferenceJudgeClient())
     return {
         "normalized-exact@1": exact_match,
         "judge-reference@1": judge_reference,
         "composite-reference@1": composite_reference,
+        "grounded-citation@1": grounded_citation,
     }
 
 
