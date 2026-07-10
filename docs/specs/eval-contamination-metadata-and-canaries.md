@@ -27,6 +27,15 @@ silently invites a capability claim two experts would not both sign off on)
 >    **0013** as provisionally claimed; the sibling swebench spec renumbers to 0014. The docs
 >    baseline in criterion 11 (eleven ADRs / ends at 0011) was updated in flight to
 >    twelve → thirteen.
+> 4. **Report propagation added (supersedes the "No CLI changes" non-goal).** Codex review
+>    (P2) flagged that `_manifest_document_for_preset` and `catalog.resolve` dropped the label,
+>    so preset-run reports carried `resolved_dataset.contamination == null` — the score never
+>    saw the SUSPECT prompt. Fixed minimally: an additive `contamination` field on
+>    `EvalRunManifest`, populated from the preset at init and stamped onto the report's
+>    `resolved_dataset` by the `run` CLI (a provider-resolved value wins; the manifest only
+>    fills a gap), mirroring the existing provenance-fingerprint flow. Threading into
+>    `EvalSample`/grading via `BenchmarkAdapter.prepare` remains the deferred, ADR-superseding
+>    change.
 
 ## Problem
 

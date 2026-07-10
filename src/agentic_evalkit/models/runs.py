@@ -5,7 +5,7 @@ from datetime import datetime
 from pydantic import Field, JsonValue, model_validator
 
 from agentic_evalkit.models.base import FrozenModel
-from agentic_evalkit.models.datasets import DatasetRef, ResolvedDataset
+from agentic_evalkit.models.datasets import ContaminationMetadata, DatasetRef, ResolvedDataset
 from agentic_evalkit.models.execution import NormalizedExecutionResult
 from agentic_evalkit.models.grades import GradeResult
 from agentic_evalkit.models.samples import EvalSample
@@ -70,6 +70,11 @@ class EvalRunManifest(FrozenModel):
     environment_fingerprint: str | None = None
     code_fingerprint: str | None = None
     baseline_compatibility_rules: dict[str, JsonValue] = Field(default_factory=dict)
+    #: Dataset contamination/memorization-risk label (ADR-0013), carried on
+    #: the manifest so a preset's SUSPECT prompt travels into the run report's
+    #: ``resolved_dataset``. Informative only -- deliberately absent from
+    #: ``provenance_field_names`` so it never gates comparability.
+    contamination: ContaminationMetadata | None = None
 
     @classmethod
     def provenance_field_names(cls) -> frozenset[str]:

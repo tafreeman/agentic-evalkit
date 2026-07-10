@@ -33,8 +33,16 @@ from agentic_evalkit.cli import app
 from agentic_evalkit.cli import runs as cli_runs
 from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.datasets.local import LocalDatasetProvider
+from agentic_evalkit.datasets.presets import BUILTIN_PRESETS
 from agentic_evalkit.manifest import CallableTargetConfig, ManifestDocument, dump_manifest
-from agentic_evalkit.models import DatasetRef, DatasetSelection, EvalRunManifest, SamplingPolicy
+from agentic_evalkit.models import (
+    ContaminationMetadata,
+    ContaminationStatus,
+    DatasetRef,
+    DatasetSelection,
+    EvalRunManifest,
+    SamplingPolicy,
+)
 from agentic_evalkit.provenance import (
     compute_code_fingerprint,
     compute_environment_fingerprint,
@@ -203,3 +211,65 @@ def test_run_fingerprints_are_non_none_and_never_the_pre_wiring_default(
         assert manifest_payload[field_name] is not None
         assert isinstance(manifest_payload[field_name], str)
         assert manifest_payload[field_name] != ""
+
+
+# --- contamination label propagates into the run report (ADR-0013) ----------
+
+
+def _write_local_manifest_with_contamination(tmp_path: Path) -> Path:
+    dataset_path = tmp_path / "gsm8k_local.jsonl"
+    dataset_path.write_text('{"question":"2+2?","answer":"work\\n#### 4"}\n')
+    manifest = EvalRunManifest(
+        run_name="contamination-propagation",
+        dataset_ref=DatasetRef(provider="local", dataset_id=str(dataset_path)),
+        adapter="gsm8k@1",
+        grader="normalized-exact@1",
+        target_name="cli-target",
+        selection=DatasetSelection(offset=0, limit=1),
+        attempts=1,
+        timeout_seconds=30.0,
+        concurrency=1,
+        contamination=ContaminationMetadata(status=ContaminationStatus.SUSPECT),
+    )
+    document = ManifestDocument(
+        manifest=manifest, target=CallableTargetConfig(import_string=_TARGET_IMPORT_STRING)
+    )
+    manifest_path = tmp_path / "eval.yaml"
+    manifest_path.write_text(dump_manifest(document), encoding="utf-8")
+    return manifest_path
+
+
+def test_run_stamps_manifest_contamination_onto_the_report_resolved_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Codex-review gap: a SUSPECT label on the manifest must reach the
+    report's ``resolved_dataset`` so the score carries the prompt, not stay
+    stranded on the preset."""
+    monkeypatch.setattr(cli_runs, "build_catalog", lambda *, offline: _local_catalog(tmp_path))
+    manifest_path = _write_local_manifest_with_contamination(tmp_path)
+    output_dir = tmp_path / "results"
+    result = runner.invoke(
+        app, ["run", str(manifest_path), "--output-dir", str(output_dir), "--yes"]
+    )
+    assert result.exit_code == 0, result.stdout
+
+    envelope = json.loads(next(iter(output_dir.glob("*.json"))).read_text(encoding="utf-8"))
+    assert envelope["resolved_dataset"]["contamination"]["status"] == "suspect"
+
+
+def test_run_without_manifest_contamination_leaves_resolved_dataset_unlabeled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No manifest label -> no fabricated label on the report (the stamp only
+    fills a genuine gap; it never invents a status)."""
+    report_path = _run_cli(tmp_path, monkeypatch)
+    envelope = json.loads(report_path.read_text(encoding="utf-8"))
+    assert envelope["resolved_dataset"]["contamination"] is None
+
+
+def test_preset_generated_manifest_carries_the_preset_contamination_label() -> None:
+    """``init --preset`` must not drop the label between the preset and the
+    manifest it writes -- the first link in the propagation chain."""
+    document = cli_runs._manifest_document_for_preset(BUILTIN_PRESETS["gsm8k"])
+    assert document.manifest.contamination is not None
+    assert document.manifest.contamination.status is ContaminationStatus.SUSPECT

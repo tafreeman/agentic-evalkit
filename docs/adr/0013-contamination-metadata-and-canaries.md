@@ -36,10 +36,17 @@ enforcing:
    distinguishable from "checked and clean" (ADR-0002). `held_out` here
    means the eval dataset itself was never published — explicitly not the
    ADR-0007 judge-calibration held-out corpus.
-2. `contamination: ContaminationMetadata | None = None` is added to both
-   `ResolvedDataset` and `DatasetPreset` — additive optional fields with
-   safe defaults, no `schema_version` bump (ADR-0002's additive-evolution
-   clause).
+2. `contamination: ContaminationMetadata | None = None` is added to
+   `ResolvedDataset`, `DatasetPreset`, and `EvalRunManifest` — additive
+   optional fields with safe defaults, no `schema_version` bump (ADR-0002's
+   additive-evolution clause). `_manifest_document_for_preset` copies the
+   preset's label onto the manifest, and the `run` CLI stamps it onto the
+   report's `resolved_dataset` (a provider-resolved value always wins; the
+   manifest value only fills a gap), mirroring how provenance fingerprints
+   already flow — so a preset's `SUSPECT` prompt travels with the score
+   rather than stranding on the preset catalog. `contamination` is
+   deliberately absent from `EvalRunManifest.provenance_field_names`: it is
+   informative, never a comparability key.
 3. Both built-in presets are annotated
    `ContaminationMetadata(status=SUSPECT)`. No `authored_after` /
    `public_since` dates are asserted — neither date was verified from a
@@ -91,6 +98,9 @@ enforcing:
   reusable helper share one implementation and cannot drift.
 - Purely additive: no dependency added, no protocol signature changed, no
   existing call site behaves differently.
+- A run of a built-in preset now writes `resolved_dataset.contamination`
+  into its JSON report, so the `SUSPECT` prompt is visible on the score,
+  not only in the preset catalogue.
 
 ## Validation
 
