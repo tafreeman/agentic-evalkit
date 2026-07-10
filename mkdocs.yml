@@ -56,6 +56,7 @@ nav:
       - "0011: Offline resolution cache": adr/0011-offline-resolution-cache.md
       - "0012: Grounded-citation probe": adr/0012-grounded-citation-probe.md
       - "0013: Contamination metadata and canaries": adr/0013-contamination-metadata-and-canaries.md
+      - "0014: SWE-bench Docker harness executor": adr/0014-swebench-docker-harness-executor.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - Providers: guides/providers.md

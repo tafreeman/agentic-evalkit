@@ -16,6 +16,7 @@ from agentic_evalkit.graders.grounding import (
     build_grounded_citation_grader,
     build_grounding_rubric,
 )
+from agentic_evalkit.graders.harness import HarnessGrader, HarnessPredictor
 from agentic_evalkit.graders.judge import (
     CalibrationArtifact,
     JudgeClient,
@@ -33,6 +34,8 @@ __all__ = [
     "ExactMatchGrader",
     "Grader",
     "GroundedCitationGrader",
+    "HarnessGrader",
+    "HarnessPredictor",
     "JudgeClient",
     "JudgeGrader",
     "JudgeRequest",

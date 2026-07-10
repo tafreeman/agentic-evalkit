@@ -16,17 +16,23 @@ The corresponding design is
 [`../specs/2026-07-02-agentic-evalkit-design.md`](../specs/2026-07-02-agentic-evalkit-design.md);
 architecture decisions are recorded in [`../adr/`](../adr/).
 
-## Follow-on gate: official SWE-bench Docker executor
+## Follow-on gate: official SWE-bench Docker executor — **RESOLVED** (ADR-0014)
 
-The initial release ships SWE-bench Verified as a **prediction-export**
+**Status:** shipped. `SweBenchDockerHarnessExecutor` and the `HarnessGrader`
+bridge land under
+[ADR-0014](../adr/0014-swebench-docker-harness-executor.md); the `swebench`
+extra is populated and both SWE-bench names are CLI-registered. The one
+remaining item is activating the live gold/invalid-patch fidelity run
+(`.github/workflows/live-swebench.yml`) against a chosen instance.
+
+The initial release shipped SWE-bench Verified as a **prediction-export**
 benchmark (preview, project, and export official predictions; a missing
 authoritative harness returns a typed `unavailable` — see
 [ADR-0005](../adr/0005-benchmark-adapters-and-harnesses.md)). The official
-Dockerized verification executor is **out of scope** for this release.
+Dockerized verification executor was **out of scope** for that release.
 
-Adding it requires a **new, separate plan** built on the accepted harness
-contracts. That plan may begin only now that the initial acceptance audit has
-passed, and it must include:
+It required a **new, separate plan** built on the accepted harness
+contracts. That plan (now delivered) includes:
 
 - pinned upstream `swebench` package compatibility;
 - Docker / image resource preflight (availability, disk, image pulls);

@@ -12,6 +12,10 @@ from agentic_evalkit.benchmarks.harness import (
     UnavailableHarnessExecutor,
 )
 from agentic_evalkit.benchmarks.swebench import SweBenchVerifiedAdapter
+from agentic_evalkit.benchmarks.swebench_docker import (
+    SweBenchDockerHarnessExecutor,
+    swebench_prediction,
+)
 
 __all__ = [
     "BenchmarkAdapter",
@@ -22,7 +26,9 @@ __all__ = [
     "HarnessRequest",
     "HarnessResult",
     "HarnessStatus",
+    "SweBenchDockerHarnessExecutor",
     "SweBenchVerifiedAdapter",
     "UnavailableHarnessExecutor",
     "extract_final_answer",
+    "swebench_prediction",
 ]
