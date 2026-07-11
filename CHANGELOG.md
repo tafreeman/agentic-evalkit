@@ -62,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped. See
   [ADR-0015](docs/adr/0015-environment-and-code-fingerprints-gate-comparability.md).
 
+### Fixed
+
+- `EvalRunner` now grades a sample's execution before spilling its output to
+  the artifact store, not after. Previously an execution output large enough
+  to spill (over the 8192-byte threshold) reached every grader as
+  `output=None`; for `HarnessGrader` (SWE-bench) this meant any patch large
+  enough to spill could not be graded at all. Grading now always sees the
+  full, intact output, and spilling still applies afterwards to what gets
+  persisted, so stored results are unaffected. See
+  [ADR-0017](docs/adr/0017-grade-before-spill-large-outputs.md).
+
 ## [0.1.1] - 2026-07-06
 
 ### Fixed

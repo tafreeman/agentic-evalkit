@@ -59,6 +59,7 @@ nav:
       - "0014: SWE-bench Docker harness executor": adr/0014-swebench-docker-harness-executor.md
       - "0015: Environment and code fingerprints gate comparability": adr/0015-environment-and-code-fingerprints-gate-comparability.md
       - "0016: Cluster-robust intervals for repeated attempts": adr/0016-cluster-robust-intervals-for-repeated-attempts.md
+      - "0017: Grade before spilling large outputs": adr/0017-grade-before-spill-large-outputs.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - CLI reference: guides/cli-reference.md

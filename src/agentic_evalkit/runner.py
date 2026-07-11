@@ -364,7 +364,7 @@ class EvalRunner:
         timeout_seconds: float | None,
         sink: EventSink,
     ) -> SampleResult:
-        """One sample/attempt's full pipeline: execute, spill, grade.
+        """One sample/attempt's full pipeline: execute, grade, spill.
 
         Requirement 6: grading only ever runs for an execution whose status
         is ``COMPLETED``. Requirement 7: every other status (failed, timeout,
@@ -373,6 +373,13 @@ class EvalRunner:
         collapses these into a grader-level abstain/fail, so a caller can
         always distinguish "the system under test broke" from "the system
         under test answered incorrectly".
+
+        Grading, when it runs, always sees the execution exactly as the
+        target returned it -- ``_spill_large_output`` does not run until
+        after grading has already happened (ADR-0017), so a grader is never
+        handed a spilled ``output=None`` placeholder just because the real
+        output was large. Spilling is purely a persistence concern applied
+        to the result on its way out.
         """
         sink(
             SampleStarted(
@@ -384,7 +391,6 @@ class EvalRunner:
         )
 
         execution = await target.execute(sample, attempt=attempt, timeout_seconds=timeout_seconds)
-        execution = self._spill_large_output(execution)
         sink(
             ExecutionCompleted(
                 run_id=run_id,
@@ -408,6 +414,10 @@ class EvalRunner:
                 )
             )
 
+        # Unconditional, and deliberately after grading (ADR-0017): a
+        # non-completed execution can still carry a huge output that needs
+        # spilling for storage even though it was never gradable.
+        execution = self._spill_large_output(execution)
         sink(
             SampleCompleted(
                 run_id=run_id,
@@ -422,6 +432,11 @@ class EvalRunner:
         self, execution: NormalizedExecutionResult
     ) -> NormalizedExecutionResult:
         """Requirement 8: store large outputs as artifacts, keep a reference.
+
+        Called only after grading has already happened (see
+        ``_execute_and_grade``, ADR-0017), so a grader is never handed a
+        spilled/``None`` output as a result of size alone -- this method's
+        job is exclusively what gets persisted, not what gets graded.
 
         Builds a *new* ``NormalizedExecutionResult`` via ``model_copy`` (the
         contract is frozen) rather than mutating the target's returned

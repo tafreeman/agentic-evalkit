@@ -21,10 +21,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import JsonValue
 
 from agentic_evalkit.artifacts import ArtifactRef, ArtifactStore
+from agentic_evalkit.benchmarks.harness import FakeHarnessExecutor, HarnessResult, HarnessStatus
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.events import RunEvent, RunFailed
+from agentic_evalkit.graders.harness import HarnessGrader
 from agentic_evalkit.models import (
     DatasetRef,
     DatasetSelection,
@@ -673,3 +676,187 @@ async def test_spill_redacts_a_planted_secret_by_default(tmp_path: Path) -> None
     assert _PLANTED_TOKEN not in payload
     assert "[REDACTED]" in payload
     assert metadata.redacted is True
+
+
+# --- Grade before spill (defect 3) -------------------------------------------
+#
+# ``_execute_and_grade`` used to spill *before* grading, so any grader
+# handling an execution large enough to spill was handed ``output=None``
+# instead of the real content (ADR-0017). These tests prove the fix through
+# the real ``EvalRunner.run`` path: a grader must see the full, intact
+# output at grade time, and the runner must still spill that same execution
+# for storage afterwards -- spilling moved, it did not disappear.
+
+
+class _OutputCapturingGrader:
+    """Records the exact ``execution.output`` it was handed at grade time.
+
+    The captured value is asserted on directly (not just the grade status),
+    so this proves the grader saw real content rather than merely that it
+    didn't error.
+    """
+
+    def __init__(self) -> None:
+        self.seen_outputs: list[dict[str, JsonValue] | None] = []
+
+    async def grade(self, sample: EvalSample, execution: NormalizedExecutionResult) -> GradeResult:
+        now = datetime.now(UTC)
+        self.seen_outputs.append(execution.output)
+        return GradeResult(
+            sample_id=sample.sample_id,
+            grader="output-capturing@1",
+            status=GradeStatus.PASS,
+            score=1.0,
+            evidence={"observed_output_was_none": execution.output is None},
+            created_at=now,
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_grader_sees_the_full_output_before_it_is_spilled_for_storage(
+    tmp_path: Path,
+) -> None:
+    """A large execution (the planted-token/padding technique from the spill
+    tests above) must still be graded against its real, intact output -- not
+    an ``output=None`` spill placeholder -- and must still end up spilled in
+    the persisted result, exactly as before the fix.
+    """
+    artifact_store = _artifact_store(tmp_path)
+    grader = _OutputCapturingGrader()
+    runner = EvalRunner(
+        catalog=_FakeCatalog(_records(1)),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={
+            "fake": _PlantedTokenTarget(token=_PLANTED_TOKEN, padding_chars=_SPILL_PADDING_CHARS)
+        },
+        graders={"exact@1": grader},
+        artifact_store=artifact_store,
+    )
+    result = await runner.run(_manifest())
+
+    # The grader was handed the full, intact output: the planted token is
+    # present in what it captured, not a spill placeholder.
+    assert len(grader.seen_outputs) == 1
+    seen_output = grader.seen_outputs[0]
+    assert seen_output is not None
+    assert _PLANTED_TOKEN in str(seen_output)
+
+    # The grade reflects real content, not a spill-placeholder error.
+    grade = result.samples[0].grade
+    assert grade is not None
+    assert grade.status == GradeStatus.PASS
+    assert grade.evidence["observed_output_was_none"] is False
+
+    # Spilling still happens for storage, just after grading: the FINAL
+    # persisted execution is spilled, same assertion shape as the redaction
+    # tests above.
+    execution = result.samples[0].execution
+    assert execution.output is None
+    digest = execution.artifacts["output_ref"]
+    assert isinstance(digest, str)
+
+
+class _CapturingHarnessPredictor:
+    """A ``HarnessPredictor`` that records the ``execution.output`` it saw.
+
+    ``HarnessGrader`` itself has no seam to observe from outside, so the
+    injected predictor callable -- which ``HarnessGrader.grade`` always
+    invokes with the same ``(sample, execution)`` it received -- is what
+    proves what the grader actually saw.
+    """
+
+    def __init__(self) -> None:
+        self.seen_outputs: list[dict[str, JsonValue] | None] = []
+
+    def __call__(
+        self, sample: EvalSample, execution: NormalizedExecutionResult
+    ) -> dict[str, JsonValue]:
+        self.seen_outputs.append(execution.output)
+        output = execution.output or {}
+        return {
+            "instance_id": sample.sample_id,
+            "model_name_or_path": "test-model",
+            "model_patch": output.get("model_patch", ""),
+        }
+
+
+class _LargePatchTarget:
+    """Returns one execution whose output is a SWE-bench-shaped patch large
+    enough to spill -- ``_PlantedTokenTarget``'s padding technique, under the
+    ``model_patch`` key ``HarnessGrader``'s predictor actually reads.
+    """
+
+    def __init__(self, *, marker: str, padding_chars: int) -> None:
+        self._marker = marker
+        self._padding_chars = padding_chars
+
+    async def execute(
+        self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
+    ) -> NormalizedExecutionResult:
+        now = datetime.now(UTC)
+        padding = "+" * self._padding_chars
+        patch = f"--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-old\n+{self._marker}{padding}\n"
+        return NormalizedExecutionResult(
+            sample_id=sample.sample_id,
+            attempt=attempt,
+            output={"model_patch": patch},
+            status=ExecutionStatus.COMPLETED,
+            started_at=now,
+            finished_at=now,
+        )
+
+
+_PATCH_MARKER = "planted-fix-marker"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_harness_grader_sees_the_full_patch_before_it_is_spilled(tmp_path: Path) -> None:
+    """The grader that actually motivated ADR-0017: a SWE-bench patch large
+    enough to spill must still reach ``HarnessGrader`` (via its predictor)
+    intact, and must grade to a real, hard-gated verdict -- not the
+    defensive spilled-output ERROR path.
+    """
+    artifact_store = _artifact_store(tmp_path)
+    predictor = _CapturingHarnessPredictor()
+    harness_grader = HarnessGrader(
+        executor=FakeHarnessExecutor(
+            default_result=HarnessResult(
+                status=HarnessStatus.COMPLETED, resolved=True, message="ok"
+            )
+        ),
+        predictor=predictor,
+        benchmark="swebench-verified@1",
+        name="swebench-harness@1",
+    )
+    runner = EvalRunner(
+        catalog=_FakeCatalog(_records(1)),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={
+            "fake": _LargePatchTarget(marker=_PATCH_MARKER, padding_chars=_SPILL_PADDING_CHARS)
+        },
+        graders={"swebench-harness@1": harness_grader},
+        artifact_store=artifact_store,
+    )
+    result = await runner.run(_manifest(grader="swebench-harness@1"))
+
+    # The predictor -- and therefore HarnessGrader -- saw the full, intact
+    # patch, not a spill placeholder.
+    assert len(predictor.seen_outputs) == 1
+    seen_output = predictor.seen_outputs[0]
+    assert seen_output is not None
+    assert _PATCH_MARKER in str(seen_output)
+
+    # A real, earned, hard-gated verdict -- not the spilled-output ERROR path.
+    grade = result.samples[0].grade
+    assert grade is not None
+    assert grade.status == GradeStatus.PASS
+    assert grade.hard_gate is True
+    assert "spilled" not in str(grade.evidence).lower()
+
+    # Spilling still happens for storage, just after grading.
+    execution = result.samples[0].execution
+    assert execution.output is None
+    digest = execution.artifacts["output_ref"]
+    assert isinstance(digest, str)
