@@ -4,6 +4,8 @@
 
 `agentic-evalkit` separates datasets, grading, and reporting from the system under test through callable/subprocess/HTTP targets, and objective checks gate before judges. Existing evaluation frameworks couple dataset access, grading, and reporting to specific agent platforms or model-provider SDKs; this package's neutral `ExecutionTarget` protocol makes any callable, subprocess, or HTTP system evaluable without framework lock-in.
 
+**Why not promptfoo, Inspect, DeepEval, Braintrust, or LangSmith?** Those tools solve the eval *workflow* problem well, and for prompt-level CI assertions or red-teaming you should prefer them. This package solves the eval *validity* problem — calibration-gated judges, provenance-gated comparison, typed operational-vs-task failure separation, authoritative-verifier boundaries, and contamination tripwires — none of which they document as first-class concepts. The verified comparison and recorded build-vs-buy decision live in [docs/prior-art.md](docs/prior-art.md).
+
 **Coexistence note:** legacy evaluation code may remain in host repositories. This package neither imports nor migrates it — integration happens only through the public `ExecutionTarget` protocol described above.
 
 See [the architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md) for the full design, or jump straight to the [quickstart guide](docs/guides/quickstart.md).

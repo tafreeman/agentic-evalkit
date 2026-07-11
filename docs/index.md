@@ -59,7 +59,7 @@ This resolves the curated GSM8K preset from Hugging Face, runs five samples thro
 
 <div class="stat-strip" markdown>
 <div class="stat-item">
-  <div class="stat-value">17</div>
+  <div class="stat-value">18</div>
   <div class="stat-label">ADRs</div>
 </div>
 <div class="stat-item">
@@ -83,6 +83,8 @@ This resolves the curated GSM8K preset from Hugging Face, runs five samples thro
 ## Objective-first, framework-neutral
 
 Existing evaluation frameworks couple dataset access, grading, and reporting to specific agent platforms or model-provider SDKs. `agentic-evalkit` grades with the strongest valid evidence available, in order — authoritative benchmark verifier, executable tests, schema/type validation, exact or normalized comparison, documented domain metric, calibrated model judge, human review — and a model judge is never the first check for anything an objective grader can decide.
+
+[Prior art & build-vs-buy](prior-art.md){ .link-forward } — the verified comparison against promptfoo, Inspect, DeepEval, Braintrust, and LangSmith, and when to use them instead.
 
 <div class="feature-grid" markdown>
 
@@ -157,8 +159,9 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 <h3 class="dc-title">Reference</h3>
 
 - [Architecture specification](specs/2026-07-02-agentic-evalkit-design.md) — the full design
+- [Prior art & build-vs-buy](prior-art.md) — the recorded decision versus existing frameworks
 - [Implementation plan](plans/2026-07-02-agentic-evalkit-initial-release.md) — initial release plan
-- [ADR index](adr/0001-standalone-boundary.md) — seventeen architecture decision records, 0001 through 0017
+- [ADR index](adr/0001-standalone-boundary.md) — eighteen architecture decision records, 0001 through 0018
 </div>
 
 </div>
