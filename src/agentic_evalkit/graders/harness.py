@@ -91,12 +91,23 @@ class HarnessGrader:
                 evidence={"reason": "execution did not complete; nothing to verify"},
             )
         if execution.output is None:
-            # A None output carrying an ``output_ref`` artifact was SPILLED by
-            # the runner (a patch larger than the spill threshold), not empty.
-            # That is a real, gradable output the harness grader cannot yet
-            # recover, so surface an explicit ERROR rather than silently
-            # counting a valid large patch as "capability unavailable" (Codex
-            # review, P2). Genuinely-empty output stays UNAVAILABLE.
+            # A None output carrying an ``output_ref`` artifact was SPILLED,
+            # not empty. That is a real, gradable output the harness grader
+            # cannot recover on its own, so surface an explicit ERROR rather
+            # than silently counting a valid large patch as "capability
+            # unavailable" (Codex review, P2). Genuinely-empty output stays
+            # UNAVAILABLE.
+            #
+            # The normal ``EvalRunner`` pipeline grades before it ever spills
+            # (ADR-0017), so this branch should never fire for an execution
+            # that came from ``EvalRunner.run`` -- grading always sees the
+            # inline output first, and spilling only happens afterwards, to
+            # the copy that gets persisted. This guard exists for callers
+            # that invoke ``grade()`` directly on an already-spilled,
+            # previously-persisted ``NormalizedExecutionResult`` outside that
+            # pipeline (for example, a re-grading tool reading a stored run
+            # back off disk): such a caller cannot get the inline patch back
+            # from here and must re-grade from the original execution instead.
             if "output_ref" in execution.artifacts:
                 return self._result(
                     sample,
@@ -108,8 +119,9 @@ class HarnessGrader:
                         "reason": (
                             "execution output was spilled to artifact "
                             f"{execution.artifacts['output_ref']!r}; the harness grader "
-                            "needs the inline patch. Raise the run's spill threshold or "
-                            "keep the patch inline until spill-aware recovery lands."
+                            "needs the inline patch. This should not happen inside "
+                            "EvalRunner.run, which grades before spilling -- re-grade "
+                            "from the original, unspilled execution instead."
                         )
                     },
                 )
