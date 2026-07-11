@@ -35,6 +35,7 @@ outcome; several are also distinct non-PASS statuses so the *reason* survives
 into ``evidence["reason"]`` rather than being collapsed into a bare FAIL.
 """
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
@@ -42,6 +43,7 @@ from pydantic import Field, JsonValue, model_validator
 
 from agentic_evalkit.models import EvalSample, GradeResult, GradeStatus, NormalizedExecutionResult
 from agentic_evalkit.models.base import FrozenModel
+from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
 
 # Minimum held-out positive/negative label counts a calibration must have
 # before it is trusted to gate a release (plan Task 10 KEY REQUIREMENTS).
@@ -59,6 +61,15 @@ PROJECT_MAX_CALIBRATION_AGE_DAYS = 90
 # Parse failures retry at most this many times (plan Task 10 KEY
 # REQUIREMENTS: "parse retries <= 2"), i.e. up to 3 total judge calls.
 _MAXIMUM_PARSE_RETRIES = 2
+
+# Approximate cap, in characters (not bytes -- an approximation, not a
+# byte-precise UTF-8 bound; that level of precision isn't needed for a
+# truncation heuristic), on the stringified `candidate_output` sent to a
+# caller-supplied `JudgeClient` (ADR-0018). Mirrors `runner.py`'s own
+# `_LARGE_OUTPUT_THRESHOLD_BYTES` (8192) as an already-reasoned, familiar
+# bound; defined independently here rather than imported, since that
+# constant is private to `runner.py`.
+_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS = 8192
 
 
 class JudgeRequest(FrozenModel):
@@ -301,6 +312,27 @@ class JudgeGrader:
         pass_score_threshold: Minimum judge ``score`` counted as a pass,
             once a verdict is otherwise trustworthy.
         name: Stable grader identifier reported on the ``GradeResult``.
+        redaction_policy: Policy applied to the stringified
+            ``candidate_output`` before it is sent to the judge (never to
+            ``prompt`` or ``reference`` -- see the note below). Defaults to
+            :data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`,
+            so secret-shaped substrings never reach a caller-supplied
+            ``JudgeClient`` by default. Pass ``None`` (or a
+            ``RedactionPolicy()`` with empty ``secret_patterns``) to opt out.
+        max_candidate_output_chars: Maximum length, in characters, of the
+            stringified ``candidate_output`` sent to the judge; longer
+            values are truncated with a trailing marker. Defaults to
+            ``_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS`` (8192). Pass ``None`` to
+            disable truncation.
+
+    Since ADR-0018, the ``candidate_output`` a ``JudgeClient`` actually
+    receives may differ from ``execution.output``'s literal content:
+    secret-shaped substrings are redacted and an overlong string is
+    truncated before it crosses the process boundary into ``judge.judge()``.
+    A ``JudgeClient`` implementation must not assume byte-for-byte fidelity
+    between the two. ``prompt`` and ``reference`` are never altered -- both
+    are dataset/task-authored content this framework itself controls, not
+    target-controlled output.
     """
 
     def __init__(
@@ -311,18 +343,28 @@ class JudgeGrader:
         gate: bool,
         pass_score_threshold: float = 0.5,
         name: str = "judge@1",
+        redaction_policy: RedactionPolicy | None = DEFAULT_REDACTION_POLICY,
+        max_candidate_output_chars: int | None = _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
     ) -> None:
         self._judge = judge
         self._calibration = calibration
         self._gate = gate
         self._pass_score_threshold = pass_score_threshold
         self._name = name
+        self._redaction_policy = redaction_policy
+        self._max_candidate_output_chars = max_candidate_output_chars
 
     async def grade(self, sample: EvalSample, execution: NormalizedExecutionResult) -> GradeResult:
         now = datetime.now(UTC)
-        candidate_output = _stringify_output(execution.output)
+        candidate_output, candidate_output_evidence = self._prepare_candidate_output(
+            execution.output
+        )
         request = JudgeRequest(
             sample_id=sample.sample_id,
+            # `prompt`/`reference` are dataset/task-authored content this
+            # framework itself controls, never the system-under-test's own
+            # output -- only `candidate_output` is redacted/truncated before
+            # crossing the process boundary (see `_prepare_candidate_output`).
             prompt=_stringify_input(sample.input),
             candidate_output=candidate_output,
             reference=sample.reference,
@@ -337,7 +379,7 @@ class JudgeGrader:
                 score=None,
                 hard_gate=False,
                 reason="judge response could not be parsed after bounded retries",
-                extra_evidence=parse_evidence,
+                extra_evidence={**candidate_output_evidence, **parse_evidence},
             )
 
         if response.fingerprint != self._judge_fingerprint():
@@ -351,6 +393,7 @@ class JudgeGrader:
                     f"judge fingerprint {response.fingerprint!r} does not match "
                     f"live judge fingerprint {self._judge_fingerprint()!r}"
                 ),
+                extra_evidence=candidate_output_evidence,
             )
 
         if response.abstained:
@@ -361,6 +404,7 @@ class JudgeGrader:
                 score=None,
                 hard_gate=False,
                 reason="judge explicitly abstained from rendering a verdict",
+                extra_evidence=candidate_output_evidence,
             )
 
         if self._calibration is not None:
@@ -388,6 +432,7 @@ class JudgeGrader:
                     score=None,
                     hard_gate=False,
                     reason=unusable_reason,
+                    extra_evidence=candidate_output_evidence,
                 )
 
         calibration_failure = self._calibration_failure_reason(now=now)
@@ -414,11 +459,93 @@ class JudgeGrader:
                 if can_gate and self._calibration is not None
                 else None
             ),
-            extra_evidence=parse_evidence,
+            extra_evidence={**candidate_output_evidence, **parse_evidence},
         )
 
     def _judge_fingerprint(self) -> str:
         return self._judge.fingerprint
+
+    def _prepare_candidate_output(
+        self, output: dict[str, JsonValue] | None
+    ) -> tuple[str, dict[str, JsonValue]]:
+        """Stringify, redact, then truncate ``execution.output`` for the judge.
+
+        Applied only to ``candidate_output`` -- the system-under-test's own
+        words. Deliberately NOT applied to ``prompt``
+        (``_stringify_input(sample.input)``) or ``reference``
+        (``sample.reference``): both are dataset/task-authored content this
+        framework itself controls, not target-controlled output, mirroring
+        the same target's-own-words-vs-framework-authored-content
+        distinction ``reporters.base._redact_execution``'s docstring draws
+        for precisely this reason.
+
+        Redaction runs BEFORE truncation, never the reverse: truncating
+        first risks cutting a secret-shaped pattern in half at the boundary
+        and letting the un-redacted remainder through.
+
+        Returns the final string plus an evidence dict that only carries
+        ``candidate_output_redacted``/``candidate_output_truncated``/
+        ``candidate_output_original_chars`` keys when that step actually
+        fired -- mirroring ``HarnessGrader``'s "only add the key when
+        applicable" convention for ``evidence["harness_error"]``.
+        """
+        stringified = _stringify_output(output)
+        evidence: dict[str, JsonValue] = {}
+
+        redacted = self._redact_candidate_output(stringified)
+        if redacted != stringified:
+            evidence["candidate_output_redacted"] = True
+
+        truncated = self._truncate_candidate_output(redacted)
+        if truncated != redacted:
+            evidence["candidate_output_truncated"] = True
+            evidence["candidate_output_original_chars"] = len(redacted)
+
+        return truncated, evidence
+
+    def _redact_candidate_output(self, value: str) -> str:
+        """Replace every secret-pattern match in ``value`` with ``"[REDACTED]"``.
+
+        A pure string -> string function mirroring
+        ``agentic_evalkit.reporters.base._redact_string`` and
+        ``EvalRunner._redact`` (``runner.py``): this module cannot import
+        either private helper (``runner.py``'s own docstring explains why it
+        doesn't import ``reporters.base``'s -- the same reasoning applies
+        here), so the same substitution behavior is reimplemented locally
+        against the same public :class:`RedactionPolicy` contract.
+        """
+        redacted = value
+        for pattern in self._compiled_secret_patterns():
+            redacted = pattern.sub("[REDACTED]", redacted)
+        return redacted
+
+    def _truncate_candidate_output(self, value: str) -> str:
+        """Cut ``value`` to ``self._max_candidate_output_chars`` plus a marker.
+
+        ``None`` disables truncation entirely (the class default,
+        ``_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS``, does not). The appended
+        marker makes it unambiguous to a human or the judge model that this
+        is not the verbatim full output.
+        """
+        limit = self._max_candidate_output_chars
+        if limit is None or len(value) <= limit:
+            return value
+        omitted = len(value) - limit
+        return f"{value[:limit]}...[truncated, {omitted} chars omitted]"
+
+    def _compiled_secret_patterns(self) -> tuple[re.Pattern[str], ...]:
+        """Compile ``self._redaction_policy.secret_patterns``, or none at all.
+
+        Mirrors ``EvalRunner._compiled_secret_patterns`` (``runner.py``):
+        returns an empty tuple both when the policy was explicitly set to
+        ``None`` (opting out of judge-bound redaction) and when a policy was
+        supplied with no ``secret_patterns`` of its own. The constructor
+        default is :data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`,
+        which does carry patterns, so the ordinary path compiles those.
+        """
+        if self._redaction_policy is None:
+            return ()
+        return tuple(re.compile(pattern) for pattern in self._redaction_policy.secret_patterns)
 
     def _calibration_failure_reason(self, *, now: datetime | None = None) -> str | None:
         if self._calibration is None:

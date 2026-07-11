@@ -12,12 +12,15 @@ release-gating pass.
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import JsonValue
 
 from agentic_evalkit.graders.judge import (
+    _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
     CalibrationArtifact,
     JudgeGrader,
     JudgeRequest,
     JudgeResponse,
+    _stringify_output,
 )
 from agentic_evalkit.models import (
     EvalSample,
@@ -25,6 +28,11 @@ from agentic_evalkit.models import (
     GradeStatus,
     NormalizedExecutionResult,
 )
+from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY
+
+#: A secret-shaped substring matching ``DEFAULT_REDACTION_POLICY``'s
+#: ``hf_[A-Za-z0-9]{16,}`` pattern (20 chars after the prefix).
+_PLANTED_SECRET = "hf_" + "a1B2c3D4e5F6g7H8i9J0"
 
 
 def _sample() -> EvalSample:
@@ -38,11 +46,15 @@ def _sample() -> EvalSample:
 
 
 def _execution() -> NormalizedExecutionResult:
+    return _execution_with_output({"answer": "yes, the sky is blue"})
+
+
+def _execution_with_output(output: dict[str, JsonValue]) -> NormalizedExecutionResult:
     now = datetime.now(UTC)
     return NormalizedExecutionResult(
         sample_id="s1",
         attempt=1,
-        output={"answer": "yes, the sky is blue"},
+        output=output,
         status=ExecutionStatus.COMPLETED,
         started_at=now,
         finished_at=now,
@@ -302,3 +314,163 @@ async def test_missing_calibration_cannot_gate() -> None:
     result = await grader.grade(_sample(), _execution())
     assert result.hard_gate is False
     assert result.judge_calibration_ref is None
+
+
+# --- ADR-0018: redact and bound candidate_output before it reaches the judge ---
+
+
+@pytest.mark.asyncio
+async def test_secret_shaped_candidate_output_is_redacted_before_reaching_the_judge() -> None:
+    """A secret-shaped substring in execution.output never reaches JudgeClient.judge().
+
+    Captures the real ``JudgeRequest`` the fake client was called with,
+    not just the grade's final status.
+    """
+    execution = _execution_with_output({"answer": f"the token is {_PLANTED_SECRET}"})
+    judge = _FakeJudge(0.9)
+    grader = JudgeGrader(judge, calibration=None, gate=False)
+
+    result = await grader.grade(_sample(), execution)
+
+    assert judge.calls, "the fake judge was never called"
+    received = judge.calls[0].candidate_output
+    assert _PLANTED_SECRET not in received
+    assert "[REDACTED]" in received
+    assert result.evidence["candidate_output_redacted"] is True
+
+
+@pytest.mark.asyncio
+async def test_oversized_candidate_output_is_truncated_before_reaching_the_judge() -> None:
+    """A candidate_output longer than the char bound is cut to that bound,
+    plus a marker, before it reaches the judge -- and the evidence records
+    both that truncation fired and the real pre-truncation length.
+    """
+    long_answer = "x" * (_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS + 500)
+    execution = _execution_with_output({"answer": long_answer})
+    stringified = _stringify_output(execution.output)  # no secrets here: redaction is a no-op
+    judge = _FakeJudge(0.9)
+    grader = JudgeGrader(judge, calibration=None, gate=False)
+
+    result = await grader.grade(_sample(), execution)
+
+    expected_omitted = len(stringified) - _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS
+    expected_received = (
+        stringified[:_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS]
+        + f"...[truncated, {expected_omitted} chars omitted]"
+    )
+    assert judge.calls[0].candidate_output == expected_received
+    assert result.evidence["candidate_output_truncated"] is True
+    assert result.evidence["candidate_output_original_chars"] == len(stringified)
+
+
+@pytest.mark.asyncio
+async def test_redaction_policy_none_disables_redaction() -> None:
+    """``redaction_policy=None`` opts out: a planted secret reaches the judge
+    verbatim, and no ``candidate_output_redacted`` key is added at all.
+    """
+    execution = _execution_with_output({"answer": f"the token is {_PLANTED_SECRET}"})
+    judge = _FakeJudge(0.9)
+    grader = JudgeGrader(judge, calibration=None, gate=False, redaction_policy=None)
+
+    result = await grader.grade(_sample(), execution)
+
+    assert _PLANTED_SECRET in judge.calls[0].candidate_output
+    assert "candidate_output_redacted" not in result.evidence
+
+
+@pytest.mark.asyncio
+async def test_max_candidate_output_chars_none_disables_truncation() -> None:
+    """``max_candidate_output_chars=None`` opts out: an oversized output
+    reaches the judge whole, and neither truncation evidence key is added.
+    """
+    long_answer = "x" * (_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS + 500)
+    execution = _execution_with_output({"answer": long_answer})
+    stringified = _stringify_output(execution.output)
+    judge = _FakeJudge(0.9)
+    grader = JudgeGrader(judge, calibration=None, gate=False, max_candidate_output_chars=None)
+
+    result = await grader.grade(_sample(), execution)
+
+    assert judge.calls[0].candidate_output == stringified
+    assert "candidate_output_truncated" not in result.evidence
+    assert "candidate_output_original_chars" not in result.evidence
+
+
+@pytest.mark.asyncio
+async def test_default_construction_uses_the_named_default_policy_and_bound() -> None:
+    """Omitting ``redaction_policy``/``max_candidate_output_chars`` entirely
+    behaves identically to passing the named defaults explicitly -- proving
+    this is the real default code path, not merely that explicit values work
+    (as the tests above already show).
+    """
+    padding = "y" * _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS
+    output: dict[str, JsonValue] = {"answer": f"{padding} {_PLANTED_SECRET}"}
+
+    implicit_judge = _FakeJudge(0.9)
+    implicit_grader = JudgeGrader(implicit_judge, calibration=None, gate=False)
+    implicit_result = await implicit_grader.grade(_sample(), _execution_with_output(output))
+
+    explicit_judge = _FakeJudge(0.9)
+    explicit_grader = JudgeGrader(
+        explicit_judge,
+        calibration=None,
+        gate=False,
+        redaction_policy=DEFAULT_REDACTION_POLICY,
+        max_candidate_output_chars=_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
+    )
+    explicit_result = await explicit_grader.grade(_sample(), _execution_with_output(output))
+
+    assert implicit_judge.calls[0].candidate_output == explicit_judge.calls[0].candidate_output
+    assert implicit_result.evidence == explicit_result.evidence
+    # Sanity: the shared fixture actually exercises both mechanisms, so this
+    # is not a vacuous comparison of two no-ops.
+    assert implicit_result.evidence["candidate_output_redacted"] is True
+    assert implicit_result.evidence["candidate_output_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_prompt_and_reference_are_never_redacted_or_truncated() -> None:
+    """Only candidate_output goes through the redaction/truncation pipeline.
+
+    ``prompt`` (from ``sample.input``) and ``reference`` (from
+    ``sample.reference``) are dataset/task-authored content, not the
+    system-under-test's own output -- planting the same secret-shaped
+    pattern and an oversized length in both must leave them untouched. This
+    is the test most likely to catch an over-eager implementation that
+    redacts the whole ``JudgeRequest`` instead of just ``candidate_output``.
+    """
+    long_reference = _PLANTED_SECRET + "z" * (_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS + 500)
+    sample = EvalSample(
+        sample_id="s1",
+        input={"question": f"token {_PLANTED_SECRET}"},
+        reference=long_reference,
+        source_digest="sha256:row",
+        adapter="identity@1",
+    )
+    execution = _execution_with_output({"answer": "short and clean, nothing to redact"})
+    judge = _FakeJudge(0.9)
+    grader = JudgeGrader(judge, calibration=None, gate=False)
+
+    await grader.grade(sample, execution)
+
+    request = judge.calls[0]
+    assert _PLANTED_SECRET in request.prompt
+    assert request.reference == long_reference
+    assert request.reference is not None
+    assert len(request.reference) == len(long_reference)
+
+
+@pytest.mark.asyncio
+async def test_clean_short_output_adds_no_candidate_output_evidence_keys() -> None:
+    """A clean run (no secrets, output well under the char bound) adds none
+    of the candidate_output_* evidence keys -- the "only add the key when
+    applicable" convention, proven both ways alongside the tests above.
+    """
+    judge = _FakeJudge(0.9)
+    grader = JudgeGrader(judge, calibration=None, gate=False)
+
+    result = await grader.grade(_sample(), _execution())
+
+    assert "candidate_output_redacted" not in result.evidence
+    assert "candidate_output_truncated" not in result.evidence
+    assert "candidate_output_original_chars" not in result.evidence
