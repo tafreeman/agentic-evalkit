@@ -37,7 +37,7 @@ load-bearing; none documents any of them as a first-class concept:
 
 | Validity control | Here | promptfoo / Inspect / DeepEval / Braintrust / LangSmith |
 |---|---|---|
-| Model judges gated by calibration evidence (TNR/TPR floors, held-out human labels, position-bias probe, expiry; uncalibrated judges can never hard-gate) | [ADR-0007](adr/0007-objective-first-grading.md), [ADR-0018](adr/0018-redact-and-bound-judge-candidate-output.md) | Model-graded assertions/judges are available everywhere, uncalibrated |
+| Model judges gated by calibration evidence (TNR/TPR floors, held-out human labels, position-bias probe, expiry; uncalibrated judges can never hard-gate) | [ADR-0007](adr/0007-objective-first-grading.md) | Model-graded assertions/judges are available everywhere, uncalibrated |
 | Run comparison refused on provenance mismatch (dataset revision, adapter, grader, target, sampling, environment/code fingerprints) instead of producing a misleading delta | [ADR-0008](adr/0008-statistical-comparability.md), [ADR-0015](adr/0015-environment-and-code-fingerprints-gate-comparability.md) | Side-by-side comparison without comparability gating |
 | Operational failure is never a task failure (error/timeout/unavailable are separate outcome categories, never folded into fail rates) | [ADR-0005](adr/0005-benchmark-adapters-and-harnesses.md), [ADR-0008](adr/0008-statistical-comparability.md) | Not documented |
 | Authoritative-verifier boundary: a missing benchmark harness returns typed `unavailable`, never a substitute score; only a real harness verdict may claim "resolved" | [ADR-0005](adr/0005-benchmark-adapters-and-harnesses.md), [ADR-0014](adr/0014-swebench-docker-harness-executor.md) | Not documented |

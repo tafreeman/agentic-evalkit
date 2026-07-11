@@ -61,7 +61,6 @@ nav:
       - "0015: Environment and code fingerprints gate comparability": adr/0015-environment-and-code-fingerprints-gate-comparability.md
       - "0016: Cluster-robust intervals for repeated attempts": adr/0016-cluster-robust-intervals-for-repeated-attempts.md
       - "0017: Grade before spilling large outputs": adr/0017-grade-before-spill-large-outputs.md
-      - "0018: Redact and bound judge candidate output": adr/0018-redact-and-bound-judge-candidate-output.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - CLI reference: guides/cli-reference.md
