@@ -43,7 +43,7 @@ from agentic_evalkit.models import (
     SampleResult,
     SamplingPolicy,
 )
-from agentic_evalkit.stats.compare import compare_runs
+from agentic_evalkit.stats.compare import ComparisonResult, compare_runs
 
 _STARTED_AT = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
 _FINISHED_AT = datetime(2026, 7, 2, 12, 5, 0, tzinfo=UTC)
@@ -70,6 +70,8 @@ def _run(
     target_name: str = "echo-target",
     target_fingerprint_policy: str | None = None,
     target_fingerprint: str | None = None,
+    environment_fingerprint: str | None = None,
+    code_fingerprint: str | None = None,
     temperature: float | None = 0.0,
     seed: int | None = 7,
     attempts: int = 1,
@@ -97,6 +99,8 @@ def _run(
         target_name=target_name,
         target_fingerprint_policy=target_fingerprint_policy,
         target_fingerprint=target_fingerprint,
+        environment_fingerprint=environment_fingerprint,
+        code_fingerprint=code_fingerprint,
         sampling=SamplingPolicy(seed=seed, temperature=temperature, attempts=attempts),
         attempts=attempts,
     )
@@ -222,6 +226,156 @@ def test_accepts_none_target_fingerprint_on_both_sides() -> None:
     right = _run(target_fingerprint=None)
     result = compare_runs(left, right, seed=1)
     assert result.paired_count == 2
+
+
+# --- Environment and code fingerprint comparison (ADR-0015) -------------------
+#
+# environment_fingerprint/code_fingerprint join the provenance gate with the
+# same None-vs-None-is-fine / None-vs-pinned-is-a-mismatch semantics already
+# proven above for target_fingerprint.
+
+
+def test_rejects_different_environment_fingerprints() -> None:
+    left = _run(environment_fingerprint="sha256:env-aaaa")
+    right = _run(environment_fingerprint="sha256:env-bbbb")
+    with pytest.raises(IncompatibleRuns, match="environment fingerprint"):
+        compare_runs(left, right, seed=1)
+
+
+def test_rejects_different_code_fingerprints() -> None:
+    left = _run(code_fingerprint="sha256:code-aaaa")
+    right = _run(code_fingerprint="sha256:code-bbbb")
+    with pytest.raises(IncompatibleRuns, match="code fingerprint"):
+        compare_runs(left, right, seed=1)
+
+
+def test_accepts_none_environment_fingerprint_on_both_sides() -> None:
+    # Backward compatibility: runs recorded before provenance.py existed
+    # both have None, and must still compare fine.
+    left = _run(environment_fingerprint=None)
+    right = _run(environment_fingerprint=None)
+    result = compare_runs(left, right, seed=1)
+    assert result.paired_count == 2
+
+
+def test_accepts_none_code_fingerprint_on_both_sides() -> None:
+    left = _run(code_fingerprint=None)
+    right = _run(code_fingerprint=None)
+    result = compare_runs(left, right, seed=1)
+    assert result.paired_count == 2
+
+
+def test_rejects_none_environment_fingerprint_against_a_pinned_fingerprint() -> None:
+    # Unknown provenance (None) must never silently compare as equal to
+    # verified provenance (a pinned fingerprint) -- regardless of which
+    # side is which.
+    left = _run(environment_fingerprint=None)
+    right = _run(environment_fingerprint="sha256:env-aaaa")
+    with pytest.raises(IncompatibleRuns, match="environment fingerprint"):
+        compare_runs(left, right, seed=1)
+
+    left = _run(environment_fingerprint="sha256:env-aaaa")
+    right = _run(environment_fingerprint=None)
+    with pytest.raises(IncompatibleRuns, match="environment fingerprint"):
+        compare_runs(left, right, seed=1)
+
+
+def test_rejects_none_code_fingerprint_against_a_pinned_fingerprint() -> None:
+    left = _run(code_fingerprint=None)
+    right = _run(code_fingerprint="sha256:code-aaaa")
+    with pytest.raises(IncompatibleRuns, match="code fingerprint"):
+        compare_runs(left, right, seed=1)
+
+    left = _run(code_fingerprint="sha256:code-aaaa")
+    right = _run(code_fingerprint=None)
+    with pytest.raises(IncompatibleRuns, match="code fingerprint"):
+        compare_runs(left, right, seed=1)
+
+
+# --- allow_cross_environment waiver (ADR-0015) --------------------------------
+
+
+def test_allow_cross_environment_waives_environment_fingerprint_mismatch() -> None:
+    left = _run(environment_fingerprint="sha256:env-aaaa")
+    right = _run(environment_fingerprint="sha256:env-bbbb")
+    result = compare_runs(left, right, seed=1, allow_cross_environment=True)
+    assert result.waived_provenance_fields == ("environment_fingerprint",)
+    assert result.paired_count == 2
+
+
+def test_allow_cross_environment_waives_code_fingerprint_mismatch() -> None:
+    left = _run(code_fingerprint="sha256:code-aaaa")
+    right = _run(code_fingerprint="sha256:code-bbbb")
+    result = compare_runs(left, right, seed=1, allow_cross_environment=True)
+    assert result.waived_provenance_fields == ("code_fingerprint",)
+
+
+def test_allow_cross_environment_waives_both_fingerprints_together() -> None:
+    left = _run(environment_fingerprint="sha256:env-aaaa", code_fingerprint="sha256:code-aaaa")
+    right = _run(environment_fingerprint="sha256:env-bbbb", code_fingerprint="sha256:code-bbbb")
+    result = compare_runs(left, right, seed=1, allow_cross_environment=True)
+    assert result.waived_provenance_fields == ("environment_fingerprint", "code_fingerprint")
+
+
+def test_allow_cross_environment_waived_fields_empty_when_nothing_differs() -> None:
+    # allow_cross_environment=True with no actual mismatch waives nothing --
+    # the tuple is empty, not a placeholder for "waiver was available".
+    left = _run()
+    right = _run()
+    result = compare_runs(left, right, seed=1, allow_cross_environment=True)
+    assert result.waived_provenance_fields == ()
+
+
+def test_allow_cross_environment_does_not_waive_non_waivable_mismatch() -> None:
+    # Scoping proof: a waivable field (environment_fingerprint) together with
+    # a non-waivable field (adapter) still raises IncompatibleRuns -- naming
+    # only the non-waivable mismatch -- even with allow_cross_environment=True.
+    left = _run(environment_fingerprint="sha256:env-aaaa", adapter="gsm8k@1")
+    right = _run(environment_fingerprint="sha256:env-bbbb", adapter="gsm8k@2")
+    with pytest.raises(IncompatibleRuns) as excinfo:
+        compare_runs(left, right, seed=1, allow_cross_environment=True)
+    message = str(excinfo.value)
+    assert "adapter" in message
+    assert "environment fingerprint" not in message
+
+
+def test_allow_cross_environment_defaults_to_false() -> None:
+    # Regression: omitting the flag entirely still gates environment_fingerprint,
+    # confirming the new parameter's default is closed, not open.
+    left = _run(environment_fingerprint="sha256:env-aaaa")
+    right = _run(environment_fingerprint="sha256:env-bbbb")
+    with pytest.raises(IncompatibleRuns, match="environment fingerprint"):
+        compare_runs(left, right, seed=1)
+
+
+def test_allow_cross_environment_is_keyword_only_and_defaults_to_false() -> None:
+    import inspect
+
+    signature = inspect.signature(compare_runs)
+    parameter = signature.parameters["allow_cross_environment"]
+    assert parameter.kind == inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False
+
+
+# --- ComparisonResult.waived_provenance_fields round-trip ---------------------
+
+
+def test_comparison_result_round_trips_with_waived_provenance_fields_populated() -> None:
+    left = _run(environment_fingerprint="sha256:env-aaaa")
+    right = _run(environment_fingerprint="sha256:env-bbbb")
+    result = compare_runs(left, right, seed=1, allow_cross_environment=True)
+    assert result.waived_provenance_fields == ("environment_fingerprint",)
+    restored = ComparisonResult.model_validate_json(result.model_dump_json())
+    assert restored == result
+
+
+def test_comparison_result_round_trips_with_waived_provenance_fields_empty() -> None:
+    left = _run()
+    right = _run()
+    result = compare_runs(left, right, seed=1)
+    assert result.waived_provenance_fields == ()
+    restored = ComparisonResult.model_validate_json(result.model_dump_json())
+    assert restored == result
 
 
 def test_rejects_different_sampling_temperatures() -> None:

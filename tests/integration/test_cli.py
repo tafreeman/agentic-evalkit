@@ -109,6 +109,8 @@ def _run_result(
     run_id: str,
     dataset_revision: str = "rev-abc",
     passed_flags: tuple[bool, ...] = (True, False),
+    environment_fingerprint: str | None = None,
+    code_fingerprint: str | None = None,
 ) -> EvalRunResult:
     samples = tuple(
         _sample_result(f"gsm8k:{index}", passed=flag) for index, flag in enumerate(passed_flags)
@@ -123,6 +125,8 @@ def _run_result(
         target_name="cli-target",
         sampling=SamplingPolicy(seed=7, temperature=0.0, attempts=1),
         attempts=1,
+        environment_fingerprint=environment_fingerprint,
+        code_fingerprint=code_fingerprint,
     )
     resolved = ResolvedDataset(
         dataset_id="openai/gsm8k",
@@ -687,6 +691,114 @@ def test_compare_missing_run_file_is_invalid_input(tmp_path: Path) -> None:
     right = _write_run(tmp_path, "right", _run_result(run_id="run-b"))
     result = runner.invoke(app, ["compare", str(tmp_path / "nope.json"), str(right), "--seed", "1"])
     assert result.exit_code == 2
+
+
+# --- compare --allow-cross-environment (ADR-0015) ---------------------------
+
+
+def test_compare_environment_fingerprint_mismatch_is_gated_by_default(tmp_path: Path) -> None:
+    left = _write_run(
+        tmp_path,
+        "left",
+        _run_result(run_id="run-a", environment_fingerprint="sha256:env-aaaa"),
+    )
+    right = _write_run(
+        tmp_path,
+        "right",
+        _run_result(run_id="run-b", environment_fingerprint="sha256:env-bbbb"),
+    )
+
+    result = runner.invoke(app, ["compare", str(left), str(right), "--seed", "1"])
+    assert result.exit_code == 2
+    assert "incompatible_runs" in result.stdout
+    assert "environment fingerprint" in result.stdout
+
+
+def test_compare_allow_cross_environment_waives_fingerprint_mismatch(tmp_path: Path) -> None:
+    left = _write_run(
+        tmp_path,
+        "left",
+        _run_result(run_id="run-a", environment_fingerprint="sha256:env-aaaa"),
+    )
+    right = _write_run(
+        tmp_path,
+        "right",
+        _run_result(run_id="run-b", environment_fingerprint="sha256:env-bbbb"),
+    )
+
+    result = runner.invoke(
+        app,
+        ["compare", str(left), str(right), "--seed", "1", "--allow-cross-environment"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "waived" in result.stdout.lower()
+    assert "environment_fingerprint" in result.stdout
+
+
+def test_compare_allow_cross_environment_json_output_carries_waived_fields(
+    tmp_path: Path,
+) -> None:
+    left = _write_run(
+        tmp_path,
+        "left",
+        _run_result(run_id="run-a", environment_fingerprint="sha256:env-aaaa"),
+    )
+    right = _write_run(
+        tmp_path,
+        "right",
+        _run_result(run_id="run-b", environment_fingerprint="sha256:env-bbbb"),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            str(left),
+            str(right),
+            "--seed",
+            "1",
+            "--allow-cross-environment",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["waived_provenance_fields"] == ["environment_fingerprint"]
+
+
+def test_compare_allow_cross_environment_still_gates_non_waivable_mismatch(
+    tmp_path: Path,
+) -> None:
+    # Scoping proof at the CLI boundary: a waivable fingerprint mismatch
+    # together with a non-waivable dataset revision mismatch still exits 2
+    # under --allow-cross-environment.
+    left = _write_run(
+        tmp_path,
+        "left",
+        _run_result(
+            run_id="run-a",
+            dataset_revision="rev-abc",
+            environment_fingerprint="sha256:env-aaaa",
+        ),
+    )
+    right = _write_run(
+        tmp_path,
+        "right",
+        _run_result(
+            run_id="run-b",
+            dataset_revision="rev-def",
+            environment_fingerprint="sha256:env-bbbb",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["compare", str(left), str(right), "--seed", "1", "--allow-cross-environment"],
+    )
+    assert result.exit_code == 2
+    assert "dataset revision" in result.stdout
+    assert "environment fingerprint" not in result.stdout
 
 
 # --- report (plan Task 14 Step 10) ------------------------------------------

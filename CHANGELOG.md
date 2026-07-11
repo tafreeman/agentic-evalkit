@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grading pipelines runnable end to end from the quickstart without an LLM
   provider configured. Both are wired in permanently uncalibrated, so
   neither can ever hard-gate a release.
+- `compare_runs` now gates comparability on `environment_fingerprint` and
+  `code_fingerprint` alongside the existing eight provenance fields, so two
+  runs pinned to different interpreters, platforms, or `agentic-evalkit`
+  builds can no longer be silently diffed into a confident-looking delta.
+  A caller who intentionally compares across environments can opt in with
+  the new keyword-only `allow_cross_environment` parameter (`compare
+  --allow-cross-environment` on the CLI); the waived field(s) are recorded
+  on the new `ComparisonResult.waived_provenance_fields` rather than
+  dropped. See
+  [ADR-0015](docs/adr/0015-environment-and-code-fingerprints-gate-comparability.md).
 
 ## [0.1.1] - 2026-07-06
 

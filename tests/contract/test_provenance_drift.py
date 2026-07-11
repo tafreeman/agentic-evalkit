@@ -22,7 +22,10 @@ How the guard works, end to end:
 from __future__ import annotations
 
 # The provenance fields compare_runs enumerates (from compare._PROVENANCE_CHECKS).
-# The declaration seam must cover at least these.
+# The declaration seam must cover at least these. environment_fingerprint and
+# code_fingerprint joined this set under ADR-0015; both are still
+# comparability-relevant declarations even though compare_runs's
+# allow_cross_environment can waive a *mismatch* on them per-comparison.
 _EXISTING_PROVENANCE_FIELDS = frozenset(
     {
         "adapter",
@@ -33,6 +36,8 @@ _EXISTING_PROVENANCE_FIELDS = frozenset(
         "sampling.temperature",
         "sampling.seed",
         "attempts",
+        "environment_fingerprint",
+        "code_fingerprint",
     }
 )
 
@@ -59,6 +64,19 @@ def test_compare_runs_checks_every_declared_provenance_field() -> None:
     undeclared = checked - declared
     assert not unchecked, f"compare_runs does not check declared provenance fields: {unchecked}"
     assert not undeclared, f"compare_runs checks fields the manifest never declared: {undeclared}"
+
+
+def test_cross_environment_waiver_set_is_exactly_the_adr_0015_fields() -> None:
+    # ADR-0015 authorizes waiving exactly environment_fingerprint and
+    # code_fingerprint -- no more, no fewer. The waivable set is derived from
+    # _PROVENANCE_CHECKS' waivable column, so this pins the table itself:
+    # marking any other row waivable (or unmarking one of these two) is a
+    # contract change that must supersede ADR-0015 before it can pass CI.
+    from agentic_evalkit.stats import compare
+
+    assert compare._WAIVABLE_UNDER_CROSS_ENVIRONMENT == frozenset(
+        {"environment_fingerprint", "code_fingerprint"}
+    )
 
 
 def test_declared_provenance_names_resolve_to_real_fields() -> None:
@@ -103,8 +121,6 @@ def test_every_manifest_field_is_categorized_for_comparability() -> None:
         "concurrency",
         "artifact_policy",
         "redaction_policy",
-        "environment_fingerprint",
-        "code_fingerprint",
         "baseline_compatibility_rules",
         # ADR-0013: an informative dataset-provenance label, deliberately not a
         # comparability key -- two runs of the same dataset never differ in

@@ -1,17 +1,28 @@
-"""Run compatibility checking and paired bootstrap comparison (design §10, ADR-0008).
+"""Run compatibility checking and paired bootstrap comparison (design §10, ADR-0008, ADR-0015).
 
 Two runs are only comparable when their dataset revision, split, adapter,
-grader, target policy, target fingerprint, and sampling policy are
-compatible; an incompatible comparison must fail with an explanation rather
-than silently producing a misleading delta (design §10). ``compare_runs``
-checks every provenance field described in Task 12 Step 6 (dataset ID/
-revision/config/split, adapter, grader, target policy, target fingerprint,
-sampling temperature/seed policy, attempt count) and raises
+grader, target policy, target fingerprint, sampling policy, and recorded
+environment/code fingerprints are compatible; an incompatible comparison
+must fail with an explanation rather than silently producing a misleading
+delta (design §10). ``compare_runs`` checks every provenance field
+described in Task 12 Step 6 (dataset ID/revision/config/split, adapter,
+grader, target policy, target fingerprint, sampling temperature/seed
+policy, attempt count) plus the environment and code fingerprints
+:mod:`agentic_evalkit.provenance` computes (ADR-0015), and raises
 :class:`~agentic_evalkit.errors.IncompatibleRuns` listing every mismatch it
 finds, not just the first. A named target with an unpinned fingerprint
 (``None``) is never treated as equal to a pinned fingerprint on the other
 run: unknown provenance must not silently compare as equal to verified
 provenance.
+
+A caller who knowingly compares runs captured under different interpreters,
+platforms, or ``agentic-evalkit`` builds may pass
+``allow_cross_environment=True`` to waive *only* an
+``environment_fingerprint`` and/or ``code_fingerprint`` mismatch; the
+waived field name(s) are recorded on
+:attr:`ComparisonResult.waived_provenance_fields` rather than silently
+dropped (ADR-0015). No other provenance field is ever waivable through this
+flag.
 
 For compatible runs, it pairs observations by ``(sample_id, attempt)`` so
 missing attempts on either side are simply excluded from the paired
@@ -42,31 +53,52 @@ if TYPE_CHECKING:
 __all__ = ["PROVENANCE_FIELDS_CHECKED", "ComparisonResult", "compare_runs"]
 
 #: The manifest provenance checks ``_describe_mismatches`` actually performs,
-#: as ``(declared field name, human label, value getter)`` rows. This table IS
-#: the enumeration the mismatch description iterates, so
-#: :data:`PROVENANCE_FIELDS_CHECKED` below is derived from the *checks
-#: themselves* -- not re-declared -- and the
-#: ``tests/contract/test_provenance_drift.py`` contract comparing it against
-#: :meth:`EvalRunManifest.provenance_field_names` is falsifiable: a field
-#: declared as provenance but missing a row here (or vice versa) fails CI
-#: (R-004 P0).
-_PROVENANCE_CHECKS: tuple[tuple[str, str, Callable[[EvalRunManifest], object]], ...] = (
-    ("adapter", "adapter", lambda m: m.adapter),
-    ("grader", "grader", lambda m: m.grader),
-    ("target_name", "target name", lambda m: m.target_name),
+#: as ``(declared field name, human label, value getter, waivable)`` rows.
+#: This table IS the enumeration the mismatch description iterates, so
+#: :data:`PROVENANCE_FIELDS_CHECKED` and
+#: :data:`_WAIVABLE_UNDER_CROSS_ENVIRONMENT` below are derived from the
+#: *checks themselves* -- not re-declared -- and the
+#: ``tests/contract/test_provenance_drift.py`` contracts comparing them
+#: against :meth:`EvalRunManifest.provenance_field_names` and against
+#: ADR-0015's ratified waiver set are falsifiable: a field declared as
+#: provenance but missing a row here (or vice versa), or a row marked
+#: waivable beyond what ADR-0015 authorizes, fails CI (R-004 P0).
+_PROVENANCE_CHECKS: tuple[tuple[str, str, Callable[[EvalRunManifest], object], bool], ...] = (
+    ("adapter", "adapter", lambda m: m.adapter, False),
+    ("grader", "grader", lambda m: m.grader, False),
+    ("target_name", "target name", lambda m: m.target_name, False),
     (
         "target_fingerprint_policy",
         "target fingerprint policy",
         lambda m: m.target_fingerprint_policy,
+        False,
     ),
-    ("target_fingerprint", "target fingerprint", lambda m: m.target_fingerprint),
-    ("sampling.temperature", "sampling temperature", lambda m: m.sampling.temperature),
-    ("sampling.seed", "sampling seed", lambda m: m.sampling.seed),
-    ("attempts", "attempt count", lambda m: m.attempts),
+    ("target_fingerprint", "target fingerprint", lambda m: m.target_fingerprint, False),
+    ("sampling.temperature", "sampling temperature", lambda m: m.sampling.temperature, False),
+    ("sampling.seed", "sampling seed", lambda m: m.sampling.seed, False),
+    ("attempts", "attempt count", lambda m: m.attempts, False),
+    (
+        "environment_fingerprint",
+        "environment fingerprint",
+        lambda m: m.environment_fingerprint,
+        True,
+    ),
+    ("code_fingerprint", "code fingerprint", lambda m: m.code_fingerprint, True),
 )
 
 #: Derived from :data:`_PROVENANCE_CHECKS` row names -- see the table's note.
-PROVENANCE_FIELDS_CHECKED: frozenset[str] = frozenset(name for name, _, _ in _PROVENANCE_CHECKS)
+PROVENANCE_FIELDS_CHECKED: frozenset[str] = frozenset(name for name, _, _, _ in _PROVENANCE_CHECKS)
+
+#: The only provenance fields ``compare_runs(..., allow_cross_environment=True)``
+#: may waive on mismatch (ADR-0015): derived from the table's waivable column,
+#: so it is a subset of :data:`PROVENANCE_FIELDS_CHECKED` by construction.
+#: Declared field names, matching :data:`_PROVENANCE_CHECKS` rows -- never
+#: prose labels -- so :attr:`ComparisonResult.waived_provenance_fields` can
+#: echo them directly. ``tests/contract/test_provenance_drift.py`` pins this
+#: set to exactly the two fields ADR-0015 ratified.
+_WAIVABLE_UNDER_CROSS_ENVIRONMENT: frozenset[str] = frozenset(
+    name for name, _, _, waivable in _PROVENANCE_CHECKS if waivable
+)
 
 _MIN_BOOTSTRAP_SAMPLES = 100
 _MAX_BOOTSTRAP_SAMPLES = 10_000
@@ -97,10 +129,18 @@ class ComparisonResult(FrozenModel):
     ``paired_count``, regardless of how many attempts each contributed.
     Never multiplies with the attempt count the way ``paired_count`` does."""
     seed: int
+    waived_provenance_fields: tuple[str, ...] = ()
+    """Declared provenance field names waived by
+    ``allow_cross_environment=True`` (e.g. ``("environment_fingerprint",)``),
+    in :data:`_PROVENANCE_CHECKS` order. Empty when nothing differed or the
+    flag was never set. Additive optional field under ``schema_version =
+    "1"`` (ADR-0002); see ADR-0015."""
 
 
-def _describe_mismatches(left: EvalRunResult, right: EvalRunResult) -> list[str]:
-    """Return a human-readable description for every incompatible field.
+def _describe_mismatches(
+    left: EvalRunResult, right: EvalRunResult, *, allow_cross_environment: bool = False
+) -> tuple[list[str], list[str]]:
+    """Return (still-blocking mismatch descriptions, waived field names).
 
     Compares the *resolved* dataset identity (design §10: "dataset
     revision, split, adapter, harness, grader, target policy, and sampling
@@ -115,8 +155,17 @@ def _describe_mismatches(left: EvalRunResult, right: EvalRunResult) -> list[str]
     too. An unset (``None``) fingerprint on one side and a pinned
     fingerprint on the other is a mismatch, not a pass-through -- unknown
     provenance is never treated as equal to verified provenance.
+
+    ``allow_cross_environment`` (ADR-0015) narrows which mismatches block
+    the comparison: a field in :data:`_WAIVABLE_UNDER_CROSS_ENVIRONMENT`
+    that differs is appended to the returned ``waived`` list -- by declared
+    field name, not prose label -- instead of ``mismatches`` when the flag
+    is set. Every other field, including both dataset identity and the
+    other eight :data:`_PROVENANCE_CHECKS` rows, always blocks regardless
+    of the flag.
     """
     mismatches: list[str] = []
+    waived: list[str] = []
     left_dataset, right_dataset = left.resolved_dataset, right.resolved_dataset
     left_manifest, right_manifest = left.manifest, right.manifest
 
@@ -139,11 +188,15 @@ def _describe_mismatches(left: EvalRunResult, right: EvalRunResult) -> list[str]
     # Manifest provenance is compared by iterating the checks table, so the
     # set of checked fields is derived from the comparisons that actually run
     # (see _PROVENANCE_CHECKS) -- the R-004 drift contract depends on this.
-    for _, label, get_value in _PROVENANCE_CHECKS:
+    for name, label, get_value, waivable in _PROVENANCE_CHECKS:
         left_value, right_value = get_value(left_manifest), get_value(right_manifest)
-        if left_value != right_value:
+        if left_value == right_value:
+            continue
+        if allow_cross_environment and waivable:
+            waived.append(name)
+        else:
             mismatches.append(f"{label} differs: {left_value!r} != {right_value!r}")
-    return mismatches
+    return mismatches, waived
 
 
 def _is_pass(sample: SampleResult) -> bool:
@@ -163,6 +216,7 @@ def compare_runs(
     *,
     bootstrap_samples: int = _DEFAULT_BOOTSTRAP_SAMPLES,
     seed: int,
+    allow_cross_environment: bool = False,
 ) -> ComparisonResult:
     """Compare two runs' paired success rates with a seeded bootstrap interval.
 
@@ -175,23 +229,33 @@ def compare_runs(
             always reproduces the same bootstrap draw sequence. Required
             (keyword-only, no default) so a comparison is never silently
             nondeterministic.
+        allow_cross_environment: When ``True`` (ADR-0015), a mismatch on
+            *only* ``environment_fingerprint`` and/or ``code_fingerprint``
+            is waived rather than raised, and the waived field name(s) are
+            recorded on the returned result's ``waived_provenance_fields``.
+            The other eight provenance fields are never waivable through
+            this flag. Defaults to ``False`` so comparisons are closed to
+            undisclosed cross-environment drift unless a caller explicitly
+            opts in.
 
     Returns:
         A :class:`ComparisonResult` with the observed paired delta
         (``right`` pass rate minus ``left`` pass rate over the paired
         subset), its bootstrap 2.5/97.5 percentiles, the paired
-        ``(sample_id, attempt)`` count and distinct sample count, and the
-        seed used.
+        ``(sample_id, attempt)`` count and distinct sample count, the seed
+        used, and any fields waived under ``allow_cross_environment``.
 
     Raises:
         ValueError: If ``bootstrap_samples`` is outside ``[100, 10000]``.
         IncompatibleRuns: If the two runs' resolved dataset identity,
             adapter, grader, target policy (including target fingerprint),
-            sampling policy, or attempt count differ. Also raised if the
-            two runs share zero paired ``(sample_id, attempt)``
-            observations, since a delta computed over nothing is not a
-            comparison. The error message lists every mismatched field, or
-            names both run ids when the failure is zero overlap.
+            sampling policy, attempt count, or -- unless waived via
+            ``allow_cross_environment`` -- environment/code fingerprint
+            differ. Also raised if the two runs share zero paired
+            ``(sample_id, attempt)`` observations, since a delta computed
+            over nothing is not a comparison. The error message lists every
+            mismatched field, or names both run ids when the failure is
+            zero overlap.
     """
     if not (_MIN_BOOTSTRAP_SAMPLES <= bootstrap_samples <= _MAX_BOOTSTRAP_SAMPLES):
         raise ValueError(
@@ -200,7 +264,9 @@ def compare_runs(
             f"(got {bootstrap_samples})"
         )
 
-    mismatches = _describe_mismatches(left, right)
+    mismatches, waived = _describe_mismatches(
+        left, right, allow_cross_environment=allow_cross_environment
+    )
     if mismatches:
         raise IncompatibleRuns(
             message=(
@@ -239,6 +305,7 @@ def compare_runs(
         paired_count=paired_count,
         sample_count=sample_count,
         seed=seed,
+        waived_provenance_fields=tuple(waived),
     )
 
 

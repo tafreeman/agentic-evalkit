@@ -78,7 +78,14 @@ class EvalRunManifest(FrozenModel):
 
     @classmethod
     def provenance_field_names(cls) -> frozenset[str]:
-        """The comparability-relevant manifest provenance fields (design section 10)."""
+        """The comparability-relevant manifest provenance fields (design section 10).
+
+        ``environment_fingerprint`` and ``code_fingerprint`` joined this set
+        under ADR-0015; both are still non-negotiable *declarations* here --
+        ``compare_runs``'s keyword-only ``allow_cross_environment`` is a
+        per-comparison waiver of a mismatch on these two fields specifically,
+        not a reason to exclude them from the comparability surface itself.
+        """
         return frozenset(
             {
                 "adapter",
@@ -89,6 +96,8 @@ class EvalRunManifest(FrozenModel):
                 "sampling.temperature",
                 "sampling.seed",
                 "attempts",
+                "environment_fingerprint",
+                "code_fingerprint",
             }
         )
 
