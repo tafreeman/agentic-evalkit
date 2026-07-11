@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-11
+
 ### Added
 
 - Repeated-attempt runs (`manifest.attempts > 1`) now report an honest,
@@ -61,6 +63,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the new `ComparisonResult.waived_provenance_fields` rather than
   dropped. See
   [ADR-0015](docs/adr/0015-environment-and-code-fingerprints-gate-comparability.md).
+- A new grounded-citation grading family (`grounded-citation@1`) evaluates
+  grounded question answering: deterministic-primary checks for citation
+  faithfulness (quoted text is real and verbatim), completeness (all
+  required evidence cited), and distractor-canary avoidance, with an
+  optional rubric-bound `JudgeGrader` layer gated by the existing ADR-0007
+  calibration floor. First binding of `Rubric`/`RubricCriterion` to a live
+  judge request. See
+  [ADR-0012](docs/adr/0012-grounded-citation-probe.md).
+- `ResolvedDataset` and `DatasetPreset` now carry machine-readable
+  contamination-risk metadata (freshly authored vs. long-public), and a
+  shared canary-leak detector flags when a run's output echoes a planted
+  do-not-cite token from the dataset. Previously the framework had no
+  signal distinguishing a clean, locally authored eval set from a widely
+  mirrored public benchmark. See
+  [ADR-0013](docs/adr/0013-contamination-metadata-and-canaries.md).
+- A real, container-backed `HarnessExecutor` for SWE-bench Verified
+  (`SweBenchDockerHarnessExecutor`) applies a candidate patch and runs the
+  benchmark's own official Docker-based test harness to produce an
+  authoritative `resolved` verdict, bridged into grading by the new
+  `HarnessGrader`. Previously the only shipped executor was
+  `UnavailableHarnessExecutor`, so every SWE-bench Verified run could only
+  ever grade `UNAVAILABLE`. Installed via the optional `swebench` extra;
+  validated by an opt-in, Docker-requiring live workflow
+  (`live-swebench.yml`). See
+  [ADR-0014](docs/adr/0014-swebench-docker-harness-executor.md).
 
 ### Fixed
 
