@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Repeated-attempt runs (`manifest.attempts > 1`) now report an honest,
+  non-pseudo-replicated `pass_rate` interval: bounds are computed
+  cluster-robustly over per-`sample_id` clusters
+  (`agentic_evalkit.stats.clustered_interval`) instead of treating every
+  correlated attempt as an independent Wilson trial, and a new
+  `IntervalMethod` enum stamps which construction (`wilson` vs
+  `cluster_robust`) produced them. `score_mean` gains a matching
+  `score_estimate` (SEM and 95% CI), a stdlib-only
+  `agentic_evalkit.stats.required_sample_size` power helper is added, and both
+  the Markdown and HTML reporters now render the `aggregates` block visibly (a
+  real table and an "Uncertainty" section) rather than a raw dict repr or
+  hidden JSON. The exact pooled numerator/denominator/value are unchanged and
+  single-attempt runs are byte-identical to before. See
+  [ADR-0016](docs/adr/0016-cluster-robust-intervals-for-repeated-attempts.md).
 - `datasets pull` now persists the resolved dataset identity (`name@revision`)
   to a new offline resolution cache, so `run --offline`/`datasets
   inspect|preview --offline` can resolve a Hugging Face-backed dataset

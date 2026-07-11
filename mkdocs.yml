@@ -58,6 +58,7 @@ nav:
       - "0013: Contamination metadata and canaries": adr/0013-contamination-metadata-and-canaries.md
       - "0014: SWE-bench Docker harness executor": adr/0014-swebench-docker-harness-executor.md
       - "0015: Environment and code fingerprints gate comparability": adr/0015-environment-and-code-fingerprints-gate-comparability.md
+      - "0016: Cluster-robust intervals for repeated attempts": adr/0016-cluster-robust-intervals-for-repeated-attempts.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - CLI reference: guides/cli-reference.md

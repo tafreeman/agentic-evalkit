@@ -3,6 +3,9 @@
 All reporter tests (JSON, JSONL, Markdown, HTML) exercise the same frozen
 three-sample :class:`~agentic_evalkit.models.EvalRunResult` so that every
 reporter is proven against one identical, provenance-carrying run.
+``repeated_attempts_run`` adds a second, repeated-attempt run so the
+Markdown/HTML aggregates rendering is also proven against the
+cluster-robust (``attempts > 1``) regime (ADR-0016).
 """
 
 from datetime import UTC, datetime
@@ -40,11 +43,15 @@ def _sample(sample_id: str) -> EvalSample:
 
 
 def _execution(
-    sample_id: str, *, status: ExecutionStatus, output: dict[str, object] | None = None
+    sample_id: str,
+    *,
+    attempt: int = 1,
+    status: ExecutionStatus,
+    output: dict[str, object] | None = None,
 ) -> NormalizedExecutionResult:
     return NormalizedExecutionResult(
         sample_id=sample_id,
-        attempt=1,
+        attempt=attempt,
         output=output,
         status=status,
         started_at=_STARTED_AT,
@@ -52,12 +59,17 @@ def _execution(
     )
 
 
-def _grade(sample_id: str) -> GradeResult:
+def _grade(
+    sample_id: str,
+    *,
+    status: GradeStatus = GradeStatus.PASS,
+    score: float | None = 1.0,
+) -> GradeResult:
     return GradeResult(
         sample_id=sample_id,
         grader="normalized-exact@1",
-        status=GradeStatus.PASS,
-        score=1.0,
+        status=status,
+        score=score,
         hard_gate=False,
         evidence={"expected": "42", "actual": "42"},
         created_at=_FINISHED_AT,
@@ -118,6 +130,73 @@ def pass_error_timeout_and_provenance_run() -> EvalRunResult:
         resolved_dataset=resolved_dataset,
         samples=(passed, errored, timed_out),
         summary=RunSummary(total=3, passed=1, failed=0, errors=1, timeouts=1),
+        started_at=_STARTED_AT,
+        finished_at=_FINISHED_AT,
+    )
+
+
+@pytest.fixture
+def repeated_attempts_run() -> EvalRunResult:
+    """A two-sample_id, ``attempts=2`` run whose aggregates are cluster-robust.
+
+    Sample ``gsm8k:main:test:0`` passes both attempts (pass proportion 1.0)
+    and ``gsm8k:main:test:1`` passes one of two (0.5), so
+    ``build_report_aggregates`` produces a ``cluster_robust``-labeled
+    ``pass_rate`` with defined bounds and a populated ``score_estimate`` --
+    the repeated-attempt rendering path the single-attempt fixture above can
+    never reach (ADR-0016).
+    """
+
+    def _attempt(sample_id: str, attempt: int, status: GradeStatus) -> SampleResult:
+        return SampleResult(
+            sample=_sample(sample_id),
+            execution=_execution(
+                sample_id,
+                attempt=attempt,
+                status=ExecutionStatus.COMPLETED,
+                output={"answer": "42"},
+            ),
+            grade=_grade(
+                sample_id,
+                status=status,
+                score=1.0 if status is GradeStatus.PASS else 0.0,
+            ),
+        )
+
+    samples = (
+        _attempt("gsm8k:main:test:0", 1, GradeStatus.PASS),
+        _attempt("gsm8k:main:test:0", 2, GradeStatus.PASS),
+        _attempt("gsm8k:main:test:1", 1, GradeStatus.PASS),
+        _attempt("gsm8k:main:test:1", 2, GradeStatus.FAIL),
+    )
+    manifest = EvalRunManifest(
+        run_name="gsm8k-smoke",
+        dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+        adapter="gsm8k@1",
+        grader="normalized-exact@1",
+        target_name="echo-target",
+        selection=DatasetSelection(offset=0, limit=2),
+        sampling=SamplingPolicy(seed=7, attempts=2),
+        attempts=2,
+        timeout_seconds=30.0,
+        concurrency=1,
+        environment_fingerprint="env:sha256:deadbeef",
+        code_fingerprint="code:sha256:cafef00d",
+    )
+    resolved_dataset = ResolvedDataset(
+        dataset_id="openai/gsm8k",
+        revision="abc",
+        config="main",
+        split="test",
+        row_count=2,
+        retrieved_at=_STARTED_AT,
+    )
+    return EvalRunResult(
+        run_id="run-002",
+        manifest=manifest,
+        resolved_dataset=resolved_dataset,
+        samples=samples,
+        summary=RunSummary(total=4, passed=3, failed=1),
         started_at=_STARTED_AT,
         finished_at=_FINISHED_AT,
     )

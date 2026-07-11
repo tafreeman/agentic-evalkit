@@ -50,6 +50,81 @@ def _outcome_counts_section(run: EvalRunResult) -> str:
     )
 
 
+def _mapping(aggregates: dict[str, JsonValue], key: str) -> dict[str, JsonValue]:
+    """Return ``aggregates[key]`` when it is a nested object, else an empty dict."""
+    value = aggregates.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _number(value: JsonValue | None, *, digits: int = 4) -> str:
+    """Fixed-precision float, or ``"-"`` for an absent/non-numeric value."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "-"
+    return f"{value:.{digits}f}"
+
+
+def _integer(value: JsonValue | None) -> str:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return "-"
+    return str(value)
+
+
+def _label(value: JsonValue | None) -> str:
+    return value if isinstance(value, str) else "-"
+
+
+def _ci_cell(mapping: dict[str, JsonValue]) -> str:
+    lower = _number(mapping.get("lower_bound"))
+    upper = _number(mapping.get("upper_bound"))
+    if lower == "-" or upper == "-":
+        return "-"
+    return f"[{lower}, {upper}]"
+
+
+def _pass_rate_row(aggregates: dict[str, JsonValue]) -> str:
+    pass_rate = _mapping(aggregates, "pass_rate")
+    fraction = f"{_integer(pass_rate.get('numerator'))}/{_integer(pass_rate.get('denominator'))}"
+    value = _number(pass_rate.get("value"))
+    value_cell = fraction if value == "-" else f"{fraction} = {value}"
+    return (
+        f"| Pass rate | {value_cell} | {_ci_cell(pass_rate)} "
+        f"| {_label(pass_rate.get('interval_method'))} |"
+    )
+
+
+def _score_row(aggregates: dict[str, JsonValue]) -> str | None:
+    score_mean = aggregates.get("score_mean")
+    if isinstance(score_mean, bool) or not isinstance(score_mean, (int, float)):
+        return None
+    estimate = _mapping(aggregates, "score_estimate")
+    return (
+        f"| Score mean | {_number(score_mean)} | {_ci_cell(estimate)} "
+        f"| {_label(estimate.get('interval_method'))} |"
+    )
+
+
+def _pass_at_k_row(aggregates: dict[str, JsonValue]) -> str | None:
+    payload = _mapping(aggregates, "pass_at_k")
+    if not payload:
+        return None
+    return f"| pass@{_integer(payload.get('k'))} | {_number(payload.get('mean'))} | - | - |"
+
+
+def _aggregates_table(aggregates: dict[str, JsonValue]) -> list[str]:
+    """Render the aggregates payload as a Markdown table, never a raw dict repr.
+
+    Reads the stable keys :func:`agentic_evalkit.stats.build_report_aggregates`
+    produces -- the Wilson-or-cluster-robust pass rate, the score mean and its
+    ``score_estimate`` interval, and (only when a repeated-attempt run produced
+    one) ``pass_at_k`` -- formatting each as a row and reusing this file's
+    ``"-"``-for-absent idiom (see ``_sample_row``) rather than fabricating a
+    value for a metric the run did not define.
+    """
+    rows = [_pass_rate_row(aggregates), _score_row(aggregates), _pass_at_k_row(aggregates)]
+    body = [row for row in rows if row is not None]
+    return ["| Metric | Value | 95% CI | Method |", "| --- | --- | --- | --- |", *body]
+
+
 def render_markdown(
     run: EvalRunResult,
     *,
@@ -89,7 +164,7 @@ def render_markdown(
         "",
     ]
     if aggregates is not None:
-        lines.extend(["## Aggregates", "", f"```\n{aggregates}\n```", ""])
+        lines.extend(["## Aggregates", "", *_aggregates_table(aggregates), ""])
     return "\n".join(lines)
 
 

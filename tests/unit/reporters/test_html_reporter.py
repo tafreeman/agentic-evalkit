@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agentic_evalkit.models import EvalRunResult
 from agentic_evalkit.reporters import HtmlReporter
+from agentic_evalkit.stats import build_report_aggregates, wilson_interval
 
 _URL_PATTERN = re.compile(r"""(?:src|href)\s*=\s*["']https?://""", re.IGNORECASE)
 
@@ -88,3 +89,63 @@ def test_two_renders_of_the_same_run_are_byte_identical_with_fixed_generated_at(
     first = HtmlReporter().write(run, tmp_path / "first.html", generated_at="fixed")
     second = HtmlReporter().write(run, tmp_path / "second.html", generated_at="fixed")
     assert first.read_bytes() == second.read_bytes()
+
+
+# --- Uncertainty section (ADR-0016): visible, aggregates-gated ---------------
+
+
+def test_html_uncertainty_section_shows_bounds_in_visible_body(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
+    aggregates = build_report_aggregates(run)
+    html_path = HtmlReporter().write(
+        run, tmp_path / "run.html", aggregates=aggregates, generated_at="fixed"
+    )
+    content = html_path.read_text(encoding="utf-8")
+
+    # Assert on the visible body -- everything before the embedded JSON data
+    # island -- so this proves the bounds reach the rendered page, not merely
+    # the hidden JSON blob (which the reporter has always carried).
+    visible_body, _, _embedded = content.partition('<script id="embedded-run-data"')
+    assert "Uncertainty" in visible_body
+    assert "wilson" in visible_body  # the interval_method label
+    lower, upper = wilson_interval(successes=1, total=3)
+    assert f"{lower:.4f}" in visible_body
+    assert f"{upper:.4f}" in visible_body
+
+
+def test_html_without_aggregates_has_no_uncertainty_section(
+    tmp_path: Path, pass_error_timeout_and_provenance_run: EvalRunResult
+) -> None:
+    run = pass_error_timeout_and_provenance_run
+    html_path = HtmlReporter().write(run, tmp_path / "run.html", generated_at="fixed")
+    content = html_path.read_text(encoding="utf-8")
+    assert "Uncertainty" not in content
+
+
+def test_html_uncertainty_shows_cluster_robust_score_ci_for_repeated_attempts(
+    tmp_path: Path, repeated_attempts_run: EvalRunResult
+) -> None:
+    run = repeated_attempts_run
+    aggregates = build_report_aggregates(run)
+    html_path = HtmlReporter().write(
+        run, tmp_path / "run.html", aggregates=aggregates, generated_at="fixed"
+    )
+    content = html_path.read_text(encoding="utf-8")
+
+    # Everything asserted here must appear in the visible body, not merely the
+    # embedded JSON island (which has always carried the aggregates): the
+    # repeated-attempt run's cluster_robust label, the score-mean chip, and the
+    # exact score CI the aggregates payload carries (its statistical
+    # correctness is proven in tests/unit/stats/test_aggregate.py).
+    visible_body, _, _embedded = content.partition('<script id="embedded-run-data"')
+    assert "Uncertainty" in visible_body
+    assert "cluster_robust" in visible_body
+    assert "Score mean" in visible_body
+
+    estimate = aggregates["score_estimate"]
+    assert isinstance(estimate, dict)
+    assert isinstance(estimate["lower_bound"], float)
+    assert isinstance(estimate["upper_bound"], float)
+    assert f"[{estimate['lower_bound']:.4f}, {estimate['upper_bound']:.4f}]" in visible_body

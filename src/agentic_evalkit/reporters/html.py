@@ -98,6 +98,7 @@ class HtmlReporter:
         content = template.render(
             run=run,
             generated_at=resolved_generated_at,
+            aggregates=aggregates,
             sample_rows=[_sample_row(sample) for sample in run.samples],
             run_json=_embedded_run_json(
                 run, aggregates=aggregates, generated_at=resolved_generated_at

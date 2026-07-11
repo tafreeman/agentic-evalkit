@@ -110,6 +110,25 @@
   <span class="count-chip">Unavailable: {{ run.summary.unavailable }}/{{ run.summary.total }}</span>
 </div>
 
+{% if aggregates %}
+<h2>Uncertainty</h2>
+<div class="counts">
+  {% set pass_rate = aggregates.pass_rate %}
+  <span class="count-chip">
+    Pass rate: {{ pass_rate.numerator }}/{{ pass_rate.denominator }}{% if pass_rate.value is not none %} = {{ "%.4f"|format(pass_rate.value) }}{% endif %}{% if pass_rate.lower_bound is not none and pass_rate.upper_bound is not none %} (95% CI [{{ "%.4f"|format(pass_rate.lower_bound) }}, {{ "%.4f"|format(pass_rate.upper_bound) }}]{% if pass_rate.interval_method %}, {{ pass_rate.interval_method }}{% endif %}){% endif %}
+  </span>
+  {% if aggregates.score_estimate %}
+  {% set score = aggregates.score_estimate %}
+  <span class="count-chip">
+    Score mean: {{ "%.4f"|format(score.mean) }}{% if score.lower_bound is not none and score.upper_bound is not none %} (95% CI [{{ "%.4f"|format(score.lower_bound) }}, {{ "%.4f"|format(score.upper_bound) }}]{% if score.interval_method %}, {{ score.interval_method }}{% endif %}){% endif %}
+  </span>
+  {% endif %}
+  {% if aggregates.pass_at_k %}
+  <span class="count-chip">pass@{{ aggregates.pass_at_k.k }}: {{ "%.4f"|format(aggregates.pass_at_k.mean) }}</span>
+  {% endif %}
+</div>
+{% endif %}
+
 <h2>Samples</h2>
 <div class="filter-bar" id="filter-bar">
   <button type="button" class="filter-button" data-filter="all" aria-pressed="true">All</button>
