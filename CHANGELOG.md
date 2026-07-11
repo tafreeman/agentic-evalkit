@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `JudgeGrader` now redacts secret-shaped substrings (the same patterns
+  `DEFAULT_REDACTION_POLICY` already applies at the report boundary) out of
+  `candidate_output` before it is sent to a caller-supplied `JudgeClient`,
+  and truncates it to 8192 characters by default. Both are new
+  keyword-only `JudgeGrader` constructor parameters (`redaction_policy`,
+  `max_candidate_output_chars`), on by default; pass `None` to either to
+  opt out. Previously the full, unredacted, uncapped `execution.output`
+  was sent to any `JudgeClient` implementation -- including a real
+  network-calling one -- with no safety net, since report-boundary
+  redaction cannot reach data that has already left the process during
+  grading. See
+  [ADR-0018](docs/adr/0018-redact-and-bound-judge-candidate-output.md).
+
 ## [0.2.0] - 2026-07-11
 
 ### Added
