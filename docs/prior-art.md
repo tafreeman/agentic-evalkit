@@ -5,7 +5,7 @@ existing evaluation-tooling landscape, with every framework claim verified
 against its primary documentation on **2026-07-11**.
 
 **Honest provenance:** the founding design's "Approaches Considered"
-(design §3) weighed three *build* shapes — standalone library, host-repo
+([design §3](specs/2026-07-02-agentic-evalkit-design.md#3-approaches-considered)) weighed three *build* shapes — standalone library, host-repo
 plugin, evaluation platform — and never listed *adopt an existing framework*
 as an alternative. A later positioning statement differentiated against
 Inspect, Harbor, LightEval, OpenAI Evals, and Langfuse, but that was
@@ -18,7 +18,7 @@ answer to "why not just use promptfoo (or Inspect, or DeepEval, …)?"
 | Framework | What it is | Where it excels |
 |---|---|---|
 | [promptfoo](https://www.promptfoo.dev/docs/intro/) | Open-source CLI/library for evaluating and red-teaming LLM apps | Config-driven assertions and metrics, prompt/model comparison, red-teaming, CI/CD integration. OpenAI's own cookbook [recommends it as the migration target](https://developers.openai.com/cookbook/examples/evaluation/moving-from-openai-evals-to-promptfoo) now that OpenAI is "winding down the Evals product" (2026-06-02) |
-| [Inspect](https://inspect.aisi.org.uk/) | Frontier-AI evaluation framework from the UK AI Security Institute | Solvers/scorers architecture, agent evals (can drive external agents like Claude Code), untrusted-code sandboxing across Docker/K8s/Modal. The closest neighbor; its dataset contracts are cited as prior art in this package's design §18 |
+| [Inspect](https://inspect.aisi.org.uk/) | Frontier-AI evaluation framework from the UK AI Security Institute | Solvers/scorers architecture, agent evals (can drive external agents like Claude Code), untrusted-code sandboxing across Docker/K8s/Modal. The closest neighbor; its dataset contracts are cited as prior art in this package's [design §18](specs/2026-07-02-agentic-evalkit-design.md#18-source-derived-principles) |
 | [DeepEval](https://github.com/confident-ai/deepeval) | Open-source (Apache-2.0) pytest-style LLM evaluation framework | Broad metric library: G-Eval, RAG metrics (faithfulness, contextual precision/recall), agentic metrics (task completion, tool correctness), multi-turn metrics; pytest + framework integrations |
 | [Braintrust](https://www.braintrust.dev/docs/start) | Hosted AI observability platform with an eval framework | Playground + experiments UI, production logging/monitoring; account-based hosted service |
 | [LangSmith](https://docs.langchain.com/langsmith/evaluation) | LangChain's dataset/experiment evaluation product | Datasets from production traces, human/code/LLM-judge/pairwise evaluators, experiment comparison; cloud, hybrid, or self-hosted platform |
