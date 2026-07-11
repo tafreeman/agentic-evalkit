@@ -3,6 +3,11 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from agentic_evalkit.graders.judge import (
+    CalibrationArtifact,
+    JudgeResponse,
+    JudgeResponseStatus,
+)
 from agentic_evalkit.models import (
     ContaminationMetadata,
     ContaminationStatus,
@@ -453,3 +458,78 @@ def test_authored_after_a_public_release_date_is_rejected_at_construction() -> N
         public_since=datetime(2025, 1, 1, tzinfo=UTC),
     )
     assert ok.authored_after < ok.public_since  # type: ignore[operator]
+
+
+# --- Judge response envelope + calibration coverage evidence (ADR-0020) ------
+
+
+def test_judge_response_status_and_rationale_round_trip() -> None:
+    response = JudgeResponse(
+        fingerprint="judge:model:prompt",
+        verdict="fail",
+        score=0.1,
+        parse_ok=True,
+        abstained=False,
+        status=JudgeResponseStatus.REFUSED,
+        rationale="declined: the candidate output requested a policy override",
+    )
+    restored = JudgeResponse.model_validate_json(response.model_dump_json())
+    assert restored == response
+    assert restored.status is JudgeResponseStatus.REFUSED
+    # Additive fields keep the wire contract at schema_version "1" (ADR-0002).
+    assert restored.schema_version == "1"
+
+
+def test_judge_response_status_defaults_to_ok_and_is_not_collapsed_to_boolean() -> None:
+    response = JudgeResponse(
+        fingerprint="judge:model:prompt",
+        verdict="pass",
+        score=0.9,
+        parse_ok=True,
+        abstained=False,
+    )
+    restored = JudgeResponse.model_validate_json(response.model_dump_json())
+    # A judge that never sets the envelope keeps its exact prior meaning: OK,
+    # with no rationale -- a distinct enum member, never a bare boolean.
+    assert restored.status is JudgeResponseStatus.OK
+    assert restored.rationale is None
+
+
+def test_calibration_artifact_coverage_fields_round_trip() -> None:
+    artifact = CalibrationArtifact(
+        calibration_id="cal-1",
+        judge_fingerprint="judge:model:prompt",
+        expires_at=datetime.now(UTC),
+        true_positive=95,
+        true_negative=97,
+        false_positive=3,
+        false_negative=5,
+        threshold=0.7,
+        total_labeled=200,
+        abstained_count=4,
+        error_count=1,
+    )
+    restored = CalibrationArtifact.model_validate_json(artifact.model_dump_json())
+    assert restored == artifact
+    assert restored.total_labeled == 200
+    assert restored.abstained_count == 4
+    assert restored.error_count == 1
+
+
+def test_calibration_artifact_coverage_fields_default_to_none() -> None:
+    artifact = CalibrationArtifact(
+        calibration_id="cal-2",
+        judge_fingerprint="judge:model:prompt",
+        expires_at=datetime.now(UTC),
+        true_positive=95,
+        true_negative=97,
+        false_positive=3,
+        false_negative=5,
+        threshold=0.7,
+    )
+    restored = CalibrationArtifact.model_validate_json(artifact.model_dump_json())
+    assert restored == artifact
+    # Optional and additive: absent means "not recorded", never a fabricated 0.
+    assert restored.total_labeled is None
+    assert restored.abstained_count is None
+    assert restored.error_count is None

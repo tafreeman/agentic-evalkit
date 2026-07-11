@@ -15,7 +15,7 @@ hide:
 
 # agentic-evalkit
 
-<p class="hero-sub">A standalone evaluation toolkit for agentic systems — dynamic dataset discovery, typed evaluation contracts, benchmark-valid grading, calibrated judges, and statistical reporting behind a developer-friendly Python API and CLI. Datasets, grading, and reporting are separated from the system under test through a neutral <code>ExecutionTarget</code> protocol, so any callable, subprocess, or HTTP system is evaluable without framework lock-in.</p>
+<p class="hero-sub">A standalone evaluation toolkit for agentic systems — dynamic dataset discovery, typed evaluation contracts, benchmark-valid grading, calibration-gated judge evidence, and statistical reporting behind a developer-friendly Python API and CLI. Datasets, grading, and reporting are separated from the system under test through a neutral <code>ExecutionTarget</code> protocol, so any callable, subprocess, or HTTP system is evaluable without framework lock-in.</p>
 
 <div class="hero-actions" markdown>
 [Get started](guides/quickstart.md){ .md-button .md-button--primary }
@@ -59,7 +59,7 @@ This resolves the curated GSM8K preset from Hugging Face, runs five samples thro
 
 <div class="stat-strip" markdown>
 <div class="stat-item">
-  <div class="stat-value">18</div>
+  <div class="stat-value">20</div>
   <div class="stat-label">ADRs</div>
 </div>
 <div class="stat-item">
@@ -161,7 +161,7 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 - [Architecture specification](specs/2026-07-02-agentic-evalkit-design.md) — the full design
 - [Prior art & build-vs-buy](prior-art.md) — the recorded decision versus existing frameworks
 - [Implementation plan](plans/2026-07-02-agentic-evalkit-initial-release.md) — initial release plan
-- [ADR index](adr/0001-standalone-boundary.md) — eighteen architecture decision records, 0001 through 0018
+- [ADR index](adr/0001-standalone-boundary.md) — twenty architecture decision records, 0001 through 0020
 </div>
 
 </div>

@@ -29,6 +29,17 @@ during plugin discovery rather than silent skips.
   - `judges`: selected model-provider adapters for the calibrated-judge
     grader, while the core judge protocol stays provider-neutral;
   - `swebench`: the official containerized SWE-bench executor.
+- **As amended 2026-07-11:** the `parquet` and `judges` extras above are
+  removed from `pyproject.toml`; neither was ever populated by an
+  implementation plan before this amendment. `parquet` was never scheduled;
+  `judges` provider integration was deferred by the 2026-07-11 panel review.
+  The versioned entry-point group naming convention below and the
+  `swebench` extra are unaffected and remain.
+- **As amended 2026-07-11 (ADR-0019):** the entry-point discovery routine
+  this ADR specifies below (`load_plugins()`) is retracted — it shipped
+  with zero production callers. The versioned entry-point group naming
+  convention and the `api_version` attribute convention remain, documented
+  below, as reference for any future revival; see ADR-0019.
 - Extension points (providers, benchmark adapters, graders, reporters,
   harness executors) are discovered through versioned Python entry-point
   groups named `agentic_evalkit.<capability>.v<N>` (for example,
@@ -74,9 +85,10 @@ during plugin discovery rather than silent skips.
 - `tests/unit/test_plugins.py` (Task 3) asserts that a plugin declaring the
   wrong `api_version` raises `PluginCompatibilityError` with the offending
   version in the message.
-- `pyproject.toml` defines `parquet`, `judges`, and `swebench` as
-  `[project.optional-dependencies]` groups, initially empty, verified by the
-  packaging CI job installing the base wheel without them.
+- `pyproject.toml` defines `swebench` as a `[project.optional-dependencies]`
+  group, initially empty, verified by the packaging CI job installing the
+  base wheel without it. (The `parquet` and `judges` placeholders were
+  removed 2026-07-11 -- see Decision.)
 - Future provider/grader/reporter tasks add entry-point group registration
   tests confirming built-in names cannot be silently overridden by a
   same-named plugin (see Task 7 Step 5 for the dataset-provider case).

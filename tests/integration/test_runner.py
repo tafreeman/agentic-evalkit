@@ -28,6 +28,7 @@ from agentic_evalkit.benchmarks.harness import FakeHarnessExecutor, HarnessResul
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.events import RunEvent, RunFailed
 from agentic_evalkit.graders.harness import HarnessGrader
+from agentic_evalkit.graders.judge import JudgeGrader, JudgeRequest, JudgeResponse
 from agentic_evalkit.models import (
     DatasetRef,
     DatasetSelection,
@@ -860,3 +861,101 @@ async def test_harness_grader_sees_the_full_patch_before_it_is_spilled(tmp_path:
     assert execution.output is None
     digest = execution.artifacts["output_ref"]
     assert isinstance(digest, str)
+
+
+# --- Judge transport isolation (ADR-0020) ------------------------------------
+
+
+class _AlwaysCompletedTarget:
+    """Returns a COMPLETED execution for every sample, so grading always runs.
+
+    Unlike ``_SequencedTarget.success_then_error``, both samples reach the
+    grader here -- exactly what the judge-transport-isolation test below needs,
+    since a non-completed execution would skip grading (requirement 6) and mask
+    whether the judge itself was reached.
+    """
+
+    async def execute(
+        self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
+    ) -> NormalizedExecutionResult:
+        now = datetime.now(UTC)
+        return NormalizedExecutionResult(
+            sample_id=sample.sample_id,
+            attempt=attempt,
+            output={"answer": sample.reference},
+            status=ExecutionStatus.COMPLETED,
+            started_at=now,
+            finished_at=now,
+        )
+
+
+class _RaisingOnOneSampleJudge:
+    """A ``JudgeClient`` whose transport raises for exactly one ``sample_id``.
+
+    Proves ADR-0020's transport isolation end to end through ``EvalRunner``:
+    one raising judge yields one graded ERROR sample, and the run finishes
+    normally rather than aborting with a ``RunFailed``. Every other sample gets
+    a clean, parseable (advisory) verdict.
+    """
+
+    fingerprint = "judge:model:prompt"
+
+    def __init__(self, *, raising_sample_id: str) -> None:
+        self._raising_sample_id = raising_sample_id
+
+    async def judge(self, request: JudgeRequest) -> JudgeResponse:
+        if request.sample_id == self._raising_sample_id:
+            raise RuntimeError("judge provider unreachable")
+        return JudgeResponse(
+            fingerprint=self.fingerprint,
+            verdict="pass",
+            score=0.9,
+            parse_ok=True,
+            abstained=False,
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_completes_when_the_judge_raises_on_one_sample(tmp_path: Path) -> None:
+    """A ``JudgeClient`` that raises on one sample must not abort the whole run
+    (ADR-0020): the run finishes, the affected sample is graded ERROR carrying
+    ``judge_transport_error`` evidence, the other sample grades normally, and no
+    ``RunFailed`` is emitted.
+    """
+    events: list[RunEvent] = []
+
+    def _sink(event: RunEvent) -> None:
+        events.append(event)
+
+    judge_grader = JudgeGrader(
+        _RaisingOnOneSampleJudge(raising_sample_id="identity:1"),
+        calibration=None,
+        gate=False,
+    )
+    runner = EvalRunner(
+        catalog=_catalog_with_two_records(),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={"fake": _AlwaysCompletedTarget()},
+        graders={"judge@1": judge_grader},
+        artifact_store=_artifact_store(tmp_path),
+    )
+    result = await runner.run(_manifest(grader="judge@1"), event_sink=_sink)
+
+    assert result.summary.total == 2
+    graded_by_id = {sample.sample.sample_id: sample.grade for sample in result.samples}
+
+    errored = graded_by_id["identity:1"]
+    assert errored is not None
+    assert errored.status is GradeStatus.ERROR
+    assert errored.hard_gate is False
+    assert errored.evidence["judge_transport_error"] == "RuntimeError"
+
+    other = graded_by_id["identity:0"]
+    assert other is not None
+    assert other.status is GradeStatus.PASS  # advisory verdict, never gating
+    assert other.hard_gate is False
+
+    event_names = [type(event).__name__ for event in events]
+    assert "RunCompleted" in event_names
+    assert "RunFailed" not in event_names

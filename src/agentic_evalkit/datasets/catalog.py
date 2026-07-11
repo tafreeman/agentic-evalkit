@@ -9,13 +9,16 @@ other field), exposes the built-in verified presets from
 content-addressed cache from :mod:`agentic_evalkit.datasets.cache` so a
 repeated request for the exact same page never re-hits the provider.
 
-Providers are supplied by the caller as a name-to-provider mapping (built-ins
-plus any entry-point-discovered plugins already loaded via
-``agentic_evalkit.plugins.load_plugins("agentic_evalkit.providers.v1", ...)``
-before construction). This module does not perform entry-point discovery
-itself; it only enforces that a caller-supplied provider can never silently
-replace a name reserved for a built-in provider (``builtin_provider_names``),
-raising :class:`~agentic_evalkit.errors.PluginCompatibilityError` instead.
+Providers are supplied by the caller as a name-to-provider mapping,
+constructed and injected at ``DatasetCatalog.__init__`` time -- see
+:func:`agentic_evalkit.cli.datasets.build_catalog` for the reference
+construction, which builds the built-in ``local`` and ``huggingface``
+providers directly and passes them in. This module performs no plugin or
+entry-point discovery of its own (ADR-0019 retracted the entry-point
+discovery routine that once populated a mapping like this one); it only
+enforces that a caller-supplied provider can never silently replace a name
+reserved for a built-in provider (``builtin_provider_names``), raising
+:class:`~agentic_evalkit.errors.PluginCompatibilityError` instead.
 
 ``offline`` is a per-call argument on every method, never construction-time
 state on ``DatasetCatalog`` itself — the same per-call shape ``preview`` has
@@ -101,9 +104,9 @@ class DatasetCatalog:
     Args:
         providers: Every available provider, keyed by the name that
             ``DatasetRef.provider`` must match to route to it. This mapping
-            is the caller's responsibility to assemble (built-ins plus any
-            already-loaded entry-point plugins); the catalog only validates
-            it for built-in-name collisions.
+            is the caller's responsibility to assemble and construct (see
+            :func:`agentic_evalkit.cli.datasets.build_catalog`); the catalog
+            only validates it for built-in-name collisions.
         presets: The named preset catalog exposed via :meth:`list_presets`.
             Defaults to :data:`agentic_evalkit.datasets.presets.BUILTIN_PRESETS`.
         cache: The content-addressed cache :meth:`preview` reads from and

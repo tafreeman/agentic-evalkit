@@ -38,6 +38,12 @@ task, and never edited by later tasks.
   version and raises a typed `PluginCompatibilityError` on mismatch, load
   failure, or duplicate plugin name. Plugin failures are always reported to
   the caller, never silently skipped.
+- **As amended 2026-07-11 (ADR-0019):** the `load_plugins()` entry-point
+  discovery routine referenced above is retracted — no production code
+  ever called it. The `agentic_evalkit.providers.v1` naming convention and
+  the `api_version` attribute it verified remain documented here for any
+  future revival; see ADR-0019. The Hugging Face baseline decision above
+  is unaffected.
 - Hugging Face dataset code executes with remote code disabled by default
   (`trust_remote_code` is never set to `True`); a dataset that requires
   remote code execution to load raises a typed `UnsafeCodeRequired` error

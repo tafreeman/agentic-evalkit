@@ -1,12 +1,11 @@
 """``agentic-evalkit doctor``: environment/capability preflight (design §11.1).
 
-Checks Python version, cache read/write, Hugging Face provider health,
-optional-capability availability, and judge calibration readiness. Each
-check reports ``ok``, ``warning``, or ``error`` plus a short remediation
-string; ``doctor`` never raises for an individual failed check (a broken
-target or an unreachable provider is exactly the situation a user runs
-``doctor`` to diagnose) -- it aggregates every check's status into one exit
-code instead.
+Checks Python version, cache read/write, Hugging Face provider health, and
+optional-capability availability. Each check reports ``ok``, ``warning``, or
+``error`` plus a short remediation string; ``doctor`` never raises for an
+individual failed check (a broken target or an unreachable provider is
+exactly the situation a user runs ``doctor`` to diagnose) -- it aggregates
+every check's status into one exit code instead.
 """
 
 from __future__ import annotations
@@ -105,44 +104,28 @@ async def _check_huggingface_health() -> DoctorCheck:
     )
 
 
-def _check_reserved_placeholder_capability(name: str, module: str) -> DoctorCheck:
-    """Report a capability whose extra is a still-empty placeholder (ADR-0009, AEK-02).
+def _check_swebench_capability() -> DoctorCheck:
+    """Report whether the ``swebench`` optional capability is usable (ADR-0009, ADR-0014).
 
-    Every capability ``doctor`` currently checks this way (``parquet``,
-    ``swebench``) backs a ``pyproject.toml`` ``[project.optional-dependencies]``
-    extra that installs nothing yet, so ``pip install 'agentic-evalkit[{name}]'``
-    would satisfy nothing -- this never emits that install-command
-    remediation. A module found via ``find_spec`` still reports ``ok`` (it
-    reflects the environment, not package-gated functionality); a module
-    *not* found is purely informational, not an actionable warning with a
-    fix the user can run today. If a future extra gains real packages, its
-    doctor check should not reuse this helper -- write one that keeps the
-    install-command remediation, since that extra would then have a real
-    fix to suggest.
+    Unlike the reserved-placeholder extras this repo removed 2026-07-11,
+    ``swebench`` is a real, populated extra: ``pip install
+    'agentic-evalkit[swebench]'`` installs the ``swebench`` and ``docker``
+    packages the container-backed harness executor needs (ADR-0014). A
+    present ``swebench`` module means the extra is installed; it is not by
+    itself sufficient to run the harness, since that also needs a reachable
+    Docker daemon -- so the absent-capability remediation names both.
     """
-    if find_spec(module) is not None:
+    if find_spec("swebench") is not None:
         return DoctorCheck(
-            name=f"capability_{name}",
+            name="capability_swebench",
             status="ok",
-            detail=f"optional capability {name!r} is installed",
+            detail="optional capability swebench is installed",
         )
     return DoctorCheck(
-        name=f"capability_{name}",
+        name="capability_swebench",
         status="warning",
-        detail=f"optional capability {name!r} is a reserved placeholder, no capability today",
-    )
-
-
-def _check_judge_calibration() -> DoctorCheck:
-    # No judge is configured by default in the objective-only v0.1 CLI; an
-    # uncalibrated judge must never gate a release (ADR-0007), so the
-    # correct default state here is an explicit "not configured" warning
-    # rather than a silently skipped check.
-    return DoctorCheck(
-        name="judge_calibration",
-        status="warning",
-        detail="no calibrated judge is configured",
-        remediation="Objective graders gate this release; judges are configured separately.",
+        detail="optional capability swebench is not installed",
+        remediation="Install agentic-evalkit[swebench] and ensure a Docker daemon is running.",
     )
 
 
@@ -159,9 +142,7 @@ def run_doctor_checks(*, offline: bool) -> list[DoctorCheck]:
         )
     else:
         checks.append(asyncio.run(_check_huggingface_health()))
-    checks.append(_check_reserved_placeholder_capability("parquet", "pyarrow"))
-    checks.append(_check_reserved_placeholder_capability("swebench", "swebench"))
-    checks.append(_check_judge_calibration())
+    checks.append(_check_swebench_capability())
     return checks
 
 

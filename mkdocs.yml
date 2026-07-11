@@ -62,6 +62,8 @@ nav:
       - "0016: Cluster-robust intervals for repeated attempts": adr/0016-cluster-robust-intervals-for-repeated-attempts.md
       - "0017: Grade before spilling large outputs": adr/0017-grade-before-spill-large-outputs.md
       - "0018: Redact and bound judge candidate output": adr/0018-redact-and-bound-judge-candidate-output.md
+      - "0019: Retract unshipped entry-point plugin discovery": adr/0019-retract-unshipped-entry-point-plugin-discovery.md
+      - "0020: Wilson lower-bound judge floor and response envelope": adr/0020-wilson-lower-bound-judge-floor-and-response-envelope.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - CLI reference: guides/cli-reference.md

@@ -146,7 +146,7 @@ def safe_text(value: object) -> Text:
     error codes, remediation hints, JSON-derived field values, row data) can
     legitimately contain a ``[...]``-shaped substring -- an error code like
     ``dataset_not_found`` wrapped in brackets, a pip extra like
-    ``agentic-evalkit[parquet]``, or arbitrary upstream text. Passed as a
+    ``agentic-evalkit[swebench]``, or arbitrary upstream text. Passed as a
     raw ``str`` to ``console.print``/``Table.add_row``, Rich parses that
     ``[...]`` as an (unrecognized) style tag and silently drops it from the
     rendered output rather than raising -- corrupting exactly the

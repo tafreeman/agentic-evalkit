@@ -12,7 +12,7 @@ release-gating pass.
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from agentic_evalkit.graders.judge import (
     _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
@@ -20,6 +20,7 @@ from agentic_evalkit.graders.judge import (
     JudgeGrader,
     JudgeRequest,
     JudgeResponse,
+    JudgeResponseStatus,
     _stringify_output,
 )
 from agentic_evalkit.models import (
@@ -62,15 +63,21 @@ def _execution_with_output(output: dict[str, JsonValue]) -> NormalizedExecutionR
 
 
 def _valid_calibration(**overrides: object) -> CalibrationArtifact:
+    # TPR = 1900/2000 = 0.95, TNR = 1940/2000 = 0.97: the same rates the
+    # original n=100 fixture used, scaled to 2000 held-out samples per class so
+    # the 95% Wilson lower bounds (TPR ~0.940, TNR ~0.962) also clear the
+    # project floors (0.85 / 0.95). ADR-0020's insufficient-evidence gate means
+    # a point estimate at the floor is no longer enough on its own to gate; a
+    # gating fixture must now carry enough held-out evidence to prove it.
     defaults: dict[str, object] = {
         "calibration_id": "cal-1",
         "judge_fingerprint": "judge:model:prompt",
         "expires_at": datetime.now(UTC) + timedelta(days=30),
         "calibrated_at": datetime.now(UTC),
-        "true_positive": 95,
-        "true_negative": 97,
-        "false_positive": 3,
-        "false_negative": 5,
+        "true_positive": 1900,
+        "true_negative": 1940,
+        "false_positive": 60,
+        "false_negative": 100,
         "threshold": 0.7,
     }
     defaults.update(overrides)
@@ -88,12 +95,16 @@ class _FakeJudge:
         verdict: str = "pass",
         abstain: bool = False,
         malformed_responses: int = 0,
+        status: JudgeResponseStatus = JudgeResponseStatus.OK,
+        rationale: str | None = None,
     ) -> None:
         self._score = score
         self._fingerprint = fingerprint
         self._verdict = verdict
         self._abstain = abstain
         self._malformed_responses = malformed_responses
+        self._status = status
+        self._rationale = rationale
         self.calls: list[JudgeRequest] = []
 
     @property
@@ -124,6 +135,8 @@ class _FakeJudge:
             score=self._score,
             parse_ok=True,
             abstained=False,
+            status=self._status,
+            rationale=self._rationale,
         )
 
 
@@ -474,3 +487,213 @@ async def test_clean_short_output_adds_no_candidate_output_evidence_keys() -> No
     assert "candidate_output_redacted" not in result.evidence
     assert "candidate_output_truncated" not in result.evidence
     assert "candidate_output_original_chars" not in result.evidence
+
+
+# --- ADR-0020: Wilson floor, status envelope, transport mapping, rationale ---
+
+
+@pytest.mark.asyncio
+async def test_wilson_lower_bound_below_floor_blocks_gating_but_grades_advisorily() -> None:
+    """A 29/30 held-out negative class clears the project TNR *point* floor
+    (0.9667 >= 0.95) but its 95% Wilson lower bound (~0.833) does not: that is
+    insufficient -- not affirmatively bad -- evidence, so it blocks gating
+    while advisory grading continues (ADR-0020). The positive class is sized
+    large enough to clear its own bounds, isolating the TNR Wilson failure.
+    """
+    calibration = _valid_calibration(true_negative=29, false_positive=1)
+    # Point estimates clear both floors, so this is NOT the UNAVAILABLE path;
+    # only the Wilson lower bound falls short.
+    assert calibration.floor_failure_reason() is None
+    judge = _FakeJudge(0.9)
+    grader = JudgeGrader(judge, calibration=calibration, gate=True)
+    result = await grader.grade(_sample(), _execution())
+    assert result.status is GradeStatus.PASS  # advisory verdict from the score
+    assert result.hard_gate is False
+    assert result.judge_calibration_ref is None
+    reason = result.evidence["reason"]
+    assert isinstance(reason, str) and "Wilson lower bound" in reason
+    # Advisory path (a calibration failure is present): no position-bias probe.
+    assert len(judge.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_point_estimate_below_project_floor_stays_unavailable() -> None:
+    """ADR-0020 (a), unchanged from D-1: a *point* estimate below the project
+    floor is affirmatively bad evidence and demotes to UNAVAILABLE outright,
+    distinct from the insufficient-evidence Wilson gate above.
+    """
+    # TNR point = 90/100 = 0.90 < 0.95; the positive class clears its floors.
+    calibration = _valid_calibration(true_negative=90, false_positive=10)
+    grader = JudgeGrader(_FakeJudge(0.9), calibration=calibration, gate=True)
+    result = await grader.grade(_sample(), _execution())
+    assert result.status is GradeStatus.UNAVAILABLE
+    assert result.hard_gate is False
+    reason = result.evidence["reason"]
+    assert isinstance(reason, str) and "project minimum" in reason
+
+
+@pytest.mark.asyncio
+async def test_raising_judge_client_yields_single_error_sample_with_transport_evidence() -> None:
+    """A JudgeClient that raises on the transport call terminates immediately
+    (no retry storm) and yields ONE graded ERROR sample carrying
+    ``judge_transport_error`` evidence -- never a propagated exception that
+    would abort the run (ADR-0020). The raised message is redacted before it is
+    persisted, since an exception can echo target output (ADR-0018).
+    """
+
+    class _RaisingJudge:
+        fingerprint = "judge:model:prompt"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def judge(self, request: JudgeRequest) -> JudgeResponse:
+            self.calls += 1
+            raise RuntimeError(f"connection reset while leaking {_PLANTED_SECRET}")
+
+    judge = _RaisingJudge()
+    grader = JudgeGrader(judge, calibration=None, gate=False)
+    result = await grader.grade(_sample(), _execution())
+
+    assert result.status is GradeStatus.ERROR
+    assert result.hard_gate is False
+    # Terminated on the first transport attempt: no parse-retry storm.
+    assert judge.calls == 1
+    assert result.evidence["judge_transport_error"] == "RuntimeError"
+    message = result.evidence["judge_transport_error_message"]
+    assert isinstance(message, str)
+    assert _PLANTED_SECRET not in message
+    assert "[REDACTED]" in message
+
+
+@pytest.mark.asyncio
+async def test_refused_status_maps_to_abstain() -> None:
+    """A REFUSED response envelope is a non-verdict: it maps to ABSTAIN (never
+    a task FAIL) and never gates (ADR-0020). The reason names the status, and
+    the non-OK short-circuit happens before the position-bias probe.
+    """
+    judge = _FakeJudge(0.9, status=JudgeResponseStatus.REFUSED)
+    grader = JudgeGrader(judge, calibration=_valid_calibration(), gate=True)
+    result = await grader.grade(_sample(), _execution())
+    assert result.status is GradeStatus.ABSTAIN
+    assert result.hard_gate is False
+    reason = result.evidence["reason"]
+    assert isinstance(reason, str) and "refused" in reason
+    assert len(judge.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_status_maps_to_error() -> None:
+    """A TIMEOUT response envelope is operational, not a task outcome: it maps
+    to ERROR (ADR-0008 separation) and never gates (ADR-0020).
+    """
+    judge = _FakeJudge(0.9, status=JudgeResponseStatus.TIMEOUT)
+    grader = JudgeGrader(judge, calibration=_valid_calibration(), gate=True)
+    result = await grader.grade(_sample(), _execution())
+    assert result.status is GradeStatus.ERROR
+    assert result.hard_gate is False
+    reason = result.evidence["reason"]
+    assert isinstance(reason, str) and "timeout" in reason
+
+
+@pytest.mark.asyncio
+async def test_uncalibrated_grade_makes_exactly_one_judge_call() -> None:
+    """The advisory path issues no position-bias probe (ADR-0020): even with
+    ``gate=True``, an uncalibrated judge is called exactly once per sample --
+    the second (probe) call is now reserved for the gating path.
+    """
+    judge = _FakeJudge(0.9)
+    grader = JudgeGrader(judge, calibration=None, gate=True)
+    result = await grader.grade(_sample(), _execution())
+    assert result.hard_gate is False
+    assert len(judge.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_calibrated_fail_sample_still_runs_probe_and_records_reason() -> None:
+    """The gating-path probe is NOT guarded on ``status is PASS`` (ADR-0020): a
+    calibrated judge returning a FAIL verdict is still probed, so a
+    position-bias reason survives into evidence even on a non-PASS sample.
+    Guards against a regression that skips the probe whenever the primary
+    verdict is not a pass.
+    """
+
+    class _FailWithPositionBiasJudge:
+        fingerprint = "judge:model:prompt"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def judge(self, request: JudgeRequest) -> JudgeResponse:
+            self.calls += 1
+            reversed_flag = bool(request.metadata.get("reversed"))
+            # Primary verdict is FAIL; the reversed probe flips to pass, so the
+            # position-bias disagreement is exposed on a non-PASS primary.
+            return JudgeResponse(
+                fingerprint=self.fingerprint,
+                verdict="pass" if reversed_flag else "fail",
+                score=0.9 if reversed_flag else 0.1,
+                parse_ok=True,
+                abstained=False,
+            )
+
+    judge = _FailWithPositionBiasJudge()
+    grader = JudgeGrader(judge, calibration=_valid_calibration(), gate=True)
+    result = await grader.grade(_sample(), _execution())
+
+    assert result.status is GradeStatus.FAIL  # primary score 0.1 < threshold
+    assert result.hard_gate is False
+    # The probe ran (a second call) despite the primary verdict being FAIL.
+    assert judge.calls == 2
+    reason = result.evidence["reason"]
+    assert isinstance(reason, str)
+    assert "position" in reason or "bias" in reason
+
+
+@pytest.mark.asyncio
+async def test_rationale_is_redacted_and_truncated_in_evidence() -> None:
+    """A judge's ``rationale`` is judge output that can echo target-controlled
+    content, so it is redacted then truncated (ADR-0018) before being recorded
+    to ``evidence["judge_rationale"]``; it is never read by gating (ADR-0020).
+    """
+    long_tail = "z" * (_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS + 500)
+    rationale = f"reference matched, incidentally leaking {_PLANTED_SECRET} {long_tail}"
+    judge = _FakeJudge(0.9, rationale=rationale)
+    grader = JudgeGrader(judge, calibration=None, gate=False)
+    result = await grader.grade(_sample(), _execution())
+
+    recorded = result.evidence["judge_rationale"]
+    assert isinstance(recorded, str)
+    assert _PLANTED_SECRET not in recorded
+    assert "[REDACTED]" in recorded
+    assert "truncated" in recorded  # the truncation marker fired
+
+
+@pytest.mark.asyncio
+async def test_clean_ok_response_records_no_rationale_or_transport_evidence() -> None:
+    """The "only add the key when applicable" convention holds for the new
+    ADR-0020 evidence keys: a clean OK response with no rationale adds neither
+    ``judge_rationale`` nor any ``judge_transport_error`` key.
+    """
+    judge = _FakeJudge(0.9)
+    grader = JudgeGrader(judge, calibration=None, gate=False)
+    result = await grader.grade(_sample(), _execution())
+    assert "judge_rationale" not in result.evidence
+    assert "judge_transport_error" not in result.evidence
+    assert "judge_transport_error_message" not in result.evidence
+
+
+def test_calibration_coverage_fields_reject_negative_values() -> None:
+    """The additive ADR-0020 coverage fields are non-negative when supplied.
+
+    ``None`` (the default) means "not recorded" and is allowed; a negative
+    count is rejected at construction, folded into the same validator that
+    already guards the confusion-matrix counts.
+    """
+    with pytest.raises(ValidationError):
+        _valid_calibration(error_count=-1)
+    with pytest.raises(ValidationError):
+        _valid_calibration(abstained_count=-5)
+    # Non-negative values (and None) construct fine.
+    assert _valid_calibration(total_labeled=0).total_labeled == 0
+    assert _valid_calibration().error_count is None

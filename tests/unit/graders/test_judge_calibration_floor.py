@@ -6,18 +6,27 @@ Source: ``_bmad-output/planning-artifacts/epics.md`` (Epic 1, Story 1.1),
 and the 2026-07-04 review decisions D1/D3 recorded in
 ``_bmad-output/implementation-artifacts/code-review-2026-07-04-p0-p1-branch.md``.
 
-The amended demotion matrix this file pins:
+The amended demotion matrix this file pins (extended by ADR-0020's
+insufficient-evidence tier):
 
     affirmatively BAD evidence  -> GradeStatus.UNAVAILABLE outright
         - expired ``expires_at`` (pre-existing semantics)
-        - TNR < 0.95 or TPR < 0.85 with statistically meaningful counts
-          (the ratified project floor; a lax caller ``threshold`` can
-          never gate below it)
+        - *point* TNR < 0.95 or TPR < 0.85 with statistically meaningful
+          counts (the ratified project floor; a lax caller ``threshold``
+          can never gate below it)
     ABSENT evidence             -> advisory only, can never gate
         - no ``calibrated_at`` (age unprovable)
         - ``calibrated_at`` older than 90 days
-    boundary values             -> exactly-at-floor still gates
-        - TNR == 0.95, TPR == 0.85, age == 90 days
+    INSUFFICIENT evidence       -> advisory only, can never gate (ADR-0020)
+        - point TNR/TPR at or above the floor but the 95% Wilson *lower
+          bound* below it: the held-out sample is too small to prove the
+          rate clears the floor
+    boundary values
+        - point exactly at floor is NOT affirmatively bad (never
+          UNAVAILABLE: the point floor stays inclusive), but under
+          ADR-0020 it can no longer gate at small n -- no 95% Wilson
+          lower bound sits at its own point estimate
+        - age == 90 days is inclusive and still permits gating
 """
 
 from __future__ import annotations
@@ -87,20 +96,24 @@ class _FakeJudge:
 
 
 def _artifact(**overrides: object) -> CalibrationArtifact:
-    """Build a calibration that clears its OWN ``threshold`` and the >=30/>=30
-    held-out sample floor, so only the *project* floor is under test. Callers
-    override the confusion-matrix counts to push TPR/TNR above or below the
-    ratified minimums.
+    """Build a calibration that clears its OWN ``threshold``, the >=30/>=30
+    held-out sample floor, AND the ADR-0020 Wilson lower-bound floor, so each
+    test isolates exactly the condition it overrides. Defaults use n=2000 per
+    class (TPR=0.95 point, lower bound ~0.94 >= 0.85; TNR=0.97 point, lower
+    bound ~0.96 >= 0.95) -- the same sufficient-evidence scale as
+    ``test_judge.py``'s ``_valid_calibration``, because at the old n=100 scale
+    even a 0.99 point rate has a Wilson lower bound (~0.945) below the 0.95
+    TNR floor and nothing could gate.
     """
     defaults: dict[str, object] = {
         "calibration_id": "cal-1",
         "judge_fingerprint": "judge:model:prompt",
         "expires_at": datetime.now(UTC) + timedelta(days=30),
         "calibrated_at": datetime.now(UTC),
-        "true_positive": 99,
-        "true_negative": 99,
-        "false_positive": 1,
-        "false_negative": 1,
+        "true_positive": 1900,
+        "true_negative": 1940,
+        "false_positive": 60,
+        "false_negative": 100,
         "threshold": 0.7,  # deliberately lax: the artifact clears its own bar
     }
     defaults.update(overrides)
@@ -204,27 +217,45 @@ def test_usability_seam_itself_reports_age_failures() -> None:
     assert fresh.usability_failure_reason(now=now) is None
 
 
-# --- boundary values: exactly-at-floor still gates ---------------------------
+# --- boundary values: point-at-floor is inclusive but cannot gate at small n -
 
 
-async def test_tnr_exactly_at_floor_still_gates() -> None:
-    # TNR = 95/100 == 0.95 exactly: the floor is inclusive (>= 0.95 gates).
+async def test_tnr_point_exactly_at_floor_blocks_gating_as_insufficient_evidence() -> None:
+    # TNR = 95/100 == 0.95 exactly. The *point* floor stays inclusive (>= is
+    # not <, so this is never affirmatively-bad UNAVAILABLE evidence), but
+    # under ADR-0020 the 95% Wilson lower bound (~0.888 at n=100) sits below
+    # the 0.95 floor: insufficient evidence blocks gating while advisory
+    # grading continues. TPR companion counts (99/1) keep the TPR lower bound
+    # (~0.945) clear of its 0.85 floor so only the TNR condition is under test.
     calibration = _artifact(true_negative=95, false_positive=5, true_positive=99, false_negative=1)
     assert calibration.true_negative_rate == pytest.approx(0.95)
+    assert calibration.floor_failure_reason() is None  # point floor: inclusive
     grader = JudgeGrader(_FakeJudge(), calibration=calibration, gate=True)
     result = await grader.grade(_sample(), _execution())
-    assert result.status is GradeStatus.PASS
-    assert result.hard_gate is True
+    assert result.status is GradeStatus.PASS  # advisory verdict, not UNAVAILABLE
+    assert result.hard_gate is False
+    reason = result.evidence.get("reason")
+    assert isinstance(reason, str) and "TNR 95% Wilson lower bound" in reason
+    assert "insufficient held-out evidence to gate" in reason
 
 
-async def test_tpr_exactly_at_floor_still_gates() -> None:
-    # TPR = 85/100 == 0.85 exactly: inclusive floor.
-    calibration = _artifact(true_positive=85, false_negative=15, true_negative=99, false_positive=1)
+async def test_tpr_point_exactly_at_floor_blocks_gating_as_insufficient_evidence() -> None:
+    # TPR = 85/100 == 0.85 exactly: same taxonomy as the TNR case above --
+    # inclusive point floor (not UNAVAILABLE), but the Wilson lower bound
+    # (~0.767 at n=100) is below 0.85, so gating is blocked as insufficient.
+    # TNR companion counts here must clear BOTH the point floor and the Wilson
+    # floor, which n=100 cannot (0.99 point -> ~0.945 lower bound < 0.95), so
+    # the negative class uses the sufficient-evidence default scale.
+    calibration = _artifact(true_positive=85, false_negative=15)
     assert calibration.true_positive_rate == pytest.approx(0.85)
+    assert calibration.floor_failure_reason() is None  # point floor: inclusive
     grader = JudgeGrader(_FakeJudge(), calibration=calibration, gate=True)
     result = await grader.grade(_sample(), _execution())
-    assert result.status is GradeStatus.PASS
-    assert result.hard_gate is True
+    assert result.status is GradeStatus.PASS  # advisory verdict, not UNAVAILABLE
+    assert result.hard_gate is False
+    reason = result.evidence.get("reason")
+    assert isinstance(reason, str) and "TPR 95% Wilson lower bound" in reason
+    assert "insufficient held-out evidence to gate" in reason
 
 
 def test_age_exactly_at_max_still_permits_gating() -> None:
@@ -295,10 +326,12 @@ def test_project_floor_constants_match_ratified_values() -> None:
 
 
 async def test_calibration_clearing_the_floor_still_gates() -> None:
-    # Guard against over-restriction: a calibration above BOTH floors
-    # (TNR=0.97, TPR=0.90) and fresh must still be allowed to gate, so the new
-    # floor does not silently disable otherwise-valid calibrations.
-    calibration = _artifact(true_positive=90, false_negative=10, true_negative=97, false_positive=3)
+    # Guard against over-restriction: a calibration above BOTH floors with
+    # sufficient held-out evidence (n=2000 per class: TNR=0.97 point / ~0.96
+    # Wilson lower bound; TPR=0.90 point / ~0.886 lower bound) and fresh must
+    # still be allowed to gate, so the ADR-0020 floor does not silently
+    # disable every calibration.
+    calibration = _artifact(true_positive=1800, false_negative=200)
     assert calibration.true_negative_rate == pytest.approx(0.97)
     assert calibration.true_positive_rate == pytest.approx(0.90)
     grader = JudgeGrader(_FakeJudge(), calibration=calibration, gate=True)

@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `JudgeResponse` carries an additive status envelope
+  (`JudgeResponseStatus`: `ok` / `refused` / `rate_limited` / `timeout` /
+  `error`) plus an optional `rationale`. A non-`ok` status is a non-verdict,
+  graded before any score is read: `refused` becomes `GradeStatus.ABSTAIN`,
+  the operational statuses become `GradeStatus.ERROR` — never a task FAIL.
+  See [ADR-0020](docs/adr/0020-wilson-lower-bound-judge-floor-and-response-envelope.md).
+- Judge calibrations must now clear the ratified TNR/TPR floors with their
+  95% Wilson *lower bound*, not just the point estimate: a point rate at the
+  floor on a small held-out sample (for example 29/30) blocks gating as
+  insufficient evidence while advisory grading continues. Additive
+  `CalibrationArtifact` coverage fields (`total_labeled`, `abstained_count`,
+  `error_count`) record the labeled denominator. Supersedes ADR-0007's
+  point-estimate-only floor (ADR-0020).
+- A judge's `rationale` is persisted to
+  `GradeResult.evidence["judge_rationale"]`, redacted and truncated under the
+  same policy ADR-0018 applies to `candidate_output`; gating logic never
+  reads it.
+- ADR-0019 (retract unshipped entry-point plugin discovery) and ADR-0020
+  (Wilson lower-bound judge floor, response envelope, gating-scoped probe).
+
+### Changed
+
+- A `JudgeClient` that raises (for example a network transport error) now
+  yields a single `GradeStatus.ERROR` sample carrying a redacted
+  `evidence["judge_transport_error"]` instead of aborting the entire run,
+  and a transport failure does not consume the parse-retry budget
+  (ADR-0020, ADR-0008).
+- The reversed-order position-bias probe is issued only on the gating path
+  (`gate=True` with a usable calibration); advisory and uncalibrated judge
+  grading now makes exactly one judge call per sample instead of two
+  (ADR-0020).
+- `doctor`'s `capability_swebench` check is now a real capability probe:
+  `ok` when the `swebench` module is importable, otherwise a warning with
+  actionable remediation (`pip install 'agentic-evalkit[swebench]'` plus the
+  Docker daemon requirement, per ADR-0014).
+- `docs/guides/providers.md` and `DatasetCatalog`'s docstrings now document
+  the real provider extension path — constructor injection, as
+  `cli.datasets.build_catalog` does — instead of the retracted entry-point
+  discovery mechanism.
+
+### Removed
+
+- The unwired `agentic_evalkit.plugins` module (`load_plugins()`
+  entry-point discovery), its test suite, and its fixtures: zero production
+  callers existed since v0.1, and the one prospective consumer integrates
+  through the library API. `PluginCompatibilityError` and the `api_version`
+  convention remain in use. See
+  [ADR-0019](docs/adr/0019-retract-unshipped-entry-point-plugin-discovery.md).
+- The never-populated `parquet` and `judges` optional-dependency extras
+  (`parquet` was never scheduled; the `judges` provider integration is
+  deferred). ADR-0009 amended in place.
+- `doctor`'s placeholder `capability_parquet` check and static
+  `judge_calibration` stub.
+
+### Fixed
+
+- Documentation no longer overclaims shipped capability: the README and docs
+  landing page now say "calibration-gated judge evidence" and state that no
+  LLM provider client ships (the packaged reference judge is deterministic
+  and permanently advisory); the SWE-bench guide no longer calls the landed
+  Docker executor "unimplemented"; the quickstart's `doctor` walkthrough
+  matches the real checks.
+
 ### Security
 
 - `JudgeGrader` now redacts secret-shaped substrings (the same patterns
