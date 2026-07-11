@@ -24,9 +24,9 @@ ADR_DIR = Path("docs/adr")
 #: committed them with these exact numeric prefixes), plus 0010 (offline
 #: dataset contract), 0011 (offline resolution cache), 0012
 #: (grounded-citation probe), 0013 (contamination metadata and canaries),
-#: 0014 (SWE-bench Docker harness executor), and 0015 (environment/code
-#: fingerprints gate comparability). Each prefix matches exactly one file
-#: under docs/adr/.
+#: 0014 (SWE-bench Docker harness executor), 0015 (environment/code
+#: fingerprints gate comparability), and 0016 (cluster-robust intervals for
+#: repeated attempts). Each prefix matches exactly one file under docs/adr/.
 REQUIRED_ADR_PREFIXES = (
     "0001",
     "0002",
@@ -43,6 +43,7 @@ REQUIRED_ADR_PREFIXES = (
     "0013",
     "0014",
     "0015",
+    "0016",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
@@ -187,6 +188,7 @@ NUMBER_WORDS = {
     "thirteen": 13,
     "fourteen": 14,
     "fifteen": 15,
+    "sixteen": 16,
 }
 
 

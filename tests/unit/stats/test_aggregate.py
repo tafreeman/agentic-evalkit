@@ -29,8 +29,10 @@ from agentic_evalkit.models import (
     SamplingPolicy,
 )
 from agentic_evalkit.stats.aggregate import (
+    IntervalMethod,
     aggregate_run,
     build_report_aggregates,
+    clustered_interval,
     pass_at_k_by_sample,
     wilson_interval,
 )
@@ -472,3 +474,266 @@ def test_build_report_aggregates_result_is_json_serializable() -> None:
     # matters because this is exactly what a Reporter.write(aggregates=...)
     # call serializes to disk.
     json.dumps(build_report_aggregates(run))
+
+
+# --- clustered_interval: cluster-robust bounds for repeated attempts (ADR-0016)
+
+
+def test_clustered_interval_matches_inline_closed_form() -> None:
+    from statistics import NormalDist, fmean, stdev
+
+    # In-range cluster means so the bounds are not clamped: this exercises the
+    # actual mean +/- z * stdev / sqrt(m) formula, recomputed inline from the
+    # statistics module (never a hardcoded decimal).
+    cluster_means = [0.4, 0.5, 0.6]
+    lower, upper = clustered_interval(cluster_means=cluster_means)
+    assert lower is not None
+    assert upper is not None
+    z = NormalDist().inv_cdf(0.975)
+    center = fmean(cluster_means)
+    spread = z * (stdev(cluster_means) / math.sqrt(len(cluster_means)))
+    assert lower == pytest.approx(center - spread)
+    assert upper == pytest.approx(center + spread)
+    assert 0.0 <= lower <= upper <= 1.0
+
+
+def test_clustered_interval_single_cluster_returns_none_bounds() -> None:
+    # A single cluster has undefined between-cluster variance -- (None, None),
+    # mirroring test_wilson_interval_empty_denominator_returns_none_bounds.
+    assert clustered_interval(cluster_means=[0.5]) == (None, None)
+
+
+def test_clustered_interval_clamps_bounds_to_unit_range() -> None:
+    from statistics import NormalDist, fmean, stdev
+
+    cluster_means = [0.0, 0.5, 1.0]
+    z = NormalDist().inv_cdf(0.975)
+    center = fmean(cluster_means)
+    spread = z * (stdev(cluster_means) / math.sqrt(len(cluster_means)))
+    # Sanity: the raw Wald bounds really do fall outside [0, 1] here, so the
+    # clamp is doing real work rather than being a no-op.
+    assert center - spread < 0.0
+    assert center + spread > 1.0
+    assert clustered_interval(cluster_means=cluster_means) == (0.0, 1.0)
+
+
+# --- aggregate_run: interval-method selection and score_estimate (ADR-0016) --
+
+
+def test_aggregate_run_single_attempt_pass_rate_interval_method_is_wilson() -> None:
+    # attempts == 1 (the default _run): the pass rate is the unchanged Wilson
+    # interval over the flat per-observation count, now labeled WILSON. The
+    # bounds must be byte-identical to a direct wilson_interval call.
+    samples = (
+        SampleResult(
+            sample=_sample("s0"),
+            execution=_execution("s0", status=ExecutionStatus.COMPLETED),
+            grade=_grade("s0", status=GradeStatus.PASS, score=1.0),
+        ),
+        SampleResult(
+            sample=_sample("s1"),
+            execution=_execution("s1", status=ExecutionStatus.COMPLETED),
+            grade=_grade("s1", status=GradeStatus.FAIL, score=0.0),
+        ),
+    )
+    stats = aggregate_run(_run(samples))
+    assert stats.pass_rate.interval_method is IntervalMethod.WILSON
+    expected_lower, expected_upper = wilson_interval(successes=1, total=2)
+    assert stats.pass_rate.lower_bound == expected_lower
+    assert stats.pass_rate.upper_bound == expected_upper
+
+
+def test_aggregate_run_repeated_attempts_uses_clustered_interval() -> None:
+    from statistics import NormalDist, fmean, stdev
+
+    # Three sample_ids, 2 attempts each: 0/2, 1/2, 2/2 passes -> per-sample_id
+    # pass proportions [0.0, 0.5, 1.0]. The pooled numerator/denominator/value
+    # stay exact (3 of 6), but the bounds come from clustered_interval and the
+    # method is stamped CLUSTER_ROBUST.
+    samples = (
+        _repeated_attempts("s0", statuses=(GradeStatus.FAIL, GradeStatus.FAIL))
+        + _repeated_attempts("s1", statuses=(GradeStatus.PASS, GradeStatus.FAIL))
+        + _repeated_attempts("s2", statuses=(GradeStatus.PASS, GradeStatus.PASS))
+    )
+    stats = aggregate_run(_run_with_attempts(samples, attempts=2))
+
+    assert stats.pass_rate.interval_method is IntervalMethod.CLUSTER_ROBUST
+    assert stats.pass_rate.numerator == 3
+    assert stats.pass_rate.denominator == 6
+    assert stats.pass_rate.value == pytest.approx(3 / 6)
+
+    proportions = [0.0, 0.5, 1.0]
+    z = NormalDist().inv_cdf(0.975)
+    center = fmean(proportions)
+    spread = z * (stdev(proportions) / math.sqrt(len(proportions)))
+    assert stats.pass_rate.lower_bound == pytest.approx(max(0.0, center - spread))
+    assert stats.pass_rate.upper_bound == pytest.approx(min(1.0, center + spread))
+
+
+def test_aggregate_run_single_distinct_sample_id_multi_attempt_returns_none_bounds() -> None:
+    # One distinct sample_id but attempts > 1 -> a single cluster -> undefined
+    # between-cluster variance -> (None, None) bounds, while the exact pooled
+    # counts remain reportable.
+    samples = _repeated_attempts("s0", statuses=(GradeStatus.PASS, GradeStatus.FAIL))
+    stats = aggregate_run(_run_with_attempts(samples, attempts=2))
+    assert stats.pass_rate.interval_method is IntervalMethod.CLUSTER_ROBUST
+    assert stats.pass_rate.numerator == 1
+    assert stats.pass_rate.denominator == 2
+    assert stats.pass_rate.value == pytest.approx(1 / 2)
+    assert stats.pass_rate.lower_bound is None
+    assert stats.pass_rate.upper_bound is None
+
+
+def test_aggregate_run_score_estimate_is_none_with_fewer_than_two_scores() -> None:
+    # A single defined score has a mean but no spread: score_estimate is None
+    # even though score_mean itself is defined (companion to
+    # test_aggregate_run_score_mean_is_none_with_no_defined_scores).
+    samples = (
+        SampleResult(
+            sample=_sample("s0"),
+            execution=_execution("s0", status=ExecutionStatus.COMPLETED),
+            grade=_grade("s0", status=GradeStatus.PASS, score=1.0),
+        ),
+    )
+    stats = aggregate_run(_run(samples))
+    assert stats.score_mean == pytest.approx(1.0)
+    assert stats.score_count == 1
+    assert stats.score_estimate is None
+
+
+def test_aggregate_run_score_estimate_flat_mean_matches_score_mean_and_is_unclamped() -> None:
+    from statistics import NormalDist, stdev
+
+    # Flat (attempts == 1) regime over three defined scores. The estimate's mean
+    # must equal score_mean exactly (no drift); because a score mean is not a
+    # probability, its normal-approx bounds are NOT clamped to [0, 1] (here they
+    # genuinely fall below 0 and above 1); the flat SEM carries no named
+    # binary-rate method, so interval_method is None.
+    scores = (1.0, 0.5, 0.0)
+    samples = tuple(
+        SampleResult(
+            sample=_sample(f"s{i}"),
+            execution=_execution(f"s{i}", status=ExecutionStatus.COMPLETED),
+            grade=_grade(
+                f"s{i}",
+                status=GradeStatus.PASS if value == 1.0 else GradeStatus.PARTIAL,
+                score=value,
+            ),
+        )
+        for i, value in enumerate(scores)
+    )
+    stats = aggregate_run(_run(samples))
+    estimate = stats.score_estimate
+    assert estimate is not None
+    assert stats.score_mean is not None
+    assert estimate.mean == stats.score_mean
+    assert estimate.n == 3
+    assert estimate.interval_method is None
+
+    z = NormalDist().inv_cdf(0.975)
+    sem = stdev(scores) / math.sqrt(len(scores))
+    assert estimate.sem == pytest.approx(sem)
+    assert estimate.lower_bound == pytest.approx(stats.score_mean - z * sem)
+    assert estimate.upper_bound == pytest.approx(stats.score_mean + z * sem)
+    assert estimate.lower_bound < 0.0
+    assert estimate.upper_bound > 1.0
+
+
+def test_aggregate_run_score_estimate_cluster_robust_with_repeated_attempts() -> None:
+    from statistics import NormalDist, stdev
+
+    # attempts > 1 with >= 2 distinct sample_ids carrying scores: score_estimate
+    # is cluster-robust (SEM over per-sample_id mean scores), its mean still the
+    # exact pooled score_mean.
+    samples = (
+        _repeated_attempts("s0", statuses=(GradeStatus.FAIL, GradeStatus.FAIL))
+        + _repeated_attempts("s1", statuses=(GradeStatus.PASS, GradeStatus.FAIL))
+        + _repeated_attempts("s2", statuses=(GradeStatus.PASS, GradeStatus.PASS))
+    )
+    stats = aggregate_run(_run_with_attempts(samples, attempts=2))
+    estimate = stats.score_estimate
+    assert estimate is not None
+    assert stats.score_mean is not None
+    assert estimate.interval_method is IntervalMethod.CLUSTER_ROBUST
+    assert estimate.mean == stats.score_mean
+    assert estimate.n == 6  # six defined scores across the three clusters
+
+    # _repeated_attempts scores PASS as 1.0 and everything else 0.0, so the
+    # per-sample_id mean scores are [0.0, 0.5, 1.0].
+    cluster_mean_scores = [0.0, 0.5, 1.0]
+    z = NormalDist().inv_cdf(0.975)
+    sem = stdev(cluster_mean_scores) / math.sqrt(len(cluster_mean_scores))
+    assert estimate.sem == pytest.approx(sem)
+    assert estimate.lower_bound == pytest.approx(stats.score_mean - z * sem)
+    assert estimate.upper_bound == pytest.approx(stats.score_mean + z * sem)
+
+
+def test_aggregate_run_score_estimate_single_cluster_multi_attempt_has_none_spread() -> None:
+    # attempts > 1 but a single distinct sample_id: two defined scores exist (so
+    # score_estimate has a defined mean), but there is only one cluster mean, so
+    # the cluster-robust spread is undefined -> sem/bounds None.
+    samples = _repeated_attempts("s0", statuses=(GradeStatus.PASS, GradeStatus.FAIL))
+    stats = aggregate_run(_run_with_attempts(samples, attempts=2))
+    estimate = stats.score_estimate
+    assert estimate is not None
+    assert estimate.mean == stats.score_mean
+    assert estimate.n == 2
+    assert estimate.interval_method is IntervalMethod.CLUSTER_ROBUST
+    assert estimate.sem is None
+    assert estimate.lower_bound is None
+    assert estimate.upper_bound is None
+
+
+def test_aggregate_run_cluster_mean_scores_skips_missing_scores_and_empty_clusters() -> None:
+    from statistics import NormalDist, stdev
+
+    # s0: one scored PASS + one errored attempt (no grade) -> cluster mean over
+    # [1.0] only. s1: both attempts errored, no grades -> contributes no cluster
+    # mean (never a fabricated 0.0). s2: one scored FAIL (0.0) + one errored ->
+    # cluster mean over [0.0]. Exercises the "attempt without a score" and
+    # "cluster without any score" skip paths of the cluster-robust regime.
+    samples = (
+        SampleResult(
+            sample=_sample("s0"),
+            execution=_execution("s0", attempt=1, status=ExecutionStatus.COMPLETED),
+            grade=_grade("s0", status=GradeStatus.PASS, score=1.0),
+        ),
+        SampleResult(
+            sample=_sample("s0"),
+            execution=_execution("s0", attempt=2, status=ExecutionStatus.ERROR),
+            grade=None,
+        ),
+        SampleResult(
+            sample=_sample("s1"),
+            execution=_execution("s1", attempt=1, status=ExecutionStatus.ERROR),
+            grade=None,
+        ),
+        SampleResult(
+            sample=_sample("s1"),
+            execution=_execution("s1", attempt=2, status=ExecutionStatus.ERROR),
+            grade=None,
+        ),
+        SampleResult(
+            sample=_sample("s2"),
+            execution=_execution("s2", attempt=1, status=ExecutionStatus.COMPLETED),
+            grade=_grade("s2", status=GradeStatus.FAIL, score=0.0),
+        ),
+        SampleResult(
+            sample=_sample("s2"),
+            execution=_execution("s2", attempt=2, status=ExecutionStatus.ERROR),
+            grade=None,
+        ),
+    )
+    stats = aggregate_run(_run_with_attempts(samples, attempts=2))
+    estimate = stats.score_estimate
+    assert estimate is not None
+    assert stats.score_mean is not None
+    assert estimate.interval_method is IntervalMethod.CLUSTER_ROBUST
+    assert estimate.n == 2  # only s0's 1.0 and s2's 0.0 are defined scores
+
+    cluster_mean_scores = [1.0, 0.0]  # s0 -> 1.0, s2 -> 0.0; s1 contributes none
+    z = NormalDist().inv_cdf(0.975)
+    sem = stdev(cluster_mean_scores) / math.sqrt(len(cluster_mean_scores))
+    assert estimate.sem == pytest.approx(sem)
+    assert estimate.lower_bound == pytest.approx(stats.score_mean - z * sem)
+    assert estimate.upper_bound == pytest.approx(stats.score_mean + z * sem)
