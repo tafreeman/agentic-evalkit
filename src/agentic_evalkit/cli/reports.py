@@ -150,6 +150,16 @@ def compare(
         typer.Option("--bootstrap-samples", help="Bootstrap resamples (100-10000)."),
     ] = 1000,
     seed: Annotated[int, typer.Option("--seed", help="Seed for the deterministic bootstrap.")] = 0,
+    allow_cross_environment: Annotated[
+        bool,
+        typer.Option(
+            "--allow-cross-environment",
+            help=(
+                "Waive an environment_fingerprint/code_fingerprint mismatch instead of "
+                "rejecting the comparison (ADR-0015); every other provenance field still gates."
+            ),
+        ),
+    ] = False,
     format_: Annotated[
         str, typer.Option("--format", help="Output format: table or json.")
     ] = "table",
@@ -160,18 +170,32 @@ def compare(
     Incompatible runs (different dataset revision, adapter, grader, target or
     sampling policy) are an invalid *choice of inputs*, so they exit 2 with
     every mismatch listed -- not a provider/infrastructure error.
+    ``--allow-cross-environment`` narrowly waives an environment_fingerprint
+    and/or code_fingerprint mismatch (ADR-0015); the waived field(s) are
+    reported back, not silently dropped.
     """
 
     def _action() -> ComparisonResult:
         _validate_bootstrap_samples(bootstrap_samples)
         left_run = load_run_result(left)
         right_run = load_run_result(right)
-        return compare_runs(left_run, right_run, bootstrap_samples=bootstrap_samples, seed=seed)
+        return compare_runs(
+            left_run,
+            right_run,
+            bootstrap_samples=bootstrap_samples,
+            seed=seed,
+            allow_cross_environment=allow_cross_environment,
+        )
 
     comparison = run_cli_command(_action, debug=debug)
     if format_ == "json":
         print_output(comparison.model_dump(mode="json"), format_=format_)
         return
+    waived_segment = (
+        f" waived={','.join(comparison.waived_provenance_fields)}"
+        if comparison.waived_provenance_fields
+        else ""
+    )
     console.print(
         safe_text(
             f"estimate={comparison.estimate:.4f} "
@@ -179,6 +203,7 @@ def compare(
             f"97.5th={comparison.upper_percentile:.4f} "
             f"paired={comparison.paired_count} "
             f"seed={comparison.seed}"
+            f"{waived_segment}"
         ),
         soft_wrap=True,
     )
