@@ -102,7 +102,7 @@ def test_user_facing_file_set_is_nonempty() -> None:
     """
     paths = _resolve_user_facing_paths()
     assert len(paths) >= 10, (
-        f"expected at least 10 user-facing files (README + docs/index.md + 6 guides + "
+        f"expected at least 10 user-facing files (README + docs/index.md + guides + "
         f"examples/http_agent content), found {len(paths)}: {paths}"
     )
 
@@ -113,6 +113,7 @@ def test_user_facing_file_set_is_nonempty() -> None:
         "README.md",
         "docs/index.md",
         "docs/guides/quickstart.md",
+        "docs/guides/cli-reference.md",
         "docs/guides/providers.md",
         "docs/guides/graders.md",
         "docs/guides/targets.md",

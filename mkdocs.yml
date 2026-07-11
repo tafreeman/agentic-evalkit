@@ -59,6 +59,7 @@ nav:
       - "0014: SWE-bench Docker harness executor": adr/0014-swebench-docker-harness-executor.md
   - Guides:
       - Quickstart: guides/quickstart.md
+      - CLI reference: guides/cli-reference.md
       - Providers: guides/providers.md
       - Graders: guides/graders.md
       - Targets: guides/targets.md

@@ -73,6 +73,7 @@ implementation.
 ## Documentation
 
 - [Quickstart](docs/guides/quickstart.md) — install to first report
+- [CLI reference](docs/guides/cli-reference.md) — commands, options, offline behavior, and exit codes
 - [Providers](docs/guides/providers.md) — local formats, Hugging Face auth, cache/offline, plugins
 - [Graders](docs/guides/graders.md) — objective-first order, hard gates, calibrated judges
 - [Targets](docs/guides/targets.md) — callable, subprocess, and HTTP execution targets
