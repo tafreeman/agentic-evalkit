@@ -7,9 +7,9 @@ when the capability is genuinely absent -- it does NOT skip for a missing
 fixture, so a scheduled/dispatch run actually validates the harness rather
 than passing vacuously.
 
-The design §7.1 fidelity gate: a known-resolved (gold) patch and an
-intentionally-corrupted patch pass through the *identical* real ``execute()``
-code path and yield ``resolved=True`` / ``resolved=False`` respectively. The
+The design §7.1 fidelity gate: a known-resolved (gold) patch and a
+non-fixing no-op patch pass through the *identical* real ``execute()`` code
+path and yield ``resolved=True`` / ``resolved=False`` respectively. The
 gold patch is the dataset's own reference solution (the ``patch`` field of
 each SWE-bench Verified row), so no external fixture file is needed:
 
@@ -87,13 +87,29 @@ async def test_gold_patch_resolves_through_the_real_execute_path() -> None:
     assert result.resolved is True
 
 
+#: A patch that always applies cleanly (it only creates a new, unrelated
+#: file) and therefore cannot fix the instance's failing tests. Corrupting
+#: the gold patch is NOT a reliable negative control: patch(1) skips
+#: trailing garbage, so a syntactically-mangled suffix on a valid patch
+#: still applies its valid prefix and RESOLVES (observed live, 2026-07-11
+#: run of this workflow). A clean-applying no-op lands deterministically in
+#: the "tests still fail" branch of authoritative non-resolution instead.
+_NON_FIXING_PATCH = """\
+diff --git a/agentic_evalkit_fidelity_probe.txt b/agentic_evalkit_fidelity_probe.txt
+new file mode 100644
+--- /dev/null
++++ b/agentic_evalkit_fidelity_probe.txt
+@@ -0,0 +1 @@
++non-fixing patch: applies cleanly, resolves nothing (design 7.1 negative control)
+"""
+
+
 @pytest.mark.asyncio
-async def test_corrupted_patch_does_not_resolve_through_the_same_path() -> None:
+async def test_non_fixing_patch_does_not_resolve_through_the_same_path() -> None:
     _require_capability()
-    instance_id, gold_patch = _gold_instance()
-    corrupted = gold_patch + "\n@@ this hunk does not apply @@\n"
-    result = await SweBenchDockerHarnessExecutor().execute(_request(instance_id, corrupted))
-    # Either the patch fails to apply or the tests still fail -- both are an
-    # authoritative non-resolution, never an ERROR masquerading as one.
+    instance_id, _ = _gold_instance()
+    result = await SweBenchDockerHarnessExecutor().execute(_request(instance_id, _NON_FIXING_PATCH))
+    # The patch applies but fixes nothing, so FAIL_TO_PASS tests still fail:
+    # an authoritative non-resolution, never an ERROR masquerading as one.
     assert result.status is HarnessStatus.COMPLETED
     assert result.resolved is False
