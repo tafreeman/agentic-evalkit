@@ -62,7 +62,7 @@ requires-dist = [
     { name = "swebench", marker = "extra == 'swebench'", specifier = ">=4.1,<5" },
     { name = "typer", specifier = ">=0.12,<1" },
 ]
-provides-extras = ["parquet", "judges", "swebench"]
+provides-extras = ["swebench"]
 
 [package.metadata.requires-dev]
 dev = [

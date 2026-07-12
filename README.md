@@ -1,6 +1,6 @@
 # agentic-evalkit
 
-`agentic-evalkit` is a standalone evaluation toolkit for agentic systems. It combines dynamic dataset discovery, typed evaluation contracts, benchmark-valid grading, calibrated judges, statistical reporting, and a developer-friendly Python API and CLI.
+`agentic-evalkit` is a standalone evaluation toolkit for agentic systems. It combines dynamic dataset discovery, typed evaluation contracts, benchmark-valid grading, calibration-gated judge evidence, statistical reporting, and a developer-friendly Python API and CLI. The judge-evidence piece is the full calibration-gating machinery — `CalibrationArtifact`, TNR/TPR floors, expiry, a position-bias probe — real and tested, but it ships no LLM provider client: callers supply their own `JudgeClient`, and the packaged reference judge is deterministic and permanently advisory, structurally unable to gate a release.
 
 `agentic-evalkit` separates datasets, grading, and reporting from the system under test through callable/subprocess/HTTP targets, and objective checks gate before judges. Existing evaluation frameworks couple dataset access, grading, and reporting to specific agent platforms or model-provider SDKs; this package's neutral `ExecutionTarget` protocol makes any callable, subprocess, or HTTP system evaluable without framework lock-in.
 
@@ -65,18 +65,22 @@ artifact-store wiring this snippet omits for brevity.
 
 ## Optional extras
 
-The `parquet`, `judges`, and `swebench` extras (e.g.
-`pip install agentic-evalkit[swebench]`) are currently reserved placeholders
-per [ADR-0009](docs/adr/0009-optional-dependencies-and-plugins.md): installing
-them adds nothing today. They reserve the capability names that
-`agentic-evalkit doctor` reports on, ahead of their own future
-implementation.
+The `swebench` extra (`pip install agentic-evalkit[swebench]`, pulling in
+`swebench>=4.1,<5` and `docker>=7.1,<8`) is the only extra `agentic-evalkit`
+declares. It backs `SweBenchDockerHarnessExecutor`, the container-based
+SWE-bench Verified harness executor landed in
+[ADR-0014](docs/adr/0014-swebench-docker-harness-executor.md): with the
+extra installed and a reachable Docker daemon, `swebench-harness@1` grades a
+real resolved/unresolved verdict instead of reporting `unavailable`. The
+base install still ships without Docker or any model-provider SDK — see
+[ADR-0009](docs/adr/0009-optional-dependencies-and-plugins.md) for the
+extras policy.
 
 ## Documentation
 
 - [Quickstart](docs/guides/quickstart.md) — install to first report
 - [CLI reference](docs/guides/cli-reference.md) — commands, options, offline behavior, and exit codes
-- [Providers](docs/guides/providers.md) — local formats, Hugging Face auth, cache/offline, plugins
+- [Providers](docs/guides/providers.md) — local formats, Hugging Face auth, cache/offline
 - [Graders](docs/guides/graders.md) — objective-first order, hard gates, calibrated judges
 - [Targets](docs/guides/targets.md) — callable, subprocess, and HTTP execution targets
 - [SWE-bench](docs/guides/swebench.md) — preview/prediction workflow and the harness boundary

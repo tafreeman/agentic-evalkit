@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 from agentic_evalkit.cli import app
 from agentic_evalkit.cli import datasets as cli_datasets
+from agentic_evalkit.cli import doctor as cli_doctor
 from agentic_evalkit.cli import runs as cli_runs
 from agentic_evalkit.cli.runs import build_target_for_document, write_canonical_report
 from agentic_evalkit.datasets.base import ProviderHealth
@@ -278,24 +279,41 @@ def test_doctor_runs_offline_and_reports_checks() -> None:
     assert all("status" in entry for entry in payload)
 
 
-def test_doctor_reserved_placeholder_extras_have_no_install_remediation() -> None:
-    """AEK-02: ``parquet``/``swebench`` back empty extras (ADR-0009).
-
-    ``pip install 'agentic-evalkit[parquet|swebench]'`` satisfies nothing
-    today, so ``doctor`` must never print that install command for either
-    -- only an informational, reserved-placeholder detail.
-    """
+def test_doctor_swebench_capability_reports_ok_when_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present ``swebench`` module reports ok with no remediation (ADR-0009/ADR-0014)."""
+    monkeypatch.setattr(cli_doctor, "find_spec", lambda name: object())
     result = runner.invoke(app, ["doctor", "--offline", "--format", "json"])
     assert result.exit_code in (0, 3)
     payload = json.loads(result.stdout)
-    placeholder_names = {"capability_parquet", "capability_swebench"}
-    placeholder_checks = [entry for entry in payload if entry["name"] in placeholder_names]
-    assert {entry["name"] for entry in placeholder_checks} == placeholder_names
-    for entry in placeholder_checks:
-        remediation = entry.get("remediation")
-        assert remediation is None or "pip install" not in remediation
-        if entry["status"] != "ok":
-            assert "reserved placeholder" in entry["detail"]
+    entries = [entry for entry in payload if entry["name"] == "capability_swebench"]
+    assert len(entries) == 1
+    assert entries[0]["status"] == "ok"
+    assert entries[0]["detail"] == "optional capability swebench is installed"
+    assert entries[0]["remediation"] is None
+
+
+def test_doctor_swebench_capability_warns_with_install_remediation_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absent ``swebench`` module names the extra and the Docker daemon (ADR-0009/ADR-0014).
+
+    ``pip install 'agentic-evalkit[swebench]'`` is a real, actionable fix
+    once the extra is populated (ADR-0014), unlike the reserved-placeholder
+    extras this repo removed 2026-07-11 -- so the warning names it.
+    """
+    monkeypatch.setattr(cli_doctor, "find_spec", lambda name: None)
+    result = runner.invoke(app, ["doctor", "--offline", "--format", "json"])
+    assert result.exit_code in (0, 3)
+    payload = json.loads(result.stdout)
+    entries = [entry for entry in payload if entry["name"] == "capability_swebench"]
+    assert len(entries) == 1
+    assert entries[0]["status"] == "warning"
+    remediation = entries[0]["remediation"]
+    assert remediation is not None
+    assert "agentic-evalkit[swebench]" in remediation
+    assert "docker" in remediation.lower()
 
 
 def test_datasets_curated_table_format_lists_both_presets() -> None:

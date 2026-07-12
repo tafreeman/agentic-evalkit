@@ -23,6 +23,7 @@ from agentic_evalkit.graders.judge import (
     JudgeGrader,
     JudgeRequest,
     JudgeResponse,
+    JudgeResponseStatus,
 )
 from agentic_evalkit.graders.rubric import Rubric, RubricCriterion
 
@@ -40,6 +41,7 @@ __all__ = [
     "JudgeGrader",
     "JudgeRequest",
     "JudgeResponse",
+    "JudgeResponseStatus",
     "Rubric",
     "RubricBoundJudgeClient",
     "RubricCriterion",

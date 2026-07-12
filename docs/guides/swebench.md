@@ -5,7 +5,8 @@ curated `swe-bench-verified` preset: real-world GitHub issue resolution
 tasks. This release ships everything needed to discover, preview, project,
 and export official predictions for this dataset without Docker or a code
 checkout. Authoritative resolved/unresolved grading requires the optional
-`swebench` harness capability, which is a follow-on implementation.
+`swebench` harness capability: install `agentic-evalkit[swebench]` and run
+a reachable Docker daemon (see below).
 
 ## What works today
 
@@ -61,11 +62,13 @@ reports the designated `FAIL_TO_PASS` tests now passing and the
 `PASS_TO_PASS` tests still passing. No amount of similarity scoring, LLM
 judging, or heuristic patch inspection can honestly make that claim.
 
-Because of that, this release's harness boundary is explicit and typed:
-calling the (currently unimplemented) harness executor for this preset
-returns a typed `unavailable` `HarnessResult` naming the missing
-capability, never a fabricated pass/fail. The design's own words: *"Generic
-rubric or similarity scoring must never be labeled `SWE-bench resolved`."*
+Because of that, the harness boundary is explicit and typed everywhere a
+capability might be missing. `UnavailableHarnessExecutor`
+(`agentic_evalkit.benchmarks.harness`) is the zero-extra fallback: a
+deterministic, production-safe `HarnessExecutor` that always returns a
+typed `unavailable` `HarnessResult` naming the missing capability, never a
+fabricated pass/fail. The design's own words: *"Generic rubric or
+similarity scoring must never be labeled `SWE-bench resolved`."*
 
 ```python
 from agentic_evalkit.benchmarks.harness import UnavailableHarnessExecutor
@@ -76,10 +79,18 @@ assert result.status == "unavailable"
 assert "agentic-evalkit[swebench]" in result.message
 ```
 
-The `swe-bench-verified` preset's `readiness` is `prediction_export`
-(not `runnable`) precisely to signal this: everything up to producing an
-official prediction works out of the box, and the last authoritative step
-is deliberately gated behind a capability that is not yet installed.
+`swebench-harness@1`, the grader this preset actually registers, is not
+wired to that generic fallback: it uses the landed
+`SweBenchDockerHarnessExecutor` (see the next section), which enforces the
+identical discipline through its own preflight check — capability absent
+still returns the same typed `unavailable`, and capability present earns a
+real `resolved` verdict instead.
+
+The `swe-bench-verified` preset's `readiness` is `prediction_export` (not
+`runnable`) precisely because that capability is optional: everything up to
+producing an official prediction works out of the box, and the last
+authoritative step depends on the `swebench` extra and a reachable Docker
+daemon, neither of which is present by default.
 
 ## Authoritative grading: the Docker executor
 

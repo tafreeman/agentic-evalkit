@@ -23,18 +23,17 @@ agentic-evalkit doctor
 ```
 
 `doctor` checks the Python version, cache read/write permissions, Hugging
-Face Dataset Viewer reachability, optional-capability availability
-(`parquet`, `swebench`), and judge calibration readiness. Each check reports
-`ok`, `warning`, or `error` with a remediation string. In a fresh
-environment you should see:
+Face Dataset Viewer reachability, and optional-capability availability
+(`swebench`). Each check reports `ok`, `warning`, or `error` with a
+remediation string. In a fresh environment you should see:
 
 - `python_version`: ok
 - `cache_read_write`: ok
 - `huggingface_health`: ok (Dataset Viewer reachable)
-- `capability_parquet` / `capability_swebench`: warning (not installed —
-  expected; these are optional extras)
-- `judge_calibration`: warning (objective graders gate this release by
-  default; see [the graders guide](graders.md) for judge calibration)
+- `capability_swebench`: warning (not installed — expected; install
+  `agentic-evalkit[swebench]` plus a running Docker daemon to enable
+  authoritative SWE-bench grading, per
+  [ADR-0014](../adr/0014-swebench-docker-harness-executor.md))
 
 `doctor` exits nonzero only if a check reports `error`.
 

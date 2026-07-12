@@ -160,38 +160,42 @@ matters, warm the shared cache in a single process first, then fan out
 read-only. For concurrent writes, prefer one `AGENTIC_EVALKIT_CACHE_DIR` per
 worker.
 
-### The `parquet` extra
+## Writing a custom provider
 
-For datasets or workflows where the Dataset Viewer's row-by-row pagination
-is insufficient — for example, bulk local processing of an entire split —
-install the `parquet` extra:
+`agentic-evalkit` does not discover third-party providers automatically —
+there is no entry-point scanning ([ADR-0019](../adr/0019-retract-unshipped-entry-point-plugin-discovery.md)
+retracted the discovery routine an earlier design had planned). Instead, a
+custom provider is a plain object that structurally satisfies the async
+`DatasetProvider` protocol (`search`, `resolve`, `preview`, `iter_records`,
+`healthcheck`, plus the `api_version` and `requires_network` attributes).
+The caller constructs it and adds it to the `providers` mapping passed into
+`DatasetCatalog`:
 
-```bash
-pip install 'agentic-evalkit[parquet]'
+```python
+from agentic_evalkit.datasets.catalog import DatasetCatalog
+
+catalog = DatasetCatalog(
+    providers={"my-provider": my_provider_instance},
+)
 ```
 
-This is the explicit, opt-in fallback for the (uncommon) case where
-Dataset Viewer/Hub paths alone cannot serve what you need; it does not
-change any provider contract, and the base `huggingface` provider works
-without it for every curated preset in this release.
+This mirrors exactly how the CLI itself builds a catalog — see
+`build_catalog()` in `src/agentic_evalkit/cli/datasets.py`, which
+constructs the built-in `local` and `huggingface` providers directly and
+passes them into `DatasetCatalog` the same way, so all three providers are
+routable by name from one catalog.
 
-## Writing a provider plugin
+A provider name can never silently shadow a name reserved for a built-in
+provider (`local` and `huggingface` by default, via the
+`builtin_provider_names` constructor argument): a collision raises a typed
+`PluginCompatibilityError` naming the offending provider. A caller that
+constructs the genuine `local`/`huggingface` providers itself, rather than
+supplying a third-party replacement for them — as `build_catalog()` does —
+passes `builtin_provider_names=()` to opt out of that check for its own
+two built-ins.
 
-Third-party providers register through the versioned Python entry-point
-group `agentic_evalkit.providers.v1`. A plugin object must expose
-`api_version = "1"`; `load_plugins()` verifies this at discovery time and
-raises a typed `PluginCompatibilityError` — naming the entry point and the
-original exception class — on a version mismatch, an import failure, or a
-duplicate plugin name. Plugin failures are always reported, never silently
-skipped, and a plugin cannot silently replace a built-in provider name
-(`local` or `huggingface`) — that also raises `PluginCompatibilityError`.
-
-```toml
-# pyproject.toml of a third-party plugin package
-[project.entry-points."agentic_evalkit.providers.v1"]
-my-provider = "my_package.providers:my_provider_instance"
-```
-
-See [ADR-0003](../adr/0003-provider-plugins-and-hugging-face-baseline.md)
-and [ADR-0009](../adr/0009-optional-dependencies-and-plugins.md) for the
-full plugin compatibility policy.
+See [ADR-0019](../adr/0019-retract-unshipped-entry-point-plugin-discovery.md)
+for why entry-point discovery was retracted, and
+[ADR-0003](../adr/0003-provider-plugins-and-hugging-face-baseline.md) and
+[ADR-0009](../adr/0009-optional-dependencies-and-plugins.md) for the
+original plugin-compatibility policy this narrows.
