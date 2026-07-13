@@ -1,14 +1,22 @@
 # agentic-evalkit
 
-`agentic-evalkit` is a standalone evaluation toolkit for agentic systems. It combines dynamic dataset discovery, typed evaluation contracts, benchmark-valid grading, calibration-gated judge evidence, statistical reporting, and a developer-friendly Python API and CLI. The judge-evidence piece is the full calibration-gating machinery — `CalibrationArtifact`, TNR/TPR floors, expiry, a position-bias probe — real and tested, but it ships no LLM provider client: callers supply their own `JudgeClient`, and the packaged reference judge is deterministic and permanently advisory, structurally unable to gate a release.
+`agentic-evalkit` helps teams answer a practical question: did an AI agent
+perform well enough, and what evidence supports that result?
 
-`agentic-evalkit` separates datasets, grading, and reporting from the system under test through callable/subprocess/HTTP targets, and objective checks gate before judges. Existing evaluation frameworks couple dataset access, grading, and reporting to specific agent platforms or model-provider SDKs; this package's neutral `ExecutionTarget` protocol makes any callable, subprocess, or HTTP system evaluable without framework lock-in.
+Use it from the command line or Python to run repeatable evaluations, apply
+objective checks, compare results, and generate reports for review. It can
+evaluate Python code, command-line programs, and HTTP services without tying
+them to a specific AI framework.
 
-**Why not promptfoo, Inspect, DeepEval, Braintrust, or LangSmith?** Those tools solve the eval *workflow* problem well, and for prompt-level CI assertions or red-teaming you should prefer them. This package solves the eval *validity* problem — calibration-gated judges, provenance-gated comparison, typed operational-vs-task failure separation, authoritative-verifier boundaries, and contamination tripwires — none of which they document as first-class concepts. The verified comparison and recorded build-vs-buy decision live in [docs/prior-art.md](docs/prior-art.md).
+Objective checks run before optional model-based judging. The package includes
+tested support for calibrated judge evidence while leaving model-provider
+selection to the caller. The built-in reference judge is deterministic and
+advisory only; it cannot approve a release.
 
-**Coexistence note:** legacy evaluation code may remain in host repositories. This package neither imports nor migrates it — integration happens only through the public `ExecutionTarget` protocol described above.
-
-See [the architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md) for the full design, or jump straight to the [quickstart guide](docs/guides/quickstart.md).
+Start with the [quickstart guide](docs/guides/quickstart.md). For design
+boundaries and comparisons with other tools, see the
+[architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md)
+and [prior-art review](docs/prior-art.md).
 
 ## Identity
 
