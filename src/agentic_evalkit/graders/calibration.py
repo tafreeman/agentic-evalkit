@@ -1,14 +1,15 @@
-"""Calibration evidence for a judge configuration (design §9, ADR-0007, ADR-0020).
+"""The proof that an AI judge is trustworthy enough to be relied on (design §9, ADR-0007, ADR-0020).
 
-Split out of ``graders.judge`` so that module stays under this project's
-800-line file ceiling after ADR-0020 added the Wilson lower-bound floor and
-response envelope; ``CalibrationArtifact`` is fully self-contained (a
-``FrozenModel`` plus pure validators/properties/failure-reason methods) and
-has no dependency on anything else in ``judge.py``. ``judge.py`` re-exports
-every public name below, so ``from agentic_evalkit.graders.judge import
-CalibrationArtifact`` (used throughout this package and by external callers)
-and module-qualified access (``judge.PROJECT_MIN_TNR``, used in tests)
-continue to resolve unchanged.
+This used to live inside ``graders.judge``, but that file grew past this
+project's 800-line-per-file limit once ADR-0020 added more checks to it. So
+this class was moved here instead -- it doesn't depend on anything else in
+``judge.py``, it's just a data model (a ``FrozenModel``) plus some plain
+methods that answer "is this calibration still good enough to trust?"
+``judge.py`` re-exports everything below under its own name, so existing
+code that writes ``from agentic_evalkit.graders.judge import
+CalibrationArtifact``, or that reaches for ``judge.PROJECT_MIN_TNR``
+directly, keeps working exactly as before -- nothing outside this package
+needs to change because of the move.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -18,44 +19,65 @@ from pydantic import model_validator
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.stats import wilson_interval
 
-# Minimum held-out positive/negative label counts a calibration must have
-# before it is trusted to gate a release (plan Task 10 KEY REQUIREMENTS).
+# A calibration needs at least this many real "right" answers and this many
+# real "wrong" answers tested by hand before we trust it enough to gate a
+# release on.
 _MINIMUM_CLASS_SAMPLE_COUNT = 30
 
-# Ratified project calibration floor (decision D-1, 2026-07-04). A caller-
-# supplied ``CalibrationArtifact.threshold`` may be laxer than these, but it
-# can never lower the bar below the project minimums: a calibration must clear
-# ALL of these before it may hard-gate a release, independent of its own
-# ``threshold``.
+# The project's own minimum bar for judge accuracy (decision D-1, made
+# 2026-07-04). A caller can configure `CalibrationArtifact.threshold` to be
+# stricter, but never looser than this -- every calibration has to clear
+# ALL of these numbers before it's allowed to gate a release, no matter what
+# its own `threshold` says.
 PROJECT_MIN_TNR = 0.95
 PROJECT_MIN_TPR = 0.85
 PROJECT_MAX_CALIBRATION_AGE_DAYS = 90
 
 
 class CalibrationArtifact(FrozenModel):
-    """Held-out human-labeled calibration evidence for one judge configuration.
+    """The record of how well this judge did against real, human-checked answers.
+
+    The idea: before a run, someone (or some process) fed the judge a batch
+    of examples where we already know the right answer, and recorded how
+    often the judge got it right. This class is that record.
 
     Attributes:
-        calibration_id: Stable identifier for this calibration run.
-        judge_fingerprint: Fingerprint of the exact model+prompt combination
-            this calibration is valid for. A live judge with a different
-            fingerprint can never use this artifact to gate.
-        expires_at: Timestamp after which this calibration is stale and
-            must not gate, regardless of how strong its historical TPR/TNR
-            were.
-        calibrated_at: Timestamp the held-out labels were collected. Optional
-            and additive (schema_version stays "1"); when absent the artifact
-            cannot prove it is within the ratified maximum age and is treated
-            as unusable for gating (decision D-1).
-        true_positive/true_negative/false_positive/false_negative: Confusion
-            matrix counts from held-out human-labeled samples.
-        threshold: Minimum TPR *and* TNR this calibration must clear.
-        total_labeled/abstained_count/error_count: Additive, optional coverage
-            evidence (ADR-0020) recording how many held-out samples were labeled
-            in total and how many the judge abstained on or errored on during
-            calibration. Recorded for auditability only -- no gate reads them
-            yet; each defaults to ``None`` so ``schema_version`` stays ``"1"``,
-            and non-negative when present.
+        calibration_id: A stable name for this particular calibration run,
+            so you can point back to it later.
+        judge_fingerprint: A hash identifying the exact model + prompt this
+            calibration was measured against. If today's judge has a
+            different fingerprint, this calibration doesn't apply to it and
+            can't be used to gate anything.
+        expires_at: Once we're past this timestamp, this calibration is too
+            old to gate a release, no matter how good its numbers were.
+        calibrated_at: When these numbers were actually measured. This is
+            optional (leaving it out doesn't break older calibration
+            records, since ``schema_version`` stays ``"1"``) -- but if it's
+            missing, we can't prove the calibration isn't stale, so it's
+            treated as unusable for gating (decision D-1).
+        true_positive: How many times, out of the held-out test examples,
+            the judge correctly said "this is a good answer" when it really
+            was good.
+        true_negative: How many times the judge correctly said "this is a
+            bad answer" when it really was bad.
+        false_positive: How many times the judge said "good" when the
+            answer was actually bad.
+        false_negative: How many times the judge said "bad" when the answer
+            was actually good.
+        threshold: The judge's own configured pass bar for these
+            true-positive/true-negative rates -- see ``PROJECT_MIN_TNR``/
+            ``PROJECT_MIN_TPR`` above for the project-wide minimum this
+            can't go below.
+        total_labeled: How many held-out examples were tested in total, for
+            the record. Optional (added later by ADR-0020, so leaving it out
+            doesn't break older calibration records); nothing currently
+            checks it before gating.
+        abstained_count: Of those examples, how many the judge declined to
+            answer during calibration. Same optional/record-only status as
+            ``total_labeled``.
+        error_count: Of those examples, how many the judge errored out on
+            during calibration. Same optional/record-only status as
+            ``total_labeled``.
     """
 
     calibration_id: str
@@ -81,9 +103,10 @@ class CalibrationArtifact(FrozenModel):
         ):
             if getattr(self, field_name) < 0:
                 raise ValueError(f"{field_name} must be non-negative")
-        # Additive ADR-0020 coverage fields: non-negative when supplied, but
-        # optional (``None`` means "not recorded"), so they are checked only
-        # when present rather than folded into the required-count loop above.
+        # These three fields were added later (ADR-0020) and are optional --
+        # `None` just means "nobody recorded this" -- so we only check them
+        # for being non-negative when a value is actually present, instead
+        # of lumping them in with the always-required counts above.
         for optional_field_name in ("total_labeled", "abstained_count", "error_count"):
             optional_value = getattr(self, optional_field_name)
             if optional_value is not None and optional_value < 0:
@@ -94,14 +117,18 @@ class CalibrationArtifact(FrozenModel):
 
     @model_validator(mode="after")
     def _validate_calibrated_at(self) -> "CalibrationArtifact":
-        """Reject timestamps that cannot support the age floor or expiry check.
+        """Reject any timestamp we wouldn't be able to safely compare against the clock later.
 
-        A naive ``expires_at`` or ``calibrated_at`` would make the age/expiry
-        arithmetic against the UTC clock raise at grade time -- and a crash is
-        not a demotion (D-1 is fail-closed, never fail-crashed). ``expires_at``
-        is required on every artifact (unlike optional ``calibrated_at``), so
-        it is validated unconditionally. A calibration taken after its own
-        expiry is self-contradictory data and is rejected outright.
+        A timestamp with no timezone attached (a "naive" datetime) would
+        crash when we later try to compare it against the current UTC time
+        -- and crashing is not an acceptable way to say "this calibration
+        isn't good enough" (D-1's whole point is to fail safely, not to
+        fail with a stack trace). ``expires_at`` is required on every
+        calibration, so we always check it; ``calibrated_at`` is optional,
+        so we only check its timezone when it's actually present. We also
+        reject a calibration that claims to have been measured *after* its
+        own expiry date -- that's contradictory data, not a real
+        calibration.
         """
         if self.expires_at.tzinfo is None:
             raise ValueError("expires_at must be timezone-aware")
@@ -137,14 +164,15 @@ class CalibrationArtifact(FrozenModel):
         return self.expires_at <= (now or datetime.now(UTC))
 
     def age_failure_reason(self, *, now: datetime | None = None) -> str | None:
-        """Return why this calibration's age disqualifies it from gating, or
-        ``None`` if it is dated and within the ratified maximum (decision D-1).
+        """Return why this calibration is too old to gate on, or ``None`` if its age is fine.
 
-        An artifact with no ``calibrated_at`` cannot prove its age, so it can
-        never gate -- a laxer caller cannot bypass the age floor by simply
-        omitting the timestamp. Age failures block gating only; advisory
-        grading continues (D-1 as amended 2026-07-04: absent evidence is not
-        the same as affirmatively bad evidence).
+        If we don't know when this calibration was measured
+        (``calibrated_at`` is missing), we can't prove it's recent enough,
+        so it can't gate -- someone can't dodge the age requirement just by
+        leaving the timestamp out. Either way, an age problem only blocks
+        gating; the judge can still give an advisory grade (D-1, as amended
+        2026-07-04: not knowing is treated differently from knowing it's
+        bad).
         """
         if self.calibrated_at is None:
             return (
@@ -153,12 +181,14 @@ class CalibrationArtifact(FrozenModel):
             )
         effective_now = now or datetime.now(UTC)
         if self.calibrated_at > effective_now:
-            # A future-dated calibration is self-contradictory evidence, not
-            # merely "fresh": ``effective_now - calibrated_at`` would be
-            # negative and never exceed the max-age bound below, silently
-            # treating an impossible timestamp as trustworthy. Construction
-            # only rejects calibrated_at *after* expires_at, which does not
-            # catch a future calibrated_at still comfortably before expiry.
+            # A calibration dated in the future is bad data, not just "very
+            # fresh" -- if we let this through, `effective_now -
+            # calibrated_at` would come out negative, which would never
+            # trip the "too old" check below, so an impossible timestamp
+            # would silently look trustworthy. The earlier validator only
+            # rejects a `calibrated_at` that's after `expires_at`; a future
+            # date that's still comfortably before expiry slips past that
+            # check, so we catch it here instead.
             return (
                 f"calibration {self.calibration_id!r} calibrated_at "
                 f"{self.calibrated_at.isoformat()} is in the future"
@@ -171,16 +201,17 @@ class CalibrationArtifact(FrozenModel):
         return None
 
     def floor_failure_reason(self) -> str | None:
-        """Return why this calibration sits below the ratified project floor
-        (decision D-1), or ``None`` when it clears the floor or its rates are
-        not yet statistically meaningful.
+        """Return why this calibration's accuracy is below our project-wide minimum, or ``None``.
 
-        A sub-floor calibration is affirmatively bad evidence: the judge's
-        result demotes to ``GradeStatus.UNAVAILABLE`` outright, so a lax
-        caller-supplied ``threshold`` can never gate below the project
-        minimums. With fewer than the minimum held-out samples per class the
-        rates are noise, not evidence, so the floor defers to
-        ``usability_failure_reason``'s insufficient-sample report.
+        ``None`` covers two different "it's fine" cases: the accuracy is
+        actually at or above our minimum, or there simply aren't enough
+        held-out samples yet to say either way (with too few samples, the
+        number itself is just noise -- that gets reported separately by
+        ``usability_failure_reason`` instead). But if there ARE enough
+        samples and the accuracy still falls short, that's solid proof the
+        judge isn't good enough, and the result gets marked
+        ``GradeStatus.UNAVAILABLE`` outright -- nobody can configure a
+        looser ``threshold`` to get around this project-wide floor.
         """
         if (
             self.positive_count < _MINIMUM_CLASS_SAMPLE_COUNT
@@ -196,21 +227,27 @@ class CalibrationArtifact(FrozenModel):
         return None
 
     def wilson_lower_bound_failure_reason(self) -> str | None:
-        """Return why the 95% Wilson lower bound of TNR/TPR fails the floor, or
-        ``None`` when both bounds clear it (ADR-0020, superseding ADR-0007).
+        """Check whether the accuracy numbers hold up even in a conservative worst case.
 
-        Distinct from :meth:`floor_failure_reason`: a *point* estimate below the
-        floor is affirmatively bad evidence (UNAVAILABLE); a point estimate that
-        clears the floor while its 95% Wilson *lower* bound does not is merely
-        *insufficient* evidence -- the held-out sample is too small to prove the
-        rate is above the floor. Insufficient evidence blocks gating only, so
-        this reason is surfaced through :meth:`usability_failure_reason`
-        alongside the age check while advisory grading continues. The
-        :func:`~agentic_evalkit.stats.wilson_interval` helper is imported rather
-        than reimplemented (unlike ``runner._redact``, which cannot import its
-        sibling's private helper): ``wilson_interval`` is public
-        (``agentic_evalkit.stats.__all__``) and ``stats`` imports nothing from
-        ``graders``, so there is no import cycle.
+        This is a different, stricter check than :meth:`floor_failure_reason`.
+        That method asks "is the raw accuracy number itself below our
+        minimum?" -- and if so, that's solid proof of a bad judge
+        (``UNAVAILABLE``). This method instead asks: "even if the raw number
+        looks fine, is it based on so few examples that we can't really
+        trust it?" We answer that using a "Wilson lower bound" -- a
+        standard statistics technique that, given a rate and a sample size,
+        computes a conservative floor for what the true rate could plausibly
+        be. If even that conservative floor clears our minimum, we're
+        confident; if it doesn't, the judge might still be fine, we just
+        don't have enough evidence yet. That "not enough evidence" case
+        blocks gating, but -- unlike an outright-bad accuracy number -- it
+        doesn't mark the result ``UNAVAILABLE`` (see
+        :meth:`usability_failure_reason`, where this check runs alongside
+        the age check, ADR-0020, updating ADR-0007's original
+        raw-accuracy-only version of this check). We import the actual math
+        for this (:func:`~agentic_evalkit.stats.wilson_interval`) instead of
+        rewriting it here, since it's already public and importing it
+        doesn't create a circular import.
         """
         tnr_lower, _ = wilson_interval(successes=self.true_negative, total=self.negative_count)
         if tnr_lower is not None and tnr_lower < PROJECT_MIN_TNR:
@@ -227,9 +264,7 @@ class CalibrationArtifact(FrozenModel):
         return None
 
     def usability_failure_reason(self, *, now: datetime | None = None) -> str | None:
-        """Return a human-readable reason this calibration cannot gate, or
-        ``None`` if it clears every usability bar (design §9 / plan Task 10).
-        """
+        """Return why this calibration can't gate a release, or ``None`` if it can."""
         if self.is_expired(now=now):
             return f"calibration {self.calibration_id!r} expired at {self.expires_at.isoformat()}"
         if self.positive_count < _MINIMUM_CLASS_SAMPLE_COUNT:
@@ -248,17 +283,18 @@ class CalibrationArtifact(FrozenModel):
         tnr = self.true_negative_rate
         if tnr is None or tnr < self.threshold:
             return f"calibration TNR={tnr} is below threshold={self.threshold}"
-        # The age floor lives here, in the documented "can this calibration
-        # gate" seam, so no caller can bypass it (D-1 as amended: undated or
-        # stale artifacts never gate but may still grade advisorily). The
-        # PROJECT_MIN_TNR/TPR *point* floor is deliberately NOT here -- a
-        # sub-floor point estimate is unusable outright and is enforced as
-        # UNAVAILABLE via ``floor_failure_reason`` in ``JudgeGrader.grade``.
-        # The Wilson *lower-bound* floor, by contrast, is insufficient-evidence
-        # (not affirmatively-bad) and blocks gating only, exactly like the age
-        # check, so it belongs here alongside it (ADR-0020). Age is reported
-        # first: a stale or undated artifact fails for a reason independent of
-        # the confusion-matrix counts.
+        # The age check lives here, in this one place everyone has to go
+        # through to gate a release, so nobody can accidentally skip it
+        # (D-1, as amended: a missing or stale calibration date blocks
+        # gating but the judge can still give an advisory grade). The raw
+        # PROJECT_MIN_TNR/TPR accuracy check deliberately does NOT live here
+        # -- a genuinely bad accuracy number is worse than "not enough
+        # evidence," so it's handled separately, as an outright UNAVAILABLE,
+        # over in `JudgeGrader.grade`. The Wilson-lower-bound check, on the
+        # other hand, IS "not enough evidence" rather than "proof it's bad,"
+        # exactly like the age check, so it belongs right here next to it
+        # (ADR-0020). We check age first, since a stale or missing date is a
+        # separate problem from anything about the actual accuracy numbers.
         age_reason = self.age_failure_reason(now=now)
         if age_reason is not None:
             return age_reason

@@ -13,16 +13,21 @@ tested support for calibrated judge evidence while leaving model-provider
 selection to the caller. The built-in reference judge is deterministic and
 advisory only; it cannot approve a release.
 
-**Why not promptfoo, Inspect, DeepEval, Braintrust, or LangSmith?** Those
-tools are strong at the eval *workflow* — prompt-level CI checks,
-red-teaming, experiment tracking — and are usually the better choice for
-that job. This package solves a narrower problem instead: eval *validity*,
-making a result structurally hard to overstate through calibration-gated
-judges, provenance-gated comparisons, a strict split between operational
-and task failures, authoritative-verifier boundaries, and
-dataset-contamination tripwires — none of which those tools document as
-first-class concepts. See the [prior-art review](docs/prior-art.md) for the
-verified comparison and the build-vs-buy decision behind it.
+**Why not just use promptfoo, Inspect, DeepEval, Braintrust, or LangSmith?**
+Those tools are great at the *workflow* side of evals — running lots of
+prompts, wiring checks into CI, tracking experiments over time. If that's
+your job, use one of them. This package is built for a narrower, stricter
+problem: making sure you can actually trust the result you get. Concretely,
+that means an AI judge has to prove it agrees with real human-labeled
+answers before it's allowed to approve anything; two runs are only
+compared once we can prove they ran under matching conditions; a bug in
+your own code is never confused with the AI simply getting the answer
+wrong; a fuzzy AI opinion can never override a hard requirement like "the
+code must compile"; and test questions that leaked into the AI's training
+data get caught before they inflate a score. The tools above don't treat
+these as first-class problems. See [docs/prior-art.md](docs/prior-art.md)
+for the full comparison and the reasoning behind building this instead of
+adopting one of them.
 
 Start with the [quickstart guide](docs/guides/quickstart.md). For design
 boundaries and comparisons with other tools, see the

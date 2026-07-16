@@ -46,21 +46,29 @@ distortions:
   in `evidence`, containing `"expired"` for the expiry case), never a pass.
   Uncalibrated judges cannot gate releases. Judge parse failures are retried
   at most twice (three attempts total) before abstaining.
-- **As amended 2026-07-04 (D-1) and 2026-07-11 (ADR-0020):** the claim
-  above that any calibration failure yields `GradeStatus.UNAVAILABLE`,
-  never a pass, is superseded. D-1 (2026-07-04) split failure into two
-  tiers: affirmatively bad evidence (expired, sub-floor point estimate)
-  still demotes to `GradeStatus.UNAVAILABLE`; absent evidence (an undated
-  or stale `calibrated_at`) blocks gating but grades advisorily, never
-  `UNAVAILABLE`. ADR-0020 (2026-07-11) added a further tier, distinct from
-  bad evidence: a point estimate that clears the floor while its 95%
-  Wilson lower bound does not is insufficient evidence, which also blocks
-  gating without demoting to `UNAVAILABLE`. See ADR-0020 for the full
-  current outcome taxonomy. ADR-0020 also scoped the position-bias probe
-  to the gating path only (`gate=True` with usable calibration), so the
-  Consequences section's claim that the probe costs a second judge call
-  per graded sample now holds only on the gating path — the
-  advisory/uncalibrated path makes exactly one judge call per sample.
+- **Update (2026-07-04, decision D-1, and 2026-07-11, ADR-0020): the rule
+  above is out of date.** It used to say that *any* calibration problem
+  marks the result `GradeStatus.UNAVAILABLE`, full stop. That's no longer
+  quite right, because "calibration problem" turned out to mean three
+  different things that deserve different treatment:
+  - **We have solid proof the judge is unreliable** — its calibration has
+    expired, or its measured accuracy is genuinely below our minimum bar.
+    This is still `GradeStatus.UNAVAILABLE` (decision D-1).
+  - **We don't have proof either way** — nobody recorded when the judge
+    was last checked, or that record is too old to trust. This is *not*
+    `UNAVAILABLE`; the judge can still give an advisory grade, it just
+    isn't allowed to approve a release (D-1).
+  - **The accuracy number looks fine, but the sample was too small to
+    trust it** — added by ADR-0020. Same outcome as the case above:
+    doesn't approve a release, but doesn't get marked `UNAVAILABLE`
+    either.
+
+  See ADR-0020 for the complete breakdown. ADR-0020 also changed how
+  often we run the check described below that catches a judge whose
+  verdict flips depending on which order it sees two answers in: it now
+  only runs when the judge's result could actually approve a release, so
+  a judge that's only ever giving an advisory opinion gets asked once per
+  question instead of twice.
 - **Abstention is first-class.** A grader that cannot responsibly score
   abstains as a distinct outcome, separate from pass and fail.
 

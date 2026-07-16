@@ -343,7 +343,7 @@ def _bootstrap_percentiles(
     if not deltas:
         return (0.0, 0.0)
 
-    rng = random.Random(seed)  # noqa: S311 -- seeded for reproducible bootstrap resampling
+    rng = random.Random(seed)  # noqa: S311 -- seeded so this gives the same result every run, not random
     n = len(deltas)
     resample_means: list[float] = []
     for _ in range(bootstrap_samples):
