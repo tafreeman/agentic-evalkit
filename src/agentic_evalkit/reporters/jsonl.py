@@ -9,12 +9,16 @@ provenance and summary fields as the canonical JSON envelope.
 from __future__ import annotations
 
 import json as jsonlib
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from pydantic import JsonValue
-
-from agentic_evalkit.models import EvalRunResult
 from agentic_evalkit.reporters.json import _atomic_write_text, _default_generated_at, _provenance
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pydantic import JsonValue
+
+    from agentic_evalkit.models import EvalRunResult
 
 
 def _header_record(run: EvalRunResult) -> dict[str, JsonValue]:

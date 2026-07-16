@@ -98,9 +98,9 @@ class CallableTarget:
     async def _invoke(self, sample: EvalSample, *, timeout_seconds: float | None) -> CallableResult:
         async with asyncio.timeout(timeout_seconds):
             if inspect.iscoroutinefunction(self._func):
-                async_func = cast(AsyncCallable, self._func)
+                async_func = cast("AsyncCallable", self._func)
                 return await async_func(sample.input)
-            sync_func = cast(SyncCallable, self._func)
+            sync_func = cast("SyncCallable", self._func)
             return await asyncio.to_thread(sync_func, sample.input)
 
     def _result(

@@ -14,11 +14,12 @@ import os
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
-from pydantic import JsonValue
+if TYPE_CHECKING:
+    from pydantic import JsonValue
 
-from agentic_evalkit.models import EvalRunResult
+    from agentic_evalkit.models import EvalRunResult
 
 
 def _provenance(run: EvalRunResult) -> dict[str, JsonValue]:

@@ -23,11 +23,8 @@ from __future__ import annotations
 
 import json
 import socket
-from collections.abc import AsyncIterator, Mapping
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import pytest
 from typer.testing import CliRunner
 
 from agentic_evalkit.cli import app
@@ -47,6 +44,12 @@ from agentic_evalkit.models import (
     SearchPage,
     SourceRecord,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping
+    from pathlib import Path
+
+    import pytest
 
 runner = CliRunner()
 

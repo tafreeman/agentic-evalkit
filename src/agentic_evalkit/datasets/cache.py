@@ -27,11 +27,13 @@ import json
 import os
 import threading
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
 from agentic_evalkit.models.base import FrozenModel
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _PAYLOAD_FILENAME = "payload.bin"
 _MANIFEST_FILENAME = "manifest.json"

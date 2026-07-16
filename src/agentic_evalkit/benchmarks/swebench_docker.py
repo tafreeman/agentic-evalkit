@@ -37,12 +37,15 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
 
 from agentic_evalkit.benchmarks.harness import HarnessRequest, HarnessResult, HarnessStatus
 from agentic_evalkit.benchmarks.swebench import SweBenchVerifiedAdapter
-from agentic_evalkit.models import EvalSample, NormalizedExecutionResult
+
+if TYPE_CHECKING:
+    from agentic_evalkit.models import EvalSample, NormalizedExecutionResult
 
 __all__ = [
     "DEFAULT_INSTALL_HINT",
@@ -143,7 +146,7 @@ class SweBenchDockerHarnessExecutor:
             predictions_path = work_dir / "predictions.json"
             predictions_path.write_text(json.dumps([dict(request.prediction)]), encoding="utf-8")
             run_id = docker_safe_run_id(request.sample_id)
-            completed = subprocess.run(
+            completed = subprocess.run(  # noqa: S603 -- list-form, no shell, framework-controlled args
                 [
                     sys.executable,
                     "-m",
@@ -197,7 +200,7 @@ def swebench_prediction(
     if raw_patch is None:
         raw_patch = output.get("patch", "")
     exported = SweBenchVerifiedAdapter().export_prediction(sample, str(raw_patch))
-    prediction: dict[str, JsonValue] = {key: value for key, value in exported.items()}
+    prediction: dict[str, JsonValue] = dict(exported)
     return prediction
 
 
@@ -212,7 +215,12 @@ def _result_from_report(report: Mapping[str, JsonValue], request: HarnessRequest
             status=HarnessStatus.ERROR,
             resolved=None,
             message=f"harness report for {request.sample_id!r} has no 'resolved' field",
-            error={"report_keys": [key for key in sorted(report)]},
+            # A plain comprehension, not "unnecessary": it feeds mypy's
+            # bidirectional inference the expected `JsonValue` element type,
+            # which a bare `sorted(report)` call (typed independently as
+            # `list[str]`, invariant-incompatible with `list[JsonValue]`)
+            # does not get.
+            error={"report_keys": [key for key in sorted(report)]},  # noqa: C416
         )
     resolved = bool(report["resolved"])
     evidence: dict[str, JsonValue] = {

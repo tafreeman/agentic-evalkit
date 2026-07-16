@@ -13,17 +13,22 @@ any sample output containing HTML-significant characters (for example
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from jinja2 import Environment, PackageLoader, select_autoescape
-from pydantic import JsonValue
 
-from agentic_evalkit.models import EvalRunResult, SampleResult
 from agentic_evalkit.reporters.json import (
     _atomic_write_text,
     _default_generated_at,
     build_envelope,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pydantic import JsonValue
+
+    from agentic_evalkit.models import EvalRunResult, SampleResult
 
 _TEMPLATE_NAME = "report.html.j2"
 

@@ -30,12 +30,10 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from types import TracebackType
-from typing import Any, Final, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast, runtime_checkable
 
 import httpx
 from huggingface_hub import HfApi
-from pydantic import JsonValue as ModelJsonValue
 
 from agentic_evalkit.datasets.base import ProviderHealth
 from agentic_evalkit.errors import (
@@ -56,6 +54,11 @@ from agentic_evalkit.models import (
     SearchPage,
     SourceRecord,
 )
+
+if TYPE_CHECKING:
+    from types import TracebackType
+
+    from pydantic import JsonValue as ModelJsonValue
 
 # Error ``context=`` dicts use ``errors.JsonValue`` (the stdlib-only type the
 # error hierarchy is typed against); model fields (e.g.
@@ -151,7 +154,7 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
 def _jittered_backoff_seconds(attempt: int) -> float:
     """Exponential backoff with full jitter, zero-indexed by retry attempt."""
     ceiling = _BACKOFF_BASE_SECONDS * (2**attempt)
-    return random.uniform(0.0, ceiling)
+    return random.uniform(0.0, ceiling)  # noqa: S311 -- backoff jitter, not security-sensitive
 
 
 def _raise_for_load_bearing_status(

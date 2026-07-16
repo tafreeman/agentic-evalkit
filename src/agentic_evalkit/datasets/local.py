@@ -16,12 +16,10 @@ import csv
 import hashlib
 import io
 import json
-from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import yaml
-from pydantic import JsonValue
 
 from agentic_evalkit.datasets.base import ProviderHealth
 from agentic_evalkit.errors import DatasetSchemaMismatch
@@ -32,6 +30,11 @@ from agentic_evalkit.models import (
     SearchPage,
     SourceRecord,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping
+
+    from pydantic import JsonValue
 
 _SUPPORTED_SUFFIXES: Final[frozenset[str]] = frozenset({".json", ".jsonl", ".csv", ".yaml", ".yml"})
 

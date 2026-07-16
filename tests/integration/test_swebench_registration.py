@@ -17,9 +17,8 @@ Its own module per this suite's self-sufficient-wiring-module convention.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pytest
 from typer.testing import CliRunner
 
 from agentic_evalkit.cli import app
@@ -28,6 +27,11 @@ from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.datasets.local import LocalDatasetProvider
 from agentic_evalkit.manifest import CallableTargetConfig, ManifestDocument, dump_manifest
 from agentic_evalkit.models import DatasetRef, DatasetSelection, EvalRunManifest
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 runner = CliRunner()
 

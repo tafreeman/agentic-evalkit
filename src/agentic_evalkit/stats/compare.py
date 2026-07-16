@@ -39,16 +39,16 @@ bootstrap).
 from __future__ import annotations
 
 import random
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from agentic_evalkit.errors import IncompatibleRuns
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.models.grades import GradeStatus
-from agentic_evalkit.models.runs import EvalRunManifest
 
 if TYPE_CHECKING:
-    from agentic_evalkit.models.runs import EvalRunResult, SampleResult
+    from collections.abc import Callable
+
+    from agentic_evalkit.models.runs import EvalRunManifest, EvalRunResult, SampleResult
 
 __all__ = ["PROVENANCE_FIELDS_CHECKED", "ComparisonResult", "compare_runs"]
 
@@ -343,7 +343,7 @@ def _bootstrap_percentiles(
     if not deltas:
         return (0.0, 0.0)
 
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 -- seeded for reproducible bootstrap resampling
     n = len(deltas)
     resample_means: list[float] = []
     for _ in range(bootstrap_samples):

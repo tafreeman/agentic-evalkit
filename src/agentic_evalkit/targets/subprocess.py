@@ -15,11 +15,12 @@ import contextlib
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Final
-
-from pydantic import JsonValue
+from typing import TYPE_CHECKING, Final, cast
 
 from agentic_evalkit.models import EvalSample, ExecutionStatus, NormalizedExecutionResult
+
+if TYPE_CHECKING:
+    from pydantic import JsonValue
 
 _PROTOCOL_VERSION: Final[str] = "1"
 _DEFAULT_MAX_OUTPUT_BYTES: Final[int] = 1024 * 1024
@@ -39,7 +40,7 @@ def _fingerprint(command: tuple[str, ...]) -> str:
     return f"subprocess:{executable_name}:{_PROTOCOL_VERSION}:{digest}"
 
 
-class _ByteBoundExceeded(Exception):
+class _ByteBoundExceededError(Exception):
     """Raised internally when a stream exceeds its configured byte bound."""
 
 
@@ -60,9 +61,9 @@ async def _read_bounded_line(reader: asyncio.StreamReader, *, max_bytes: int) ->
     try:
         line = await reader.readline()
     except ValueError as exc:
-        raise _ByteBoundExceeded(f"line exceeded {max_bytes} byte bound") from exc
+        raise _ByteBoundExceededError(f"line exceeded {max_bytes} byte bound") from exc
     if len(line) > max_bytes:
-        raise _ByteBoundExceeded(f"line exceeded {max_bytes} byte bound")
+        raise _ByteBoundExceededError(f"line exceeded {max_bytes} byte bound")
     return line
 
 
@@ -135,9 +136,13 @@ class SubprocessTarget:
             # explicitly in _read_bounded_line/_drain_stderr below.
             limit=max(self._max_output_bytes, self._max_stderr_bytes) + 1,
         )
-        assert process.stdin is not None
-        assert process.stdout is not None
-        assert process.stderr is not None
+        # `create_subprocess_exec` guarantees these three streams are populated
+        # whenever PIPE is passed for each (as above); `cast` documents that
+        # stdlib-guaranteed invariant without a runtime check that `assert`
+        # would strip under `python -O`.
+        stdin = cast("asyncio.StreamWriter", process.stdin)
+        stdout = cast("asyncio.StreamReader", process.stdout)
+        stderr = cast("asyncio.StreamReader", process.stderr)
 
         try:
             request = {
@@ -147,18 +152,16 @@ class SubprocessTarget:
                 "attempt": attempt,
             }
             line = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
-            process.stdin.write(line)
-            await process.stdin.drain()
-            process.stdin.close()
+            stdin.write(line)
+            await stdin.drain()
+            stdin.close()
 
             stderr_task = asyncio.create_task(
-                _drain_stderr(process.stderr, max_bytes=self._max_stderr_bytes)
+                _drain_stderr(stderr, max_bytes=self._max_stderr_bytes)
             )
             try:
-                raw_line = await _read_bounded_line(
-                    process.stdout, max_bytes=self._max_output_bytes
-                )
-            except _ByteBoundExceeded as exc:
+                raw_line = await _read_bounded_line(stdout, max_bytes=self._max_output_bytes)
+            except _ByteBoundExceededError as exc:
                 stderr_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stderr_task

@@ -30,11 +30,14 @@ import json
 import os
 import threading
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
 from agentic_evalkit.models import ResolvedDataset
 from agentic_evalkit.models.base import FrozenModel
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _RESOLVED_FILENAME = "resolved.json"
 _DIGEST_PREFIX = "sha256:"

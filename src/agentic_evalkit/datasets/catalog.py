@@ -61,14 +61,18 @@ The catalog does not remember or propagate the flag across calls.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from typing import TYPE_CHECKING
 
-from agentic_evalkit.datasets.base import DatasetProvider
 from agentic_evalkit.datasets.cache import CacheKey, DatasetCache
 from agentic_evalkit.datasets.presets import BUILTIN_PRESETS, DatasetPreset
 from agentic_evalkit.datasets.resolution_cache import ResolutionCache, ResolutionKey
 from agentic_evalkit.errors import OfflineCacheMiss, PluginCompatibilityError
 from agentic_evalkit.models import DatasetRef, ResolvedDataset, SamplePage, SearchPage, SourceRecord
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping
+
+    from agentic_evalkit.datasets.base import DatasetProvider
 
 __all__ = ["DatasetCatalog"]
 

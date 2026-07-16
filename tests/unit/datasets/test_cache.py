@@ -14,12 +14,15 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from agentic_evalkit.datasets.cache import CacheKey, DatasetCache
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 #: Bounded retry budget for the Windows sharing-violation collision below.
 _WRITE_RETRY_ATTEMPTS = 3

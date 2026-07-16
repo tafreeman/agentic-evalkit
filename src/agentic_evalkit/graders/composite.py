@@ -9,7 +9,7 @@ component fails. A component grader that itself raises surfaces as
 """
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -157,8 +157,10 @@ class CompositeGrader:
             )
 
         # `_weighted_mean` guarantees `weighted_score is not None` whenever
-        # `total_weight != 0.0` (the branch above already returned otherwise).
-        assert weighted_score is not None
+        # `total_weight != 0.0` (the branch above already returned otherwise);
+        # `cast` documents that proven invariant without a runtime check that
+        # `assert` would strip under `python -O`.
+        weighted_score = cast("float", weighted_score)
         status = GradeStatus.PASS if weighted_score >= 1.0 else GradeStatus.PARTIAL
         # A composite whose weighted mean is exactly 0 with no failed hard
         # gate is still a definitive fail signal.

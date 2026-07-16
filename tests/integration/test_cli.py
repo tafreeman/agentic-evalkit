@@ -11,10 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
-from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from typer.testing import CliRunner
@@ -55,6 +53,10 @@ from agentic_evalkit.models import (
 )
 from agentic_evalkit.reporters.json import JsonReporter
 from agentic_evalkit.targets import HttpTarget
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping
+    from pathlib import Path
 
 runner = CliRunner()
 

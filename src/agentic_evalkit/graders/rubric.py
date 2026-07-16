@@ -54,9 +54,13 @@ class RubricCriterion(FrozenModel):
             raise ValueError(f"weight must be non-negative, got {self.weight}")
         if self.scale == "bounded" and (self.scale_min is None or self.scale_max is None):
             raise ValueError("bounded scale requires scale_min and scale_max")
-        if self.scale == "bounded" and self.scale_min is not None and self.scale_max is not None:
-            if self.scale_min >= self.scale_max:
-                raise ValueError("scale_min must be less than scale_max")
+        if (
+            self.scale == "bounded"
+            and self.scale_min is not None
+            and self.scale_max is not None
+            and self.scale_min >= self.scale_max
+        ):
+            raise ValueError("scale_min must be less than scale_max")
         if not self.requires_evidence and _BROAD_JUDGMENT_PATTERN.search(self.description):
             raise ValueError(
                 "broad holistic criteria (matched a holistic-judgment phrase in "

@@ -12,6 +12,7 @@ from a real :class:`~agentic_evalkit.benchmarks.harness.HarnessResult`
 """
 
 import json
+from typing import cast
 
 from pydantic import JsonValue
 
@@ -86,16 +87,14 @@ class SweBenchVerifiedAdapter:
                 context={"row_id": record.row_id},
             )
 
-        instance_id = record.data["instance_id"]
-        repo = record.data["repo"]
-        base_commit = record.data["base_commit"]
-        problem_statement = record.data["problem_statement"]
-        test_patch = record.data["test_patch"]
-        assert isinstance(instance_id, str)  # narrowed by the `missing` check above
-        assert isinstance(repo, str)
-        assert isinstance(base_commit, str)
-        assert isinstance(problem_statement, str)
-        assert isinstance(test_patch, str)
+        # `cast` documents the invariant the `missing` check above already
+        # proved (every field in `_REQUIRED_STRING_FIELDS` is a `str`) without
+        # a runtime check that `assert` would strip under `python -O`.
+        instance_id = cast("str", record.data["instance_id"])
+        repo = cast("str", record.data["repo"])
+        base_commit = cast("str", record.data["base_commit"])
+        problem_statement = cast("str", record.data["problem_statement"])
+        test_patch = cast("str", record.data["test_patch"])
 
         fail_to_pass = _parse_test_name_list(
             record.data.get("FAIL_TO_PASS"), field_name="FAIL_TO_PASS", row_id=record.row_id

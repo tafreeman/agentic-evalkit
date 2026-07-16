@@ -20,9 +20,8 @@ below rather than silently escaping it.
 from __future__ import annotations
 
 import types
-from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Literal, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Literal, Union, get_args, get_origin
 
 import pytest
 
@@ -39,8 +38,12 @@ from agentic_evalkit.events import (
     SampleStarted,
 )
 from agentic_evalkit.models import ExecutionStatus, GradeStatus
-from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.runner import _noop_sink
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from agentic_evalkit.models.base import FrozenModel
 
 _NOW = datetime(2026, 7, 4, 12, 0, 0, tzinfo=UTC)
 

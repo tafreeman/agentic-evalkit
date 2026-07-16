@@ -74,8 +74,9 @@ def test_cross_environment_waiver_set_is_exactly_the_adr_0015_fields() -> None:
     # contract change that must supersede ADR-0015 before it can pass CI.
     from agentic_evalkit.stats import compare
 
-    assert compare._WAIVABLE_UNDER_CROSS_ENVIRONMENT == frozenset(
-        {"environment_fingerprint", "code_fingerprint"}
+    assert (
+        frozenset({"environment_fingerprint", "code_fingerprint"})
+        == compare._WAIVABLE_UNDER_CROSS_ENVIRONMENT
     )
 
 

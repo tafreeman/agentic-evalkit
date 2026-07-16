@@ -15,9 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Annotated, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Annotated, Any, TypeVar, cast
 
 import httpx
 import typer
@@ -25,7 +24,6 @@ from huggingface_hub import HfApi
 from rich.table import Table
 
 from agentic_evalkit.cli.app import app, console, print_output, run_cli_command, safe_text
-from agentic_evalkit.datasets.base import DatasetProvider
 from agentic_evalkit.datasets.cache import DatasetCache
 from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.datasets.huggingface import HuggingFaceDatasetProvider
@@ -34,6 +32,11 @@ from agentic_evalkit.datasets.presets import BUILTIN_PRESETS
 from agentic_evalkit.datasets.resolution_cache import ResolutionCache
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.models import DatasetRef, ResolvedDataset, SamplePage, SearchPage
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from agentic_evalkit.datasets.base import DatasetProvider
 
 datasets_app = typer.Typer(help="Discover, inspect, and preview datasets.")
 app.add_typer(datasets_app, name="datasets")
@@ -141,8 +144,8 @@ def build_catalog(*, offline: bool) -> DatasetCatalog:
     # annotated dict, so each value is cast explicitly rather than left to
     # infer incorrectly as the narrower concrete-class union.
     providers: dict[str, DatasetProvider] = {
-        "local": cast(DatasetProvider, local_provider),
-        "huggingface": cast(DatasetProvider, hf_provider),
+        "local": cast("DatasetProvider", local_provider),
+        "huggingface": cast("DatasetProvider", hf_provider),
     }
     # This CLI supplies the genuine "local"/"huggingface" built-in providers
     # itself (it is not loading third-party plugins here), so the

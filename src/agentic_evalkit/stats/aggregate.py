@@ -33,12 +33,9 @@ rather than each re-deriving the same shape.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 from enum import StrEnum
 from statistics import NormalDist, fmean, stdev
 from typing import TYPE_CHECKING, cast
-
-from pydantic import JsonValue
 
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.models.execution import ExecutionStatus
@@ -46,6 +43,10 @@ from agentic_evalkit.models.grades import GradeStatus
 from agentic_evalkit.stats.reliability import pass_at_k
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from pydantic import JsonValue
+
     from agentic_evalkit.models.runs import EvalRunResult, SampleResult
 
 __all__ = [

@@ -20,9 +20,8 @@ grows that file past the limit nor collides with its module-scoped helpers.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -41,7 +40,12 @@ from agentic_evalkit.models import (
     SourceRecord,
 )
 from agentic_evalkit.runner import EvalRunner
-from agentic_evalkit.targets.base import ExecutionTarget
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+    from agentic_evalkit.targets.base import ExecutionTarget
 
 # --- Self-contained deterministic fakes -------------------------------------
 

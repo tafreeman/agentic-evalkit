@@ -7,12 +7,16 @@ carries, so a reviewer can read a run's evidence without JSON tooling.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from pydantic import JsonValue
-
-from agentic_evalkit.models import EvalRunResult, SampleResult
 from agentic_evalkit.reporters.json import _atomic_write_text, _default_generated_at
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pydantic import JsonValue
+
+    from agentic_evalkit.models import EvalRunResult, SampleResult
 
 
 def _outcome_label(sample: SampleResult) -> str:

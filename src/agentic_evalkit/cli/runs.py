@@ -32,10 +32,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import httpx
 import typer
@@ -43,7 +42,6 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
 from agentic_evalkit.artifacts import ArtifactStore
-from agentic_evalkit.benchmarks.base import BenchmarkAdapter
 from agentic_evalkit.benchmarks.grounding import GroundedCitationAdapter
 from agentic_evalkit.benchmarks.gsm8k import Gsm8kAdapter
 from agentic_evalkit.benchmarks.swebench import SweBenchVerifiedAdapter
@@ -53,12 +51,10 @@ from agentic_evalkit.benchmarks.swebench_docker import (
 )
 from agentic_evalkit.cli.app import ExitCode, app, console, run_cli_command, safe_text
 from agentic_evalkit.cli.datasets import build_catalog
-from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.datasets.presets import BUILTIN_PRESETS, DatasetPreset
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.events import ExecutionCompleted, RunEvent, SampleCompleted, SampleStarted
 from agentic_evalkit.examples.reference_judge import ReferenceJudgeClient
-from agentic_evalkit.graders.base import Grader
 from agentic_evalkit.graders.composite import CompositeGrader, WeightedGrader
 from agentic_evalkit.graders.exact import ExactMatchGrader
 from agentic_evalkit.graders.grounding import build_grounded_citation_grader
@@ -90,10 +86,17 @@ from agentic_evalkit.reporters import REPORTER_FORMATS
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, apply_redaction
 from agentic_evalkit.runner import EvalRunner
 from agentic_evalkit.stats import build_report_aggregates
-from agentic_evalkit.targets.base import ExecutionTarget
 from agentic_evalkit.targets.callable import CallableTarget
 from agentic_evalkit.targets.http import HttpTarget
 from agentic_evalkit.targets.subprocess import SubprocessTarget
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from agentic_evalkit.benchmarks.base import BenchmarkAdapter
+    from agentic_evalkit.datasets.catalog import DatasetCatalog
+    from agentic_evalkit.graders.base import Grader
+    from agentic_evalkit.targets.base import ExecutionTarget
 
 __all__ = ["build_target_for_document", "init", "run", "validate", "write_canonical_report"]
 

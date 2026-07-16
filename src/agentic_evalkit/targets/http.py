@@ -13,12 +13,14 @@ import hashlib
 import random
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import httpx
-from pydantic import JsonValue
 
 from agentic_evalkit.models import EvalSample, ExecutionStatus, NormalizedExecutionResult
+
+if TYPE_CHECKING:
+    from pydantic import JsonValue
 
 _PROTOCOL_VERSION: Final[str] = "1"
 _RETRYABLE_STATUS_CODES: Final[frozenset[int]] = frozenset({429, 502, 503, 504})
@@ -314,5 +316,5 @@ class HttpTarget:
             return
         exponential = self._base_delay_seconds * (2**retry_index)
         capped = min(exponential, self._max_delay_seconds)
-        jittered = capped * (0.5 + random.random() / 2)  # backoff jitter, not security-sensitive
+        jittered = capped * (0.5 + random.random() / 2)  # noqa: S311 -- backoff jitter, not security-sensitive
         await self._sleep(jittered)

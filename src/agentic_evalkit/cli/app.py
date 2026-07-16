@@ -24,9 +24,8 @@ This module owns three things every subcommand needs:
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from enum import IntEnum
-from typing import Annotated, TypeVar
+from typing import TYPE_CHECKING, Annotated, TypeVar
 
 import typer
 from rich.console import Console
@@ -50,6 +49,9 @@ from agentic_evalkit.errors import (
     PluginCompatibilityError,
     UnsafeCodeRequired,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = [
     "ExitCode",

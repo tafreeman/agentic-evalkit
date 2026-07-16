@@ -10,14 +10,17 @@ the model, so every output format observes the same redacted evidence
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from pydantic import JsonValue
-
-from agentic_evalkit.models import EvalRunResult, GradeResult, SampleResult
 from agentic_evalkit.models.base import FrozenModel
-from agentic_evalkit.models.execution import NormalizedExecutionResult
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pydantic import JsonValue
+
+    from agentic_evalkit.models import EvalRunResult, GradeResult, SampleResult
+    from agentic_evalkit.models.execution import NormalizedExecutionResult
 
 _REDACTED = "[REDACTED]"
 

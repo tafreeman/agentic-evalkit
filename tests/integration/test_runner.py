@@ -16,12 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from pydantic import JsonValue
 
 from agentic_evalkit.artifacts import ArtifactRef, ArtifactStore
 from agentic_evalkit.benchmarks.harness import FakeHarnessExecutor, HarnessResult, HarnessStatus
@@ -44,6 +43,11 @@ from agentic_evalkit.models import (
 )
 from agentic_evalkit.reporters.base import RedactionPolicy
 from agentic_evalkit.runner import EvalRunner
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from pydantic import JsonValue
 
 # --- Deterministic fakes ----------------------------------------------------
 

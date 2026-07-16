@@ -91,7 +91,33 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
+select = ["E", "F", "W", "I", "N", "UP", "ASYNC", "S", "B", "A", "C4", "SIM", "TCH", "RUF"]
+
+[tool.ruff.lint.flake8-type-checking]
+# Pydantic v2 needs a field's annotated type to be a real, importable object
+# at class-definition time to build its validators -- unlike a plain function
+# signature, moving a FrozenModel/BaseModel field's type import behind
+# `if TYPE_CHECKING:` breaks model construction, it doesn't just satisfy the
+# linter. Every wire model in this package subclasses FrozenModel
+# (agentic_evalkit.models.base), so TC001/002/003 must treat both as
+# runtime-evaluated and never suggest moving their field-type imports.
+runtime-evaluated-base-classes = ["agentic_evalkit.models.base.FrozenModel", "pydantic.BaseModel"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest's assertion mechanism *is* `assert`; S101 firing on every test
+# assertion is noise, not a finding. S105 in tests/ is exclusively deliberately-
+# fake secret fixtures used to exercise redaction (e.g. tests/unit/test_manifest.py's
+# _HOOK_SECRET, tests/integration/test_runner.py's _PLANTED_TOKEN) -- their entire
+# purpose is verifying a fake secret gets redacted, never a real credential.
+"tests/**" = ["S101", "S105"]
+# DatasetNotFound, DatasetAccessDenied, TargetFailure, TargetTimeout, and their
+# siblings are stable, documented public API (errors.py __all__, referenced by
+# docs/guides/providers.md). Renaming to satisfy N818's Error-suffix convention
+# is a breaking change for any caller doing `except DatasetNotFound:` -- out of
+# scope for a lint-hygiene pass; revisit at a deliberate major-version bump.
+"src/agentic_evalkit/errors.py" = ["N818"]
+# ArtifactStoreLimitExceeded: same rationale (public API, artifacts.py __all__).
+"src/agentic_evalkit/artifacts.py" = ["N818"]
 
 [tool.mypy]
 python_version = "3.11"

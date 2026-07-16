@@ -24,9 +24,8 @@ rather than importing it from ``test_cli.py``.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pytest
 from typer.testing import CliRunner
 
 from agentic_evalkit.cli import app
@@ -48,6 +47,11 @@ from agentic_evalkit.provenance import (
     compute_environment_fingerprint,
     compute_target_fingerprint,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 runner = CliRunner()
 

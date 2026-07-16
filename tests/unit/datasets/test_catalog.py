@@ -10,8 +10,7 @@ the plan's verbatim Task 7 Step 1 snippet
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -29,6 +28,10 @@ from agentic_evalkit.models import (
     SearchPage,
     SourceRecord,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping
+    from pathlib import Path
 
 # --- Step 1 (plan verbatim): preset and provider-routing tests --------------
 

@@ -83,7 +83,7 @@ if __name__ == "__main__":
 def _run(
     command: list[str], *, cwd: Path, timeout: float = 300.0
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return subprocess.run(  # noqa: S603 -- list-form, no shell; command is this test's own build/check invocation
         command,
         cwd=cwd,
         capture_output=True,

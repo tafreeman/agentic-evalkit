@@ -19,13 +19,13 @@ view) stand in for it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import uuid4
 
-from agentic_evalkit.artifacts import ArtifactStore
 from agentic_evalkit.errors import JsonValue, ManifestValidationError
 from agentic_evalkit.events import (
     DatasetResolved,
@@ -38,7 +38,6 @@ from agentic_evalkit.events import (
     SampleCompleted,
     SampleStarted,
 )
-from agentic_evalkit.graders.base import Grader
 from agentic_evalkit.models import (
     DatasetRef,
     EvalRunManifest,
@@ -53,7 +52,11 @@ from agentic_evalkit.models import (
     SourceRecord,
 )
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
-from agentic_evalkit.targets.base import ExecutionTarget
+
+if TYPE_CHECKING:
+    from agentic_evalkit.artifacts import ArtifactStore
+    from agentic_evalkit.graders.base import Grader
+    from agentic_evalkit.targets.base import ExecutionTarget
 
 #: Serialized ``NormalizedExecutionResult.output`` larger than this many bytes
 #: is spilled to the artifact store and replaced with a reference (plan
@@ -243,7 +246,9 @@ class EvalRunner:
         notification, that secondary failure is discarded rather than
         allowed to replace or mask the run's real failure cause.
         """
-        try:
+        # A broken sink must never replace or mask the caller's real failure
+        # (`error`, re-raised by the caller regardless).
+        with contextlib.suppress(Exception):
             sink(
                 RunFailed(
                     run_id=run_id,
@@ -252,10 +257,6 @@ class EvalRunner:
                     failed_at=self._clock(),
                 )
             )
-        except Exception:
-            # A broken sink must never replace or mask the caller's real
-            # failure (`error`, re-raised by the caller regardless).
-            pass
 
     def _validate_manifest(self, manifest: EvalRunManifest) -> None:
         """Requirement 1: validate component names and capabilities up front.

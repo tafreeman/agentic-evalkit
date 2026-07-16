@@ -15,13 +15,16 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from agentic_evalkit.datasets.resolution_cache import ResolutionCache, ResolutionKey
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
 from agentic_evalkit.models import ResolvedDataset
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 #: Bounded retry budget for the Windows sharing-violation collision: a
 #: concurrent ``Path.replace()`` onto a file another thread currently has

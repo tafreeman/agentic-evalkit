@@ -46,14 +46,16 @@ dependency is introduced; ``socket`` is standard library.
 from __future__ import annotations
 
 import socket
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.datasets.local import LocalDatasetProvider
 from agentic_evalkit.models import DatasetRef
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 

@@ -30,8 +30,11 @@ import hashlib
 import json
 import platform
 import sys
-from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 #: Distribution name used to resolve the installed agentic-evalkit version.
 #: Matches the ``[project].name`` in ``pyproject.toml`` and the lookup

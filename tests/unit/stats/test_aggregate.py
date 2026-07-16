@@ -43,19 +43,19 @@ _FINISHED_AT = datetime(2026, 7, 2, 12, 5, 0, tzinfo=UTC)
 
 
 def _manifest(**overrides: object) -> EvalRunManifest:
-    defaults: dict[str, object] = dict(
-        run_name="gsm8k-smoke",
-        dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
-        adapter="gsm8k@1",
-        grader="normalized-exact@1",
-        target_name="echo-target",
-    )
+    defaults: dict[str, object] = {
+        "run_name": "gsm8k-smoke",
+        "dataset_ref": DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+        "adapter": "gsm8k@1",
+        "grader": "normalized-exact@1",
+        "target_name": "echo-target",
+    }
     defaults.update(overrides)
     return EvalRunManifest(**defaults)  # type: ignore[arg-type]
 
 
 def _resolved_dataset(**overrides: object) -> ResolvedDataset:
-    defaults: dict[str, object] = dict(dataset_id="openai/gsm8k", revision="abc")
+    defaults: dict[str, object] = {"dataset_id": "openai/gsm8k", "revision": "abc"}
     defaults.update(overrides)
     return ResolvedDataset(**defaults)  # type: ignore[arg-type]
 

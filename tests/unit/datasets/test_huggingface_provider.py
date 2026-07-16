@@ -27,9 +27,8 @@ lives in ``tests/live/test_huggingface_live.py`` behind the ``live`` marker.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -43,6 +42,9 @@ from agentic_evalkit.errors import (
     DatasetRateLimited,
 )
 from agentic_evalkit.models import DatasetRef
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "huggingface"
 
@@ -78,7 +80,7 @@ class _FakeDatasetInfo:
     def __init__(
         self,
         *,
-        id: str,
+        id: str,  # noqa: A002 -- mirrors huggingface_hub.hf_api.DatasetInfo's real field name
         sha: str | None,
         private: bool = False,
         gated: bool | str = False,

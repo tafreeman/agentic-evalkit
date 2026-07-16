@@ -9,7 +9,7 @@ from agentic_evalkit.models.base import FrozenModel
 
 
 class GradeStatus(StrEnum):
-    PASS = "pass"
+    PASS = "pass"  # noqa: S105 -- grade status enum value, not a credential
     FAIL = "fail"
     PARTIAL = "partial"
     ERROR = "error"

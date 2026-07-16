@@ -19,15 +19,17 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any, cast
-
-from pydantic import JsonValue
+from typing import TYPE_CHECKING, Any, cast
 
 from agentic_evalkit.artifacts import ArtifactStore
 from agentic_evalkit.models import ExecutionStatus, NormalizedExecutionResult
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY
 from agentic_evalkit.runner import _LARGE_OUTPUT_THRESHOLD_BYTES, EvalRunner
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pydantic import JsonValue
 
 _SECRET = "sk-" + "A" * 40
 # The three ratified credential shapes (design §12 / DEFAULT_REDACTION_POLICY):
@@ -48,7 +50,7 @@ def _default_runner(store: ArtifactStore) -> EvalRunner:
     intentionally empty stand-ins.
     """
     return EvalRunner(
-        catalog=cast(Any, None),
+        catalog=cast("Any", None),
         adapters={},
         targets={},
         graders={},
