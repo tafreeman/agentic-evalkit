@@ -46,6 +46,21 @@ distortions:
   in `evidence`, containing `"expired"` for the expiry case), never a pass.
   Uncalibrated judges cannot gate releases. Judge parse failures are retried
   at most twice (three attempts total) before abstaining.
+- **As amended 2026-07-04 (D-1) and 2026-07-11 (ADR-0020):** the claim
+  above that any calibration failure yields `GradeStatus.UNAVAILABLE`,
+  never a pass, is superseded. D-1 (2026-07-04) split failure into two
+  tiers: affirmatively bad evidence (expired, sub-floor point estimate)
+  still demotes to `GradeStatus.UNAVAILABLE`; absent evidence (an undated
+  or stale `calibrated_at`) blocks gating but grades advisorily, never
+  `UNAVAILABLE`. ADR-0020 (2026-07-11) added a further tier, distinct from
+  bad evidence: a point estimate that clears the floor while its 95%
+  Wilson lower bound does not is insufficient evidence, which also blocks
+  gating without demoting to `UNAVAILABLE`. See ADR-0020 for the full
+  current outcome taxonomy. ADR-0020 also scoped the position-bias probe
+  to the gating path only (`gate=True` with usable calibration), so the
+  Consequences section's claim that the probe costs a second judge call
+  per graded sample now holds only on the gating path — the
+  advisory/uncalibrated path makes exactly one judge call per sample.
 - **Abstention is first-class.** A grader that cannot responsibly score
   abstains as a distinct outcome, separate from pass and fail.
 

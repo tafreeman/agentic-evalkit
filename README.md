@@ -13,16 +13,21 @@ tested support for calibrated judge evidence while leaving model-provider
 selection to the caller. The built-in reference judge is deterministic and
 advisory only; it cannot approve a release.
 
+**Why not promptfoo, Inspect, DeepEval, Braintrust, or LangSmith?** Those
+tools are strong at the eval *workflow* — prompt-level CI checks,
+red-teaming, experiment tracking — and are usually the better choice for
+that job. This package solves a narrower problem instead: eval *validity*,
+making a result structurally hard to overstate through calibration-gated
+judges, provenance-gated comparisons, a strict split between operational
+and task failures, authoritative-verifier boundaries, and
+dataset-contamination tripwires — none of which those tools document as
+first-class concepts. See the [prior-art review](docs/prior-art.md) for the
+verified comparison and the build-vs-buy decision behind it.
+
 Start with the [quickstart guide](docs/guides/quickstart.md). For design
 boundaries and comparisons with other tools, see the
 [architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md)
 and [prior-art review](docs/prior-art.md).
-
-## Identity
-
-- Distribution and repository: `agentic-evalkit`
-- Python package: `agentic_evalkit`
-- CLI: `agentic-evalkit`
 
 ## Quickstart
 
@@ -96,4 +101,4 @@ extras policy.
 
 ## Repository boundary
 
-This project does not modify or import Agentic Runtime Platform or ExecutionKit internals. Those systems may be evaluated through stable callable, subprocess, or HTTP target adapters — see [ADR-0001](docs/adr/0001-standalone-boundary.md) and [ADR-0006](docs/adr/0006-execution-target-boundary.md).
+This project imports no host-repo internals — systems are reached only through the public `ExecutionTarget` protocol (callable, subprocess, or HTTP adapters); see [ADR-0001](docs/adr/0001-standalone-boundary.md) and [ADR-0006](docs/adr/0006-execution-target-boundary.md).
