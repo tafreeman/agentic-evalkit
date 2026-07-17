@@ -1,4 +1,7 @@
-"""Tests for the self-contained HTML reporter (design §11.3, plan Task 13)."""
+"""Tests for the HTML reporter, which produces one self-contained file --
+all CSS and data embedded directly in the page, with no links out to other
+files or the network (design doc §11.3, plan Task 13).
+"""
 
 import re
 from pathlib import Path
@@ -47,17 +50,18 @@ def test_html_escapes_script_tags_in_model_output(
     html_path = HtmlReporter().write(run, tmp_path / "run.html", generated_at="fixed")
     content = html_path.read_text(encoding="utf-8")
 
-    # The visible sample table (everything before the embedded JSON data
-    # island) must never contain a literal, executable <script> tag sourced
-    # from model output.
+    # The part of the page a human actually sees (everything before the
+    # embedded JSON blob at the end of the file) must never contain a real,
+    # runnable <script> tag built from the model's output text.
     visible_body, _, embedded_and_after = content.partition('<script id="embedded-run-data"')
     assert "<script>alert" not in visible_body
     assert "&lt;script&gt;alert" in visible_body
 
-    # The embedded JSON data island may contain the malicious string as
-    # inert JSON text (it is not executed as markup), but its closing
-    # "</script>" sequence must be neutralized so it cannot terminate the
-    # surrounding <script> element early.
+    # The embedded JSON blob is allowed to contain the malicious string as
+    # plain JSON text -- browsers don't run JSON as code, so it's harmless
+    # there. But its "</script>" sequence must still be altered so that it
+    # can't accidentally close the surrounding <script> tag early and break
+    # out into the rest of the page.
     assert "<script>alert" in embedded_and_after
     assert "</script>alert" not in embedded_and_after
     assert "<\\/script>" in embedded_and_after
@@ -91,7 +95,7 @@ def test_two_renders_of_the_same_run_are_byte_identical_with_fixed_generated_at(
     assert first.read_bytes() == second.read_bytes()
 
 
-# --- Uncertainty section (ADR-0016): visible, aggregates-gated ---------------
+# --- Uncertainty section (ADR-0016): shown on the page, only when aggregates are given ---
 
 
 def test_html_uncertainty_section_shows_bounds_in_visible_body(
@@ -104,9 +108,10 @@ def test_html_uncertainty_section_shows_bounds_in_visible_body(
     )
     content = html_path.read_text(encoding="utf-8")
 
-    # Assert on the visible body -- everything before the embedded JSON data
-    # island -- so this proves the bounds reach the rendered page, not merely
-    # the hidden JSON blob (which the reporter has always carried).
+    # Check the visible part of the page -- everything before the embedded
+    # JSON blob -- so this proves the numbers actually show up on the
+    # rendered page a person would look at, not just inside the hidden JSON
+    # blob (which the reporter has always included).
     visible_body, _, _embedded = content.partition('<script id="embedded-run-data"')
     assert "Uncertainty" in visible_body
     assert "wilson" in visible_body  # the interval_method label
@@ -134,11 +139,13 @@ def test_html_uncertainty_shows_cluster_robust_score_ci_for_repeated_attempts(
     )
     content = html_path.read_text(encoding="utf-8")
 
-    # Everything asserted here must appear in the visible body, not merely the
-    # embedded JSON island (which has always carried the aggregates): the
-    # repeated-attempt run's cluster_robust label, the score-mean chip, and the
-    # exact score CI the aggregates payload carries (its statistical
-    # correctness is proven in tests/unit/stats/test_aggregate.py).
+    # Everything checked below must show up in the visible part of the page,
+    # not just inside the hidden embedded JSON blob (which has always carried
+    # this data): the repeated-attempt run's "cluster_robust" label, the
+    # score-mean display, and the exact confidence interval (a range that's
+    # likely to contain the true score) for the score. That interval's math is
+    # verified separately in tests/unit/stats/test_aggregate.py -- this test
+    # only checks that it's rendered correctly onto the page.
     visible_body, _, _embedded = content.partition('<script id="embedded-run-data"')
     assert "Uncertainty" in visible_body
     assert "cluster_robust" in visible_body

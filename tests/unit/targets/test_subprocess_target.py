@@ -1,13 +1,14 @@
 """Tests for SubprocessTarget (plan Task 9, Steps 3 and 6; design §8).
 
-These scenarios are drawn verbatim from
-``docs/plans/2026-07-02-agentic-evalkit-initial-release.md`` Task 9 Step 3
+These test scenarios come word-for-word from the original project plan
+(``docs/plans/2026-07-02-agentic-evalkit-initial-release.md``), Task 9 Step 3
 ("Test that SubprocessTarget sends one request, enforces a one-second
 timeout, caps standard error and output bytes, and reports malformed JSON as
 ExecutionStatus.ERROR") and Step 6 ("Add a fixture that emits CRLF and a
 response split across writes; it must parse identically on Windows and
-Linux"). They are relocated to ``tests/unit/targets/**`` per this task's
-explicit test-tree ownership rather than ``tests/integration/``.
+Linux"). They live under ``tests/unit/targets/**`` rather than
+``tests/integration/`` because this project's convention is to put a
+module's tests in the unit-test directory that mirrors its own path.
 """
 
 import asyncio
@@ -33,19 +34,30 @@ def _sample(sample_id: str = "s1") -> EvalSample:
 
 
 def _subprocess_env() -> dict[str, str]:
-    """A copy of the parent environment with pytest-cov's subprocess coverage
-    auto-embedding variables stripped.
+    """Copies the current environment variables, but with a couple removed
+    that would otherwise make pytest-cov try (and fail) to measure code
+    coverage inside the fixture subprocess.
 
-    ``SubprocessTarget`` defaults to ``env=None`` (inherit everything), so a
-    spawned fixture script inherits ``COV_CORE_*``/``COVERAGE_PROCESS_START``
-    whenever the test session runs under ``pytest --cov``. pytest-cov's
-    site-installed embed hook then auto-starts a SEPARATE coverage collector
-    inside the subprocess, which can record without branch data and crash the
-    parent's ``cov.combine()`` with ``DataError: Can't combine statement
-    coverage data with branch data``. These fixture scripts are test-only
-    stubs outside ``agentic_evalkit`` (excluded from the coverage source
-    anyway), so subprocess coverage measurement here is pure noise -- strip
-    the trigger variables so it never starts.
+    Here is the problem this avoids. ``SubprocessTarget`` defaults to
+    ``env=None``, meaning "give the child process the same environment
+    variables as this one." When the whole test suite runs under
+    ``pytest --cov``, pytest-cov sets a couple of environment variables
+    (``COV_CORE_*`` and ``COVERAGE_PROCESS_START``) that tell any Python
+    process "please measure your own code coverage too." That is normally
+    useful, but it means each fixture script we spawn as a subprocess would
+    also try to start its own, separate coverage collector -- one that
+    tracks only which lines ran, not which branches of an if/else were
+    taken. When pytest-cov later tries to merge that data into the main
+    coverage report (``cov.combine()``), the mismatch between the two kinds
+    of data crashes it with ``DataError: Can't combine statement coverage
+    data with branch data``.
+
+    The fixture scripts under ``tests/unit/targets/fixtures/`` are simple
+    test-only stand-ins, not part of the real ``agentic_evalkit`` package,
+    so we do not want or need coverage numbers from them anyway. Removing
+    these two variables before spawning the subprocess stops pytest-cov
+    from ever trying to measure them, so the crash never gets a chance to
+    happen.
     """
     return {
         key: value
@@ -95,8 +107,11 @@ async def test_caps_standard_output_bytes() -> None:
 
 @pytest.mark.asyncio
 async def test_caps_standard_error_bytes_while_still_completing() -> None:
-    """Standard error is drained concurrently and bounded, but a valid stdout
-    response still completes the exchange."""
+    """The fixture writes more to standard error than the configured limit,
+    but its real response on standard output is still well-formed -- this
+    confirms the exchange still completes successfully, even while stderr
+    is being read (and capped) in the background at the same time.
+    """
     target = _target("oversized_stderr_target.py", max_stderr_bytes=1024)
     result = await target.execute(_sample(), attempt=1, timeout_seconds=5.0)
     assert result.status is ExecutionStatus.COMPLETED
@@ -151,8 +166,16 @@ async def test_records_command_executable_name_but_not_full_argv_secrets() -> No
 
 @pytest.mark.asyncio
 async def test_uses_no_shell_and_argument_tuple() -> None:
-    """Regression guard: command must be a tuple/sequence, never a shell string,
-    so shell metacharacters in sample input can never be interpreted."""
+    """Guards against a specific bug ever coming back (a "regression"): the
+    subprocess command must always be passed as a tuple of separate
+    arguments, never as one combined shell string. This matters because if
+    the command were ever run through a shell, special shell characters
+    embedded in sample input (like `;` or `|`, which can chain or pipe
+    commands together) could be interpreted as extra commands to run --
+    a command-injection vulnerability. Passing a tuple of arguments
+    straight to the operating system, with no shell involved, means those
+    characters are always treated as plain, harmless text.
+    """
     target = SubprocessTarget(
         command=(sys.executable, str(_FIXTURES / "echo_target.py")),
         max_output_bytes=65_536,
@@ -171,61 +194,96 @@ async def test_uses_no_shell_and_argument_tuple() -> None:
     assert result.output == {"question": "echo hi; rm -rf /"}
 
 
-# --- Story 5.1 (R-005): Windows ProactorEventLoop oversized-output no-hang ---
+# --- Story 5.1 (R-005): an oversized-output run on Windows must fail
+# cleanly, never hang forever ---
 #
-# On Windows, ``asyncio.run`` uses ``WindowsProactorEventLoopPolicy`` by
-# default (Python 3.8+), and pytest-asyncio's ``asyncio_mode = "auto"`` runs
-# each async test on that default loop. The proactor pipe transport can leave
-# a connection-lost callback unfired after a ``StreamReader`` overrun, making
-# ``Process.wait()`` hang even though the OS process has already exited;
-# ``SubprocessTarget._terminate`` guards this with a bounded post-``kill()``
-# wait plus a best-effort transport close. The tests below make that loop
-# dimension explicit (they skip off Windows) and bound the whole exchange with
-# ``asyncio.wait`` (via ``_run_within_no_hang_bound``); because ``asyncio.wait``
-# never cancels the awaited task on timeout, a regression manifests as an
-# explicit ``AssertionError`` failure -- immune to being masked by an
-# uncancellable-task wedge -- rather than a wedged CI job.
+# Background: on Windows, Python's default asyncio event loop implementation
+# is called the "ProactorEventLoop" (the default since Python 3.8, via
+# ``WindowsProactorEventLoopPolicy``), and pytest-asyncio's
+# ``asyncio_mode = "auto"`` setting means every ``async def test_...``
+# function in this project automatically runs on that same default loop --
+# no extra decorator needed.
+#
+# The bug this guards against: on that Windows loop, if a stream previously
+# hit a "line too long" overrun (the same ``LimitOverrunError`` situation
+# handled in ``SubprocessTarget._read_bounded_line``), asyncio's internal
+# bookkeeping can fail to notice that the underlying pipe actually closed.
+# When that happens, ``Process.wait()`` hangs forever, waiting for a
+# notification that will never arrive -- even though the real
+# operating-system process has already exited. ``SubprocessTarget._terminate``
+# works around this: it kills the process, waits only a short, bounded time
+# for asyncio to notice, and if asyncio still has not noticed, force-closes
+# its internal transport object directly as a last resort.
+#
+# The tests below only run on Windows (they are skipped everywhere else),
+# since this bug is specific to Windows's ProactorEventLoop. They also guard
+# against a second, subtler problem: what if the bug is *not* fixed, and the
+# code genuinely hangs? A naive test would itself hang trying to cancel a
+# task that is stuck in an uncancellable state, freezing the whole test run
+# (and CI job) instead of failing. To avoid that, these tests wait for the
+# result using plain ``asyncio.wait`` with a timeout (via the
+# ``_run_within_no_hang_bound`` helper below) rather than the more common
+# ``asyncio.wait_for``. Unlike ``asyncio.wait_for``, ``asyncio.wait`` never
+# tries to cancel the task itself when its timeout expires -- it simply
+# returns and reports that the task is not done yet. That means if this bug
+# ever comes back, these tests fail with a normal, readable
+# ``AssertionError`` instead of the test run just freezing until someone
+# notices and kills it by hand.
 
 _WINDOWS_ONLY = pytest.mark.skipif(
     sys.platform != "win32",
     reason="ProactorEventLoop is the default asyncio loop only on Windows",
 )
 
-# Generous relative to the target's own internal 1.0s post-kill wait bound, so
-# only a genuine unbounded hang (not ordinary teardown slack) trips it.
+# This needs to be generously larger than SubprocessTarget._terminate's own
+# internal 1.0-second wait-after-kill timeout, so this bound only trips for
+# a genuine, unbounded hang -- not for the ordinary, small delays involved
+# in normal process cleanup.
 _NO_HANG_WALL_CLOCK_SECONDS = 20.0
 
-# Bound for the cleanup-after-cancel step. If the regression this helper
-# guards against is itself the kind of cancellation-resistant wedge that
-# leaves a task uncancellable (a Proactor connection-lost callback that never
-# fires), `.cancel()` alone does not guarantee the task unwinds -- an
-# unbounded cleanup await would then hang exactly like the bug it exists to
-# catch. This bound is a last resort so the test always terminates with its
-# intended AssertionError instead of wedging CI.
+# Timeout for cleaning up the still-running task after we have already
+# decided it hung (the step just above this one). The subtlety: if the real
+# bug is exactly the stuck state this whole test exists to catch -- a
+# Proactor "connection lost" notification that never fires -- then calling
+# `.cancel()` on the task is not guaranteed to actually stop it. If we then
+# waited for that cancellation with no timeout of its own, this cleanup step
+# could hang forever too, defeating the whole point of the test. Giving
+# cleanup its own bound guarantees the test always finishes and reports its
+# intended AssertionError, instead of freezing CI.
 _CLEANUP_WALL_CLOCK_SECONDS = 5.0
 
-# Fixed envelope (timestamps, fingerprint, error type/message) added to the
-# configured stream bounds when asserting the serialized result stays byte-
-# bounded. Small and constant; only an *unbounded* stream leaking into the
-# result would blow past bounds + this envelope.
+# Every result also carries some fixed-size bookkeeping data of its own --
+# timestamps, the target's fingerprint (an ID for its exact configuration;
+# see SubprocessTarget's `_fingerprint` function), and the error
+# type/message -- on top of the actual stdout/stderr bytes being bounded.
+# This constant is a generous allowance for that fixed overhead, added to
+# the configured stream byte limits below when checking that the
+# serialized result stays within bounds. It stays small and constant no
+# matter what; if the result ever grows past bounds + this allowance, that
+# can only mean an *unbounded* stream leaked into it somewhere.
 _RESULT_ENVELOPE_BYTES = 4096
 
 
 async def _run_within_no_hang_bound(
     target: SubprocessTarget,
 ) -> NormalizedExecutionResult:
-    """Await ``target.execute`` under a wall-clock bound using ``asyncio.wait``.
+    """Runs ``target.execute(...)`` with a wall-clock time limit, using
+    ``asyncio.wait`` rather than the more common ``asyncio.wait_for``.
 
-    ``asyncio.wait`` (unlike ``asyncio.wait_for``) never cancels the awaited
-    task on timeout, so a task wedged in an *uncancellable* teardown cannot
-    turn a hang into a masked cancellation: if the bound elapses, ``done`` is
-    empty and the explicit assertion fails with a clear no-hang message. On
-    the failure path the still-pending task is cancelled, and that cleanup
-    is *itself* bounded (``_CLEANUP_WALL_CLOCK_SECONDS``): if the same
-    cancellation-resistant wedge this helper guards against means ``.cancel()``
-    does not fully unwind the task, an unbounded cleanup await would hang
-    exactly like the regression under test, silently defeating the point of
-    using ``asyncio.wait`` in the first place.
+    The difference matters here. If the task hangs, ``asyncio.wait_for``
+    would try to ``.cancel()`` it -- but if the task is stuck in exactly the
+    uncancellable state this test file is designed to catch, that
+    cancellation could itself hang, silently turning a real bug into a test
+    that just freezes forever. ``asyncio.wait`` instead simply returns once
+    its timeout elapses, whether or not the task finished, leaving it up to
+    us to check and fail explicitly.
+
+    So: if the task finishes in time, its result is returned normally. If it
+    does not, we raise a plain ``AssertionError`` describing a no-hang-bound
+    violation, and we still attempt to cancel the leftover task -- but that
+    cleanup attempt is itself given a short timeout
+    (``_CLEANUP_WALL_CLOCK_SECONDS``), for the same reason: if cancellation
+    gets stuck too, we do not want the *cleanup* to hang forever either.
     """
     task = asyncio.ensure_future(target.execute(_sample(), attempt=1, timeout_seconds=5.0))
     done, pending = await asyncio.wait({task}, timeout=_NO_HANG_WALL_CLOCK_SECONDS)
@@ -240,13 +298,18 @@ async def _run_within_no_hang_bound(
 def _assert_result_stays_byte_bounded(
     result: NormalizedExecutionResult, *, max_output_bytes: int, max_stderr_bytes: int
 ) -> None:
-    """Assert the returned result respects the configured stream byte bounds.
+    """Checks that the result never contains more data than the configured
+    byte limits allow, even though the subprocess itself wrote megabytes of
+    output.
 
-    On the oversized-output error path the megabyte-scale stdout is never
-    inlined (``output is None``); any captured stderr surfaced as diagnostic
-    evidence is bounded by ``max_stderr_bytes``; and the whole serialized
-    result stays within the configured bounds plus a small fixed envelope --
-    so no unbounded stream ever reaches the result on this platform.
+    Specifically, on this error path (the output was too large): the huge
+    stdout content is never copied into the result at all (``output`` stays
+    ``None``); any stderr text captured as supporting evidence is capped at
+    ``max_stderr_bytes``; and the full serialized result -- once you allow
+    for a small, constant amount of bookkeeping overhead for things like
+    timestamps (``_RESULT_ENVELOPE_BYTES``) -- never exceeds the configured
+    limits. In short: however much data the misbehaving subprocess produced,
+    none of it leaks through unbounded.
     """
     assert result.output is None
     if result.error is not None:
@@ -258,10 +321,12 @@ def _assert_result_stays_byte_bounded(
 
 
 def _assert_running_on_proactor_loop() -> None:
-    """Make the loop-policy assumption explicit: on Windows the active loop
-    must be a ``ProactorEventLoop`` for this guard to exercise the transport
-    interaction it targets. If some other loop is installed, skip rather than
-    assert a false pass.
+    """Confirms the test is actually running on a ``ProactorEventLoop``
+    before continuing, since that is the specific asyncio event loop
+    implementation this whole test file is designed to probe -- the bug
+    being guarded against only happens on that loop. If some other event
+    loop is active for any reason, the test is skipped instead of silently
+    passing without having actually tested anything.
     """
     loop = asyncio.get_running_loop()
     proactor_loop = getattr(asyncio, "ProactorEventLoop", None)
@@ -272,11 +337,13 @@ def _assert_running_on_proactor_loop() -> None:
 @_WINDOWS_ONLY
 @pytest.mark.asyncio
 async def test_oversized_output_on_proactor_loop_tears_down_without_hanging() -> None:
-    """An oversized standard-output line on a ProactorEventLoop must complete
-    the exchange (as a bounded ``ERROR``) via kill-and-await teardown, never
-    hang. The ``asyncio.wait`` wall-clock bound turns a regression into an
-    explicit ``AssertionError`` failure instead of a hung run, and the result
-    is asserted to stay byte-bounded.
+    """When a fixture writes an oversized line to standard output while
+    running on a ProactorEventLoop, SubprocessTarget must still finish
+    cleanly -- killing the process, waiting for it to exit, and returning a
+    normal, byte-bounded ``ERROR`` result -- rather than hanging forever.
+    The ``asyncio.wait`` wall-clock bound (see ``_run_within_no_hang_bound``)
+    makes sure that if this ever regresses, the test fails with a clear
+    ``AssertionError`` instead of the test run just freezing.
     """
     _assert_running_on_proactor_loop()
     max_output_bytes = 1024
@@ -289,8 +356,9 @@ async def test_oversized_output_on_proactor_loop_tears_down_without_hanging() ->
     result = await _run_within_no_hang_bound(target)
     assert result.status is ExecutionStatus.ERROR
     assert result.error is not None
-    # Byte-bounded: the megabyte of standard output never lands inline in the
-    # result; the serialized result stays within the configured bounds.
+    # Confirms the result stays byte-bounded: the megabyte of standard
+    # output the fixture wrote never ends up copied into the result, and
+    # the serialized result stays within the configured limits.
     _assert_result_stays_byte_bounded(
         result, max_output_bytes=max_output_bytes, max_stderr_bytes=max_stderr_bytes
     )
@@ -299,10 +367,14 @@ async def test_oversized_output_on_proactor_loop_tears_down_without_hanging() ->
 @_WINDOWS_ONLY
 @pytest.mark.asyncio
 async def test_oversized_output_stays_byte_bounded_with_concurrent_stderr_drain() -> None:
-    """With both an oversized standard-output line *and* an oversized standard
-    error stream (concurrent drain), teardown on the ProactorEventLoop still
-    completes within the wall-clock bound and reports a bounded ``ERROR``: the
-    concurrent stderr drain never deadlocks the pipe on Windows.
+    """Same scenario as the test above, but harder: the fixture writes an
+    oversized line to *both* standard output and standard error at once, so
+    SubprocessTarget has to read (and cap) both streams concurrently while
+    also killing the process. This confirms that teardown on the
+    ProactorEventLoop still finishes within the wall-clock bound and reports
+    a bounded ``ERROR`` -- i.e., reading both oversized streams at the same
+    time never causes the two pipes to deadlock against each other on
+    Windows.
     """
     _assert_running_on_proactor_loop()
     max_output_bytes = 1024
@@ -315,9 +387,9 @@ async def test_oversized_output_stays_byte_bounded_with_concurrent_stderr_drain(
     result = await _run_within_no_hang_bound(target)
     assert result.status is ExecutionStatus.ERROR
     assert result.error is not None
-    # Byte-bounded even with both streams oversized and drained concurrently:
-    # neither the oversized standard output nor the oversized standard error
-    # leaks unbounded into the result.
+    # Confirms both oversized streams stayed capped: neither the oversized
+    # standard output nor the oversized standard error leaked into the
+    # result without a limit.
     _assert_result_stays_byte_bounded(
         result, max_output_bytes=max_output_bytes, max_stderr_bytes=max_stderr_bytes
     )

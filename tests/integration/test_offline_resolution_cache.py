@@ -1,22 +1,29 @@
-"""End-to-end proof of AEK-01 / ADR-0011: ``datasets pull`` then ``run --offline``
-against a network-requiring provider, with zero network calls on the offline
-run.
+"""End-to-end test proving AEK-01 / ADR-0011: once you've run ``datasets pull``
+to cache a dataset locally, running ``run --offline`` against that same
+dataset must make zero network calls, even though the underlying provider
+(Hugging Face here) normally needs the network to work at all.
 
-Deliberately its own module rather than an addition to ``test_cli.py``,
-matching this suite's own stated convention (see that module's "Offline CLI
-coverage" section) of each offline-focused test module being self-sufficient
--- the fake provider and the loopback socket guard below are duplicated, not
-imported, from ``test_cli.py``/``tests/unit/datasets/test_offline_socket_guard.py``.
+This test lives in its own file instead of being added to ``test_cli.py``,
+following the same pattern this test suite already uses for offline tests
+(see the "Offline CLI coverage" section in that file): each offline-focused
+test file is self-contained, so the fake provider and the "block outbound
+network calls" guard below are copied here rather than imported from
+``test_cli.py`` / ``tests/unit/datasets/test_offline_socket_guard.py``.
 
-Two independent properties are asserted together, not just one:
+This test checks two separate things, because either one alone wouldn't be
+enough proof:
 
-1. The fake ``huggingface`` provider's ``resolve``/``preview``/``iter_records``
-   call counts are unchanged across the offline ``run`` -- proving the
-   *framework code path* never reaches the provider a second time, which a
-   real (non-fake) provider's own network-safety cannot prove by itself.
-2. An OS-level loopback-allowlisting socket guard wraps the offline phase --
-   proving no code path (not just the fake provider) opens a real outbound
-   connection.
+1. The fake ``huggingface`` provider counts how many times its ``resolve``,
+   ``preview``, and ``iter_records`` methods get called. Those counts must
+   not change during the offline run -- this proves our own code never calls
+   the provider again once it's supposed to be running offline. (A real
+   provider simply refusing network access wouldn't prove this -- it would
+   only prove the real provider behaves well, not that our code never tried
+   to reach it.)
+2. A guard replaces Python's low-level socket-connect function so that any
+   attempt to connect to somewhere other than localhost raises an error.
+   This wraps the entire offline phase, proving that *no* code anywhere --
+   not just the fake provider -- opens a real network connection.
 """
 
 from __future__ import annotations
@@ -58,12 +65,14 @@ _REVISION = "canned-gsm8k-revision-for-offline-resolution-cache-test"
 
 
 class _CallCountedHubProvider:
-    """Hermetic, call-counted stand-in for the Hugging Face provider.
+    """A fake stand-in for the real Hugging Face provider, safe to use here
+    because it never touches the real network.
 
     Unlike ``tests/integration/test_cli.py``'s ``_CannedHubProvider``, every
-    method here increments its own counter so a test can assert the exact
-    number of times the provider was actually reached -- the precise
-    property this module exists to prove stays at its pre-offline-run value.
+    method here increments its own counter, so a test can check the exact
+    number of times the provider was actually called -- which is exactly the
+    thing this file's test needs to prove stays unchanged after the offline
+    run.
     """
 
     api_version = "1"
@@ -97,12 +106,14 @@ class _CallCountedHubProvider:
         self, dataset: ResolvedDataset, *, offset: int = 0, limit: int = 10
     ) -> SamplePage:
         self.preview_calls += 1
-        # `tuple(x async for x in ...)` does NOT work here: passed as a bare
-        # generator-expression argument, `async for` makes the whole
-        # expression an async generator object, which the synchronous
-        # `tuple()` builtin cannot iterate (`TypeError: 'async_generator'
-        # object is not iterable`). An async list comprehension, awaited
-        # implicitly by this `async def` body, is the correct shape.
+        # Why not just write `tuple(record async for record in ...)`? Because
+        # putting `async for` inside a generator expression turns the whole
+        # expression into an "async generator" object, and the plain,
+        # synchronous `tuple()` function cannot loop over one of those --
+        # Python raises `TypeError: 'async_generator' object is not
+        # iterable`. Writing it as a list comprehension instead works, because
+        # this function is itself `async def`, so Python knows to await each
+        # step of an async list comprehension automatically.
         records = [
             record async for record in self.iter_records(dataset, offset=offset, limit=limit)
         ]
@@ -160,8 +171,10 @@ def _manifest_path(tmp_path: Path) -> Path:
     return path
 
 
-# --- loopback-allowlisting socket guard, duplicated per this suite's own -----
-# --- established convention (see test_cli.py / test_offline_socket_guard.py) -
+# --- guard that blocks any network connection except to localhost ("loopback")
+# --- copied here (not imported) to match this suite's convention that each --
+# --- offline-focused test file is self-contained -- see test_cli.py / -------
+# --- test_offline_socket_guard.py --------------------------------------------
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -185,10 +198,14 @@ def _raise_unless_loopback(real: Any) -> Any:
 
 
 def _forbid_outbound_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch ``socket.socket.connect``/``connect_ex`` to fail on any non-loopback
-    destination. A plain helper (not a fixture) so the caller controls exactly
-    when the guard becomes active -- here, only for the offline phase, not the
-    online ``pull`` phase that precedes it."""
+    """Make any attempt to open a network connection to somewhere other than
+    localhost raise an error, by replacing ``socket.socket.connect`` and
+    ``connect_ex`` with versions that check the destination first.
+
+    This is a plain function, not a pytest fixture, so the test controls
+    exactly when the guard turns on -- in this file, only during the offline
+    phase, not during the earlier online ``pull`` step, which is allowed to
+    use the network."""
     monkeypatch.setattr(socket.socket, "connect", _raise_unless_loopback(socket.socket.connect))
     monkeypatch.setattr(
         socket.socket, "connect_ex", _raise_unless_loopback(socket.socket.connect_ex)
@@ -241,9 +258,10 @@ def test_pull_then_run_offline_over_hf_provider_makes_zero_further_provider_or_n
             ],
         )
 
-    # Apply the socket guard only around the offline call: the online pull
-    # step above is expected to (and, via the fake, safely does not) use the
-    # fake provider's own in-process "network" path.
+    # The socket guard is switched on only for the offline call below. The
+    # online `pull` step above also talks to the provider, but since that
+    # provider here is a fake running in-process (no real sockets involved),
+    # there's nothing yet for the guard to catch, and it's safe to leave off.
     _forbid_outbound_network(monkeypatch)
     result = _invoke_offline_run()
 
@@ -267,17 +285,27 @@ def test_pull_then_run_offline_over_hf_provider_makes_zero_further_provider_or_n
 def test_run_offline_without_a_prior_pull_still_fails_with_typed_actionable_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Contrast case: skipping the online ``pull`` must still fail loudly
-    (never silently succeed), never touching the provider. With a
-    ``resolution_cache`` configured (ADR-0011), the error message also
-    becomes more actionable -- it names ``datasets pull`` as the fix --
-    instead of ADR-0010's original unconditional "resolution is never
-    cached" wording. The underlying ``OfflineCacheMiss.retryable`` value
-    this message reflects (``True`` here, vs. ``False`` with no
-    ``resolution_cache`` configured at all) is asserted directly at the
-    catalog level in ``tests/unit/datasets/test_catalog.py``; the CLI's
-    error boundary only ever renders ``[code] message``, never the boolean
-    itself.
+    """The opposite case from the test above: what happens if you try
+    ``run --offline`` WITHOUT ever running ``datasets pull`` first? This must
+    still fail with a clear error -- it must never quietly "succeed" with no
+    data, and it must never touch the real provider.
+
+    Because this test's catalog is set up with a ``resolution_cache`` (see
+    ADR-0011, the decision that added an on-disk cache of resolved dataset
+    metadata), the error message here is more helpful than it used to be: it
+    directly tells the user to run ``datasets pull`` to fix the problem,
+    instead of ADR-0010's older, blanket message that just said dataset
+    resolution is never cached at all.
+
+    Under the hood, this better message exists because
+    ``OfflineCacheMiss.retryable`` is ``True`` in this situation (there IS a
+    resolution cache configured, it's just empty) -- versus ``False`` when no
+    ``resolution_cache`` is configured at all. That ``True``/``False`` value
+    itself is checked directly, at the catalog level, in
+    ``tests/unit/datasets/test_catalog.py``. This test only checks what the
+    CLI actually prints to the user, which is always in the form
+    ``[code] message`` -- the underlying ``True``/``False`` value never shows
+    up in the CLI's own output.
     """
     provider = _CallCountedHubProvider()
     catalog = _build_catalog(tmp_path, provider)

@@ -1,21 +1,27 @@
 """User-facing documentation hygiene: no internal codenames leak out.
 
-Plan Task 15 Step 1: "Add a public-document hygiene test that scans
-README, guides, examples, CLI help snapshots, and error-message fixtures
-for internal codenames `agentic_v2`, `agentic-v2-eval`, `tools.agents`, and
-`executionkit`. The dependency-boundary test may contain forbidden names as
-test data; public user-facing artifacts may not."
+A "codename" here is an internal-only project or package name -- one that
+should never appear anywhere an actual user of this library reads, because
+it would be confusing (nobody outside this repo knows what it refers to)
+or would leak information that is only meant for internal use. Plan Task
+15 Step 1: "Add a public-document hygiene test that scans README, guides,
+examples, CLI help snapshots, and error-message fixtures for internal
+codenames `agentic_v2`, `agentic-v2-eval`, `tools.agents`, and
+`executionkit`. The dependency-boundary test may contain forbidden names
+as test data; public user-facing artifacts may not."
 
 This module scans exactly the user-facing artifact set the plan names:
 README.md, docs/index.md, docs/guides/*.md, examples/**, and the CLI
-``--help`` output captured live via ``typer.testing.CliRunner`` (root plus
-every registered subcommand/subcommand-group, so a codename hidden in a
-docstring surfaced only through a subcommand's own ``--help`` is still
-caught). It deliberately does NOT scan docs/plans, docs/specs, or docs/adr
--- those documents legitimately name the forbidden identifiers as things
-this package must never import (see ADR-0001, ADR-0006, and the plan's own
-dependency-boundary snippet), so scanning them would produce permanent,
-correct-as-designed false positives.
+``--help`` output captured live via ``typer.testing.CliRunner`` (the root
+command plus every registered subcommand and subcommand group, so a
+codename hidden in a docstring that only surfaces through a subcommand's
+own ``--help`` is still caught). It deliberately does NOT scan
+docs/plans, docs/specs, or docs/adr -- those documents legitimately name
+the forbidden identifiers as things this package must never import (see
+ADR-0001, ADR-0006, and the plan's own dependency-boundary snippet), so
+scanning them would produce permanent false positives (failures that flag
+something as broken when it is actually fine and expected) that could
+never be fixed, since that usage is correct by design.
 """
 
 from __future__ import annotations

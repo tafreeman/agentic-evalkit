@@ -1,27 +1,34 @@
-"""Unit tests for the Hugging Face discovery and Dataset Viewer provider.
+"""Unit tests for the provider that talks to Hugging Face: dataset search,
+plus the "Dataset Viewer" API (Hugging Face's read-only HTTP API for
+browsing a dataset's rows, splits, and stats without downloading the whole
+dataset).
 
-These tests never touch the network: every Dataset Viewer HTTP call is
-served by ``httpx.MockTransport`` from real, captured JSON fixtures under
-``tests/fixtures/huggingface/``, and every Hub call goes through
-``_FakeHub``, a minimal stand-in for the subset of ``huggingface_hub.HfApi``
-this provider calls (``dataset_info`` and ``list_datasets``).
+None of these tests touch the real network. Every Dataset Viewer HTTP call
+is answered by ``httpx.MockTransport``, which replays real JSON responses
+that were captured earlier and saved under ``tests/fixtures/huggingface/``.
+Every call to the Hugging Face "Hub" (the separate API used to look up
+dataset metadata and to search for datasets) goes through ``_FakeHub``, a
+small stand-in for the two ``huggingface_hub.HfApi`` methods this provider
+actually calls (``dataset_info`` and ``list_datasets``).
 
 Fixture layout (see task brief: "you may nest per-dataset subdirs; document
 your layout in the test module"):
 
-- ``tests/fixtures/huggingface/*.json`` -- the seven plan-listed endpoint
-  fixtures (``dataset_info``, ``is_valid``, ``splits``, ``rows``, ``size``,
-  ``statistics``, ``parquet``) captured live for ``openai/gsm8k``
-  (config ``main``, split ``test``).
+- ``tests/fixtures/huggingface/*.json`` -- the seven endpoint responses the
+  plan called for (``dataset_info``, ``is_valid``, ``splits``, ``rows``,
+  ``size``, ``statistics``, ``parquet``), captured from the real API for
+  ``openai/gsm8k`` (config ``main``, split ``test``).
 - ``tests/fixtures/huggingface/swebench_verified/*.json`` -- the same seven
-  endpoints captured live for ``princeton-nlp/SWE-bench_Verified``
-  (config ``default``, split ``test``).
+  responses, captured from the real API for
+  ``princeton-nlp/SWE-bench_Verified`` (config ``default``, split ``test``).
 
-Every fixture file is a verbatim, unmodified capture of the real HTTP
-response body (see the callback report for the exact URLs used).
+Every fixture file is an exact, unedited copy of the real HTTP response body
+(see the callback report for the exact URLs that were captured).
 
-Live network verification (both presets resolve and preview two real rows)
-lives in ``tests/live/test_huggingface_live.py`` behind the ``live`` marker.
+A separate suite that actually hits the real network (checking that both
+presets resolve and preview two real rows) lives in
+``tests/live/test_huggingface_live.py``, gated behind the ``live`` marker so
+it doesn't run by default.
 """
 
 from __future__ import annotations
@@ -262,7 +269,7 @@ def _swe_ref(**overrides: Any) -> DatasetRef:
     return DatasetRef(**fields)
 
 
-# --- Step 1 (plan verbatim): request-shape and pagination -------------------
+# --- Step 1 (copied word-for-word from the plan doc): request shape and pagination ---
 
 
 @pytest.mark.asyncio
@@ -316,8 +323,12 @@ async def test_resolve_gsm8k_from_captured_fixtures() -> None:
     assert resolved.row_count == 1319
     assert resolved.license == "mit"
     assert resolved.gated is False
-    # dataset_info supplies both the commit SHA and the card metadata, so
-    # resolve() must call the Hub exactly once for it, not once per field.
+    # A single call to the Hub's dataset_info gives us both the commit SHA
+    # (the exact version identifier for this dataset, like a git commit
+    # hash) and the "dataset card" metadata (the dataset's
+    # description/license/tags -- like a structured README) in one response.
+    # So resolve() must only need to call the Hub once in total for this
+    # dataset, not once per field it reads off the response.
     assert hub.dataset_info_calls == [("openai/gsm8k", None)]
     await client.aclose()
 
@@ -423,7 +434,12 @@ async def test_statistics_and_parquet_failure_is_recorded_not_fatal() -> None:
     await client.aclose()
 
 
-# --- Load-bearing endpoint errors classify correctly -------------------------
+# --- Errors from endpoints resolve() actually depends on classify correctly ---
+#
+# Unlike the best-effort endpoints above (where a failure is tolerated and
+# resolve() still succeeds), these are endpoints resolve() cannot succeed
+# without. Each kind of failure from them must be turned into the right,
+# specific exception type.
 
 
 @pytest.mark.asyncio

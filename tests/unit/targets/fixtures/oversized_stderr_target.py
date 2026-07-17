@@ -1,6 +1,8 @@
-"""Fixture: writes far more to standard error than any reasonable byte bound
-while still returning a valid response on standard output, to exercise
-SubprocessTarget's concurrent, bounded standard-error drain.
+"""Fixture script: writes 1 MiB to standard error (far more than any byte
+limit these tests configure) but still sends back a normal, valid response
+on standard output. Used to check that SubprocessTarget reads and caps an
+oversized stderr stream in the background without it interfering with a
+perfectly good response arriving on stdout at the same time.
 """
 
 import json

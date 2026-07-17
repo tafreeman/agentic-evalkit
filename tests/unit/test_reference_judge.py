@@ -1,11 +1,24 @@
 """Tests for the packaged, deterministic ``ReferenceJudgeClient`` (T2-A(c)).
 
-Covers the client in isolation (fingerprint stability, containment
-matching, abstention with no reference, indifference to the position-bias
-probe's ``metadata``) and its integration with ``JudgeGrader`` proving the
-one safety property that matters most: wired in permanently uncalibrated,
-it can never hard-gate a release, regardless of the caller's ``gate``
-argument.
+``ReferenceJudgeClient`` is a working, fully deterministic example judge --
+see its own module docstring for what a "judge" is and why this one exists.
+This file has two parts.
+
+The first part tests the client entirely on its own: that its fingerprint
+never changes, that it correctly says "pass" when the reference answer's
+text turns up inside the candidate's answer ("containment matching") and
+"fail" when it doesn't, that it abstains (declines to give a verdict) when
+there's no reference answer to check against, and that it isn't thrown off
+by the extra ``metadata`` a request can carry as part of ``JudgeGrader``'s
+check for "position bias" (whether a judge's verdict changes depending on
+the order in which the two things being compared are shown to it).
+
+The second part tests this client wired up together with the real
+``JudgeGrader``, to prove the one safety property that matters most here:
+because this reference client is permanently uncalibrated (nobody has ever
+measured its accuracy against real, human-labeled answers), ``JudgeGrader``
+must never let it block a release -- must never set ``hard_gate=True`` --
+no matter what the caller passes for the ``gate`` argument.
 """
 
 from __future__ import annotations
@@ -98,14 +111,17 @@ async def test_abstains_when_sample_has_no_reference() -> None:
     response = await client.judge(_request(candidate_output="anything", reference=None))
     assert response.abstained is True
     assert response.score is None
-    assert response.parse_ok is True  # abstention is not a parse failure
+    assert response.parse_ok is True  # declining to answer isn't the same as failing to parse
 
 
 @pytest.mark.asyncio
 async def test_empty_reference_never_matches_by_vacuous_substring() -> None:
-    """An empty (but non-None) reference must never "match" every candidate
-    via the vacuous-substring case (``"" in anything`` is always True in
-    Python) -- that would make every sample with a blank reference pass."""
+    """In Python, an empty string counts as "contained in" any other string
+    (``"" in "anything"`` is always ``True``). Left unguarded, that quirk
+    would mean a sample with a blank-but-present reference answer would
+    always "pass," since an empty reference technically matches everything.
+    This test checks that the judge guards against that: an empty reference
+    must still come back as a fail, not an automatic pass."""
     client = ReferenceJudgeClient()
     response = await client.judge(_request(candidate_output="anything at all", reference=""))
     assert response.verdict == "fail"
@@ -113,10 +129,16 @@ async def test_empty_reference_never_matches_by_vacuous_substring() -> None:
 
 @pytest.mark.asyncio
 async def test_verdict_is_unaffected_by_position_bias_probe_metadata() -> None:
-    """JudgeGrader sends a second request with metadata={"reversed": True}
-    to probe for position bias. A containment check has no "option order" to
-    be biased by, so both calls must agree -- proven directly here, and
-    exercised through JudgeGrader's own probe in the integration test below.
+    """As part of deciding whether a judge's verdict is trustworthy enough to
+    gate a release, JudgeGrader sends a second, follow-up request with
+    metadata={"reversed": True} -- this simulates showing the judge the same
+    comparison but with the two sides swapped, to check whether that alone
+    changes its answer ("position bias"). A plain containment check (is the
+    reference text found inside the candidate's answer?) has no notion of
+    "which side came first," so there's nothing for it to be biased by --
+    both calls must agree. This test proves that directly; the integration
+    test below exercises the same guarantee through JudgeGrader's actual
+    probe mechanism.
     """
     client = ReferenceJudgeClient()
     primary = await client.judge(_request(candidate_output="the answer is 42", reference="42"))
@@ -132,10 +154,13 @@ async def test_verdict_is_unaffected_by_position_bias_probe_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_uncalibrated_judge_grader_never_hard_gates_even_when_asked_to() -> None:
-    """The one property that matters most for shipping this in a manifest's
-    default grader table: even with ``gate=True`` requested, an uncalibrated
-    ReferenceJudgeClient-backed JudgeGrader can never set hard_gate=True
-    (design §9 / JudgeGrader's own calibration=None contract)."""
+    """This is the single most important property for safely shipping this
+    reference judge as a default option in a manifest's grader table: even
+    when the caller explicitly asks for gate=True (i.e. "let this judge's
+    verdict block a release if it turns out trustworthy"), a JudgeGrader
+    backed by this permanently-uncalibrated client must never actually set
+    hard_gate=True on its result (design §9, and JudgeGrader's own guarantee
+    that passing calibration=None makes gating impossible)."""
     grader = JudgeGrader(
         ReferenceJudgeClient(), calibration=None, gate=True, name="judge-reference@1"
     )

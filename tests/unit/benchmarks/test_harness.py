@@ -1,10 +1,17 @@
-"""Harness contract serialization and outcome-discrimination tests (design §7.1).
+"""Tests for the harness data shapes, and for how harness outcomes stay distinct (design §7.1).
 
-Verbatim plan Step 4 (test_missing_harness_is_unavailable_not_failed) and
-Step 7 requirements live here: round-trip HarnessRequest/HarnessResult JSON,
-and prove FakeHarnessExecutor keeps unavailable, infrastructure-error,
-resolved=False, and resolved=True outcomes distinct rather than collapsing
-them into a boolean.
+("Harness" means an external, official tool that actually checks whether a
+submitted fix works -- see :mod:`agentic_evalkit.benchmarks.harness` for the
+full explanation.) This file covers two things required by this project's
+written implementation plan (Step 4, function
+``test_missing_harness_is_unavailable_not_failed`` below; and Step 7): that
+a ``HarnessRequest``/``HarnessResult`` can be converted to JSON and read
+back without losing any information, and that ``FakeHarnessExecutor`` (a
+test-only stand-in harness) keeps four different outcomes -- "harness
+unavailable," "harness broke with an infrastructure error," "harness ran
+and confirmed the issue is still broken," and "harness ran and confirmed
+the issue is fixed" -- distinct from each other, instead of collapsing them
+all down into a single true/false.
 """
 
 from datetime import UTC, datetime
@@ -63,7 +70,8 @@ async def test_unavailable_harness_executor_reports_unavailable_with_install_hin
 
 @pytest.mark.asyncio
 async def test_fake_harness_executor_keeps_four_outcomes_distinct() -> None:
-    """unavailable, infrastructure error, resolved=False, and resolved=True never collapse."""
+    """Four outcomes must never blur into each other: unavailable, infrastructure
+    error, resolved=False (confirmed still broken), and resolved=True (confirmed fixed)."""
     unavailable = HarnessResult(status=HarnessStatus.UNAVAILABLE, resolved=None, message="n/a")
     infra_error = HarnessResult(
         status=HarnessStatus.ERROR,
@@ -95,8 +103,9 @@ async def test_fake_harness_executor_keeps_four_outcomes_distinct() -> None:
     assert outcomes["resolved-case"].status is HarnessStatus.COMPLETED
     assert outcomes["resolved-case"].resolved is True
 
-    # All four results are pairwise distinct: no outcome silently degrades
-    # into another.
+    # Check that all four results are genuinely different from each other --
+    # for example, that "the harness broke" never accidentally looks
+    # identical to "the harness ran and said the issue isn't fixed."
     all_results = list(outcomes.values())
     assert len({result.model_dump_json() for result in all_results}) == 4
 
@@ -113,12 +122,15 @@ async def test_fake_harness_executor_raises_for_unconfigured_sample() -> None:
 
 
 def test_generic_grade_cannot_claim_resolved_without_a_harness_result() -> None:
-    """A GradeResult alone carries no `resolved` field: only a HarnessResult can assert it.
+    """A plain GradeResult has no way to claim a bug is "resolved" -- only a real HarnessResult can.
 
-    This is a type-level guarantee, not a runtime check: GradeResult (design
-    §5.5) has no `resolved` attribute at all, so grading code cannot smuggle
-    an authoritative resolution verdict out of a plain grade. Authoritative
-    resolution can only ever come from a real HarnessResult.resolved.
+    This is guaranteed by the shape of the data itself, not by some check
+    that runs at test time: `GradeResult` (design §5.5) simply has no
+    `resolved` field defined on it anywhere, so there is no way for ordinary
+    grading code to sneak a "yes, this is genuinely fixed" claim out through
+    a plain grade. A real claim that something is fixed can only ever come
+    from an actual `HarnessResult.resolved` -- the product of really running
+    the harness, not an approximate grade standing in for one.
     """
     grade = GradeResult(
         sample_id="org__repo-1",

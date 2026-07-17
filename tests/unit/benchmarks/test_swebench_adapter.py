@@ -1,3 +1,14 @@
+"""Tests for :mod:`agentic_evalkit.benchmarks.swebench`.
+
+This adapter turns raw SWE-bench Verified dataset rows into this project's
+typed sample format, and can export a prediction in the exact format the
+real, official SWE-bench tooling expects. It never checks out a
+repository, applies a patch, or decides whether an issue is actually
+fixed -- that real, authoritative verdict can only come from a harness (see
+:mod:`agentic_evalkit.benchmarks.harness` and
+:mod:`agentic_evalkit.benchmarks.swebench_docker`).
+"""
+
 import pytest
 from _benchmark_fixtures import _harness_request
 
@@ -57,7 +68,8 @@ def test_export_prediction_defaults_model_name_or_path_to_agentic_evalkit_target
 
 
 def test_export_prediction_accepts_custom_model_name_or_path() -> None:
-    """Real leaderboard submissions must be able to carry the actual system name."""
+    """A real submission (e.g. to a public leaderboard) needs to record which
+    system actually produced the patch, instead of the placeholder name."""
     row = SourceRecord(row_id="0", digest="sha256:row", data=dict(_COMPLETE_ROW_DATA))
     sample = SweBenchVerifiedAdapter().prepare(row)
     prediction = SweBenchVerifiedAdapter().export_prediction(
@@ -78,7 +90,9 @@ def test_export_prediction_never_includes_extra_keys() -> None:
 
 
 def test_prepare_accepts_native_array_fail_to_pass_and_pass_to_pass() -> None:
-    """Some sources encode these fields as native arrays rather than JSON strings."""
+    """Depending on where the data came from, FAIL_TO_PASS/PASS_TO_PASS may
+    already be a plain list rather than a JSON string that needs parsing --
+    the adapter must accept either form."""
     data = dict(_COMPLETE_ROW_DATA)
     data["FAIL_TO_PASS"] = ["test_x", "test_y"]
     data["PASS_TO_PASS"] = ["test_z"]
@@ -107,7 +121,9 @@ def test_prepare_raises_dataset_schema_mismatch_for_missing_required_field() -> 
 def test_prepare_never_touches_filesystem_or_checks_out_code(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """Adapter projection must be pure row transformation -- no repo checkout side effects."""
+    """Turning a raw row into a sample must be a pure, offline transformation
+    of that row's fields -- it must never actually download or check out
+    the repository the row refers to."""
     empty_dir = tmp_path_factory.mktemp("swebench-should-stay-empty")
     row = SourceRecord(row_id="0", digest="sha256:row", data=dict(_COMPLETE_ROW_DATA))
     SweBenchVerifiedAdapter().prepare(row)

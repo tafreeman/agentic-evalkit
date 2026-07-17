@@ -1,11 +1,16 @@
 """Tests for HttpTarget (plan Task 9, Steps 3 and 7; design §8).
 
-Plan Task 9 Step 3: "Use httpx.MockTransport to test that HttpTarget POSTs
-schema version, sample ID, input, attempt, and trace ID; maps a valid
-response; redacts authorization headers from evidence; maps 429 to a
-retryable target error; and maps deadline expiry to TIMEOUT." Relocated to
-``tests/unit/targets/**`` per this task's explicit test-tree ownership
-rather than ``tests/integration/``.
+Plan Task 9 Step 3 spells out exactly what this file must verify: "Use
+httpx.MockTransport to test that HttpTarget POSTs schema version, sample ID,
+input, attempt, and trace ID; maps a valid response; redacts authorization
+headers from evidence; maps 429 to a retryable target error; and maps
+deadline expiry to TIMEOUT." (``httpx.MockTransport`` is a test double built
+into the ``httpx`` library: it intercepts outgoing requests and hands back a
+canned response, so these tests never make a real network call.)
+
+These tests live under ``tests/unit/targets/**`` rather than
+``tests/integration/`` because this project's convention is to put a
+module's tests in the unit-test directory that mirrors its own path.
 """
 
 import asyncio
@@ -88,7 +93,10 @@ async def test_redacts_authorization_header_from_evidence() -> None:
         }
     )
     assert "super-secret-token" not in serialized
-    # A redaction placeholder or absence is acceptable; the raw secret must not leak.
+    # Either the header comes back replaced with the "***redacted***"
+    # placeholder, or it's missing from the recorded headers entirely --
+    # both are fine here. The one thing that must never happen is the real
+    # secret value leaking into what gets recorded.
     recorded_headers = result.environment_metadata.get("request_headers")
     if recorded_headers is not None:
         assert recorded_headers.get("authorization") in ("***redacted***", None)  # type: ignore[union-attr]
@@ -116,7 +124,8 @@ async def test_maps_429_to_retryable_target_error_after_exhausting_retries() -> 
 
     assert result.status is ExecutionStatus.ERROR
     assert result.error is not None
-    # bounded retries: initial attempt + max_retries retries, never unbounded
+    # Retries are bounded, not infinite: 1 initial attempt + max_retries (2)
+    # retries = 3 calls total, and no more.
     assert call_count == 3
 
 
@@ -251,5 +260,9 @@ async def test_rejects_response_with_mismatched_sample_id() -> None:
 
 
 async def _no_op_sleep(_seconds: float) -> None:
-    """Injected sleep function for deterministic, fast retry tests."""
+    """A stand-in for the real backoff wait between retries, passed to
+    HttpTarget's `sleep` parameter. It returns immediately instead of
+    actually waiting, so retry tests run fast and don't depend on real
+    wall-clock time to pass reliably.
+    """
     return None

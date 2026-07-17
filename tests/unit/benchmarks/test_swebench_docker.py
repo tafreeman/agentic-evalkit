@@ -1,10 +1,17 @@
 """Tests for :class:`agentic_evalkit.benchmarks.swebench_docker` (ADR-0014).
 
-Hermetic: the ``preflight`` and ``evaluator`` seams are injected, so every
-UNAVAILABLE / ERROR / resolved-True / resolved-False / malformed-report
-branch is driven without a Docker daemon or the ``swebench`` package. The
-real default seams (``_run_official_harness``/``_default_preflight``) are
-live-only and exercised by ``tests/live/test_swebench_harness_live.py``.
+These tests are hermetic, meaning they never touch the network or a real
+Docker daemon. That's possible because the two places this executor would
+normally reach out to the real world -- ``preflight`` (checks whether
+Docker and the ``swebench`` package are ready to use) and ``evaluator``
+(actually runs the official harness) -- are passed into it as plain
+functions, which tests can swap out for fakes. That lets every possible
+outcome -- UNAVAILABLE, ERROR, resolved=True, resolved=False, and a
+malformed report -- be tested directly, without needing a Docker daemon or
+the ``swebench`` package installed. The real versions of those two
+functions (``_run_official_harness`` and ``_default_preflight``) only run
+for real inside ``tests/live/test_swebench_harness_live.py``, which does
+use a real Docker daemon.
 """
 
 from datetime import UTC, datetime
@@ -52,7 +59,7 @@ async def test_missing_capability_is_unavailable_with_an_actionable_hint() -> No
     assert result.status is HarnessStatus.UNAVAILABLE
     assert result.resolved is None
     assert "swebench" in result.message
-    assert "Docker" in result.message  # from the default install hint
+    assert "Docker" in result.message  # comes from the default install-hint text
 
 
 @pytest.mark.asyncio
@@ -81,7 +88,8 @@ async def test_resolved_report_maps_to_completed_true_with_evidence() -> None:
     assert result.resolved is True
     assert result.evidence["patch_successfully_applied"] is True
     assert result.evidence["tests_status"] == report["tests_status"]
-    # The verdict field itself is not duplicated into evidence.
+    # The pass/fail verdict lives in `result.resolved` -- it is not also
+    # copied into `result.evidence`.
     assert "resolved" not in result.evidence
     assert result.image_digests == {"base": "sha256:abc"}
 
@@ -119,7 +127,7 @@ async def test_non_mapping_image_digests_degrade_to_empty() -> None:
     assert result.image_digests == {}
 
 
-# --- swebench_prediction helper ---------------------------------------------
+# --- Tests for the swebench_prediction() helper function -------------------
 
 
 def _swebench_sample() -> EvalSample:
@@ -163,12 +171,14 @@ def test_swebench_prediction_defaults_to_an_empty_patch_when_absent() -> None:
     assert prediction["model_patch"] == ""
 
 
-# --- docker_safe_run_id (Codex P1: a ':' in run_id breaks container naming) --
+# --- docker_safe_run_id: fixes a bug where a ':' in run_id broke Docker's --
+# --- container naming (flagged as a top-priority fix in a Codex code review) --
 
 
 def test_docker_safe_run_id_strips_characters_docker_rejects() -> None:
-    # The CLI sample id is "swebench-verified:<instance>" -- the colon reaches
-    # Docker's container-name construction, which rejects it.
+    # This project's own sample ids look like "swebench-verified:<instance>".
+    # But Docker doesn't allow a ':' character in container/image names, so
+    # that colon has to be replaced before the id reaches Docker.
     run_id = docker_safe_run_id("swebench-verified:astropy__astropy-1")
     assert ":" not in run_id
     assert run_id == "agentic-evalkit-swebench-verified-astropy__astropy-1"

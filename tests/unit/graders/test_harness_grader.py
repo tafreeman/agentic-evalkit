@@ -1,9 +1,13 @@
 """Tests for :class:`agentic_evalkit.graders.harness.HarnessGrader` (ADR-0014).
 
-Hermetic: the authoritative-verification boundary is the packaged, in-memory
-``FakeHarnessExecutor`` (no Docker, no swebench). Proves the load-bearing
-mapping -- only a real ``resolved`` verdict hard-gates, and an operational
-failure (unavailable/error) never becomes a task ``FAIL`` (ADR-0005/0008).
+These tests never touch Docker or the real SWE-bench harness -- they use the
+packaged, in-memory ``FakeHarnessExecutor`` test double instead, so they run
+fast and produce the same result every time ("hermetic"). What they prove is
+the one rule this grader most needs to get right: only a real ``resolved``
+verdict from the harness is allowed to hard-gate (force a failure that other
+good scores can't average away). An operational failure -- the harness
+itself being unavailable or hitting an error, as opposed to a genuine
+wrong-answer verdict -- must never turn into a task ``FAIL`` (ADR-0005/0008).
 """
 
 from datetime import UTC, datetime
@@ -135,9 +139,15 @@ async def test_completed_execution_with_no_output_is_not_verifiable() -> None:
 
 @pytest.mark.asyncio
 async def test_spilled_output_is_a_diagnostic_error_not_a_silent_unavailable() -> None:
-    """A large patch spilled by the runner (output=None + an output_ref
-    artifact) must not be miscounted as capability-unavailable; it surfaces as
-    an explicit ERROR naming the spill (Codex review, P2)."""
+    """When the AI's answer is too large to keep inline, the runner writes it
+    out to separate storage and leaves only a reference behind here
+    (``output=None`` plus an ``output_ref`` entry in ``artifacts`` -- this is
+    called "spilling" the output). That's a real, gradable answer that just
+    happens to live somewhere else; it must not be mistaken for "there's
+    nothing to check" (which would report UNAVAILABLE). Instead the grader
+    should report an explicit ERROR that names the spill, so a human reading
+    the result can tell the two situations apart (flagged by a code-review
+    tool named Codex, priority P2)."""
     grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
     now = datetime.now(UTC)
     spilled = NormalizedExecutionResult(
@@ -179,8 +189,11 @@ async def test_predictor_failure_is_an_error_not_a_fail() -> None:
 
 
 def test_grade_result_from_harness_grader_has_no_resolved_attribute() -> None:
-    """Extends the harness-suite invariant to this grader: an authoritative
-    resolution verdict can never be smuggled out on a plain GradeResult."""
+    """Other tests in this project already check this same rule for other
+    graders; this test checks it again for this one: the harness's real,
+    official verdict (``resolved``) must never leak onto a plain
+    ``GradeResult`` as an extra attribute. ``GradeResult`` only ever exposes
+    the generic PASS/FAIL/etc. status -- never a harness-specific field."""
     from agentic_evalkit.models import GradeResult
 
     grade = GradeResult(

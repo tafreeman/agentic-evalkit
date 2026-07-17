@@ -1,10 +1,17 @@
 """Tests for :mod:`agentic_evalkit.benchmarks.grounding` (ADR-0012).
 
-The adapter's load-bearing property is the oracle/input split: the system
-under test sees the question and canary-field-stripped documents only,
-while required evidence, the canary registry, and gold spans stay in
-grading-only metadata. Record validation is fail-closed: every malformed
-record shape raises ``DatasetSchemaMismatch`` before execution or grading.
+The most important thing this adapter has to get right is keeping two
+things strictly separate: what the system under test is allowed to see (the
+question, plus the source documents with their "canary" markers stripped
+out -- see the adapter module's own docstring for what a canary is), versus
+what only the grader is allowed to see (the required-evidence list, the
+canary markers themselves, and the gold quote spans -- together, the
+"answer key" for this task). These tests check that split actually holds.
+They also check that validation "fails closed": if a record's data doesn't
+check out -- a bad shape, a missing field, an internal inconsistency --
+preparing it raises ``DatasetSchemaMismatch`` immediately, before the
+sample can ever reach execution or grading, instead of silently letting bad
+data through.
 """
 
 from typing import Any
@@ -57,10 +64,13 @@ def test_prepare_strips_the_canary_field_but_keeps_document_text() -> None:
     assert isinstance(documents, list)
     for document in documents:
         assert isinstance(document, dict)
-        # The machine-readable canary label never reaches the target...
+        # The "canary" field -- the label that flags this as a planted
+        # tripwire -- never reaches the system under test...
         assert "canary" not in document
-    # ...but the token itself stays embedded in the visible text, where a
-    # careful system should treat it as the do-not-cite distractor it is.
+    # ...but the canary text itself is still sitting inside the document,
+    # exactly where it was planted. A careful system should just read past
+    # it as ordinary document text, not recognize it as something special
+    # to call out or cite.
     texts = [document["text"] for document in documents if isinstance(document, dict)]
     assert any(_CANARY_A in text for text in texts if isinstance(text, str))
 

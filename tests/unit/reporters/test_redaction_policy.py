@@ -1,4 +1,6 @@
-"""Tests for the shared redaction policy (design §12, plan Task 13)."""
+"""Tests for the shared redaction policy -- the rules for scrubbing secrets
+out of a report before it's written (design doc §12, plan Task 13).
+"""
 
 import re
 
@@ -71,11 +73,18 @@ def test_redaction_leaves_samples_without_grades_untouched(
 def test_redaction_covers_the_system_under_tests_raw_output_too(
     pass_error_timeout_and_provenance_run: EvalRunResult,
 ) -> None:
-    """A secret-shaped value in ``execution.output`` must be redacted at the
-    report boundary just like grade evidence -- the target's own raw words
-    are not exempt. This is the gap the spill boundary's docstring assumed
-    was already closed here: an output that never hits the spill threshold
-    (or shrinks below it once redacted) still reaches this function.
+    """A secret-looking value inside ``execution.output`` (the raw output from
+    the system being tested, not from our own grading code) must get redacted
+    when the report is written, exactly like grade evidence does -- the
+    tested system's own words don't get a free pass.
+
+    This test closes a specific gap: elsewhere in the code, a docstring about
+    "spilling" (writing an output that's too big to keep inline out to its
+    own separate file) assumed this redaction step already covered ordinary,
+    non-spilled outputs. But an output small enough to never trigger
+    spilling -- or one that only shrinks below the spill-size threshold after
+    being redacted -- still needs to pass through this same redaction
+    function, or it would reach the final report with its secrets intact.
     """
     run = pass_error_timeout_and_provenance_run
     leaking_execution = run.samples[0].execution.model_copy(
@@ -95,9 +104,11 @@ def test_redaction_covers_the_system_under_tests_raw_output_too(
 def test_redaction_covers_execution_error_payloads(
     pass_error_timeout_and_provenance_run: EvalRunResult,
 ) -> None:
-    """An operational failure's captured ``error`` context can carry exception
-    text (stack traces, repr'd arguments) that happens to embed a credential
-    -- it must be redacted exactly like a successful execution's output."""
+    """When something goes wrong while running a sample (a timeout, a crash,
+    etc.), the ``error`` field can capture debugging text -- a stack trace, or
+    a Python repr of some arguments -- that might happen to contain a
+    credential (an API key or token). That text must be redacted exactly the
+    same way a successful execution's output would be."""
     run = pass_error_timeout_and_provenance_run
     leaking_execution = run.samples[1].execution.model_copy(
         update={"error": {"message": "connect failed with Bearer eyJhbGciOiJIUzI1NiJ9.tok"}}
@@ -143,10 +154,14 @@ def test_default_policy_redacts_known_credential_shapes(
 def test_default_policy_leaves_benign_evidence_untouched(
     pass_error_timeout_and_provenance_run: EvalRunResult,
 ) -> None:
-    # Length guards must keep ordinary prose intact: "task-manager" contains
-    # a literal "sk-", "hf_hub" starts like a token, "the bearer is here" has
-    # a short word after "bearer", and "authorization" as an evidence *key*
-    # is never pattern-scanned (patterns apply to string values only).
+    # Every default pattern requires a minimum length before it counts as a
+    # match, so ordinary text that merely resembles the start of a secret is
+    # left alone: "task-manager" happens to contain the literal characters
+    # "sk-", "hf_hub" starts the way a Hugging Face token does, and "the
+    # bearer is here" has only a short, harmless word after "bearer". Also,
+    # "authorization" here is used as a dictionary *key*, not a value -- these
+    # patterns only scan string values, never keys -- so a key literally
+    # named "authorization" doesn't trigger anything either.
     run = pass_error_timeout_and_provenance_run
     benign = {
         "note": "hf_hub lookup for task-manager passed; the bearer is here",
@@ -165,18 +180,21 @@ def test_default_policy_leaves_benign_evidence_untouched(
     assert redacted_grade.evidence == benign
 
 
-# --- Story 2.4 (R-002): RedactionPolicy construction edges ------------------
+# --- Story 2.4 (R-002): RedactionPolicy construction edge cases -------------
 #
-# The default pattern set must redact each representative credential shape in
-# isolation, and a malformed policy must fail loudly rather than silently
-# under-redact. See the report note on the "rejected at construction" AC:
-# ``RedactionPolicy()`` (empty) is the documented *opt-out* (the runner
-# defaults to ``DEFAULT_REDACTION_POLICY``, with empty as the explicit
-# opt-out), and patterns are compiled at the write boundary
-# (``apply_redaction``), not in the pydantic constructor -- so an invalid
-# regex is rejected at *write* time, not construction time. These guards pin
-# the behaviour the source actually provides: fail-loud, never silent
-# under-redaction.
+# Two things are checked below: (1) each default secret pattern must redact
+# its own kind of credential even when tested completely on its own, and (2) a
+# broken policy (e.g. a bad regex) must fail with a loud error rather than
+# quietly redacting nothing. This refers back to a review note on requirement
+# R-002's "rejected at construction" acceptance criterion: an empty
+# ``RedactionPolicy()`` is the documented, intentional way to turn redaction
+# off (the CLI normally defaults to ``DEFAULT_REDACTION_POLICY``, so you'd
+# have to pass an empty one on purpose), and regex patterns are only compiled
+# -- and therefore only checked for validity -- inside ``apply_redaction`` (at
+# write time), not inside the policy's constructor. So an invalid regex is
+# rejected when a report is written, not when the ``RedactionPolicy`` object
+# is created. The tests below pin down (lock in, as a regression check) that
+# real behavior: fail loudly, never silently redact less than requested.
 
 
 def _with_single_evidence_value(run: EvalRunResult, value: str) -> EvalRunResult:
@@ -202,9 +220,11 @@ def test_each_default_pattern_redacts_its_representative_secret_in_isolation(
     secret: str,
     sentinel: str,
 ) -> None:
-    """Every default secret pattern redacts its representative credential when
-    that credential is the only thing in the evidence value, so no default
-    pattern is dead or mis-anchored.
+    """Each default secret-detecting pattern actually redacts the credential
+    it's meant to catch, when that credential is the only text in the
+    evidence value. This proves none of the default regex patterns are dead
+    (never matching anything) or subtly broken (written to match a slightly
+    wrong shape).
     """
     run = _with_single_evidence_value(
         pass_error_timeout_and_provenance_run, f"captured {secret} in output"
@@ -218,10 +238,10 @@ def test_each_default_pattern_redacts_its_representative_secret_in_isolation(
 
 
 def test_empty_policy_is_a_valid_opt_out_not_a_construction_error() -> None:
-    """``RedactionPolicy()`` (no patterns, no evidence keys) is a valid,
-    constructible opt-out -- it is the documented way to disable redaction,
-    not a malformed policy. Construction must succeed and leave both tuples
-    empty.
+    """``RedactionPolicy()`` with no patterns and no evidence keys is a valid
+    way to build the object -- it's the documented way to turn redaction off
+    entirely, not a mistake or a malformed policy. Creating it this way must
+    succeed, leaving both tuples empty.
     """
     policy = RedactionPolicy()
     assert policy.secret_patterns == ()
@@ -231,10 +251,12 @@ def test_empty_policy_is_a_valid_opt_out_not_a_construction_error() -> None:
 def test_invalid_regex_pattern_fails_loudly_at_the_write_boundary(
     pass_error_timeout_and_provenance_run: EvalRunResult,
 ) -> None:
-    """A policy carrying an unparseable regex must not silently under-redact:
-    it fails loudly (``re.error``) when applied at the write boundary. (Note:
-    the source compiles patterns in ``apply_redaction``, so this is enforced
-    at write time, not in the constructor -- see the Story 2.4 report note.)
+    """A policy holding a regex pattern that Python can't even parse must not
+    quietly redact nothing -- it should raise ``re.error`` (a loud failure)
+    the moment it's actually used to write a report. (The code only compiles
+    -- and therefore only validates -- patterns inside ``apply_redaction``,
+    not inside the ``RedactionPolicy`` constructor, so this failure happens
+    at write time. See the Story 2.4 note above for why.)
     """
     bad_policy = RedactionPolicy(secret_patterns=("[unterminated",))
     with pytest.raises(re.error):
@@ -244,16 +266,19 @@ def test_invalid_regex_pattern_fails_loudly_at_the_write_boundary(
 def test_construction_accepts_an_invalid_regex_but_write_rejects_it(
     pass_error_timeout_and_provenance_run: EvalRunResult,
 ) -> None:
-    """Documents the AC deviation explicitly: an invalid regex is accepted at
-    construction (pydantic does not compile it) and only rejected when the
-    *same* policy is used at the write boundary. This exercises both halves of
-    its name: construction must not raise, and applying that constructed policy
-    must raise ``re.error`` rather than silently under-redacting.
+    """Spells out, on purpose, a difference from the original acceptance
+    criteria: building a ``RedactionPolicy`` with an invalid regex succeeds
+    (Pydantic doesn't try to compile the string, so it can't detect the
+    problem yet) -- it's only rejected later, when that same policy is
+    actually used to write a report. This test checks both halves: creating
+    the policy must NOT raise, and then using it to redact a run must raise
+    ``re.error`` instead of quietly redacting less than it should.
     """
     policy = RedactionPolicy(secret_patterns=("(",))
-    # Constructed fine; the pattern is stored verbatim as a string.
+    # Creating the policy succeeds -- the pattern is just stored as-is, as a
+    # plain string, not compiled yet.
     assert policy.secret_patterns == ("(",)
-    # The same policy, applied at the write boundary, fails loudly when the
-    # pattern is finally compiled -- not a silent no-op.
+    # Using that same policy to write a report fails loudly once the pattern
+    # is finally compiled -- it does not just silently do nothing.
     with pytest.raises(re.error):
         apply_redaction(pass_error_timeout_and_provenance_run, policy)

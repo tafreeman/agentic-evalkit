@@ -1,21 +1,28 @@
-"""Live, Docker-backed SWE-bench harness validation (ADR-0014, design §7.1).
+"""Live, Docker-backed test that the real SWE-bench harness actually works (ADR-0014, design §7.1).
 
-Opt-in only: ``@pytest.mark.live``, excluded from the default hermetic suite
-and run solely by ``.github/workflows/live-swebench.yml`` (which installs
-``agentic-evalkit[swebench]`` and provides a Docker daemon). It skips only
-when the capability is genuinely absent -- it does NOT skip for a missing
-fixture, so a scheduled/dispatch run actually validates the harness rather
-than passing vacuously.
+This only runs when explicitly requested (``@pytest.mark.live``) -- it's
+excluded from the normal, hermetic test suite, and in practice only runs
+inside ``.github/workflows/live-swebench.yml``, the one CI workflow that
+installs the optional ``agentic-evalkit[swebench]`` extra and has a real
+Docker daemon available. This test skips itself only when that capability
+is genuinely missing (no Docker, no ``swebench`` package) -- it deliberately
+does NOT skip just because some test fixture file happens to be missing, so
+that a scheduled or manually-triggered CI run actually proves the harness
+works, instead of silently passing without checking anything.
 
-The design §7.1 fidelity gate: a known-resolved (gold) patch and a
-non-fixing no-op patch pass through the *identical* real ``execute()`` code
-path and yield ``resolved=True`` / ``resolved=False`` respectively. The
-gold patch is the dataset's own reference solution (the ``patch`` field of
-each SWE-bench Verified row), so no external fixture file is needed:
+The key thing this file proves (the design §7.1 "fidelity gate"): feeding a
+patch that's known to actually fix the bug (the "gold" patch) through the
+real ``execute()`` code path yields ``resolved=True``; feeding a patch that
+changes nothing relevant through that *same* code path yields
+``resolved=False``. The gold patch used here isn't a separately-maintained
+fixture file -- it's simply the dataset's own official reference solution
+(the ``patch`` field already present on each SWE-bench Verified row), so
+nothing extra needs to be committed to this repo just to run this check:
 
-- ``AGENTIC_EVALKIT_SWEBENCH_INSTANCE`` (optional) -- a specific instance id;
-  when unset, the first dataset row is used, so the check always runs against
-  a real instance under Docker.
+- ``AGENTIC_EVALKIT_SWEBENCH_INSTANCE`` (optional environment variable) --
+  picks a specific SWE-bench instance id to test against. When it's not
+  set, this just uses the first row of the dataset, so the check always has
+  a real instance to run against under Docker.
 """
 
 from __future__ import annotations
@@ -42,14 +49,16 @@ def _require_capability() -> None:
 
 
 def _gold_instance() -> tuple[str, str]:
-    """Return ``(instance_id, gold_patch)`` from SWE-bench Verified.
+    """Look up an ``(instance_id, gold_patch)`` pair from SWE-bench Verified.
 
-    The dataset's own ``patch`` field IS the reference solution, so the
-    fidelity check needs no committed multi-megabyte fixture. Honors
-    ``AGENTIC_EVALKIT_SWEBENCH_INSTANCE`` when set, else the first row.
+    The dataset's own ``patch`` field already IS the correct reference fix
+    for that instance, so this check doesn't need its own separately
+    committed fixture file (which could be several megabytes). Uses the
+    instance named by the ``AGENTIC_EVALKIT_SWEBENCH_INSTANCE`` environment
+    variable if it's set, otherwise just uses the dataset's first row.
     """
     try:
-        from datasets import load_dataset  # provided by the swebench extra
+        from datasets import load_dataset  # comes from installing the swebench extra
     except ImportError:  # pragma: no cover - live only
         pytest.skip("the 'datasets' package (swebench extra) is required")
 
@@ -87,13 +96,19 @@ async def test_gold_patch_resolves_through_the_real_execute_path() -> None:
     assert result.resolved is True
 
 
-#: A patch that always applies cleanly (it only creates a new, unrelated
-#: file) and therefore cannot fix the instance's failing tests. Corrupting
-#: the gold patch is NOT a reliable negative control: patch(1) skips
-#: trailing garbage, so a syntactically-mangled suffix on a valid patch
-#: still applies its valid prefix and RESOLVES (observed live, 2026-07-11
-#: run of this workflow). A clean-applying no-op lands deterministically in
-#: the "tests still fail" branch of authoritative non-resolution instead.
+#: A patch that applies cleanly but can't possibly fix anything -- all it
+#: does is create a new, unrelated file. This project needs a patch that is
+#: guaranteed NOT to fix the bug, to prove that `resolved=False` genuinely
+#: works. The obvious-seeming way to build one would be to take the real
+#: gold patch and deliberately corrupt it -- but that does NOT reliably
+#: produce a non-fix: the standard `patch` command-line tool skips trailing
+#: garbage it can't parse and still applies whatever valid part comes
+#: before it. In a real run of this workflow on 2026-07-11, a corrupted
+#: gold patch built this way still applied its still-valid portion and DID
+#: resolve the issue. Using a patch that applies cleanly but is simply
+#: unrelated to the fix avoids that trap: it always lands in the "applied
+#: fine, but the tests still fail" branch -- a genuine, deliberate non-fix,
+#: not an accident of how `patch` happens to parse broken input.
 _NON_FIXING_PATCH = """\
 diff --git a/agentic_evalkit_fidelity_probe.txt b/agentic_evalkit_fidelity_probe.txt
 new file mode 100644
@@ -109,7 +124,9 @@ async def test_non_fixing_patch_does_not_resolve_through_the_same_path() -> None
     _require_capability()
     instance_id, _ = _gold_instance()
     result = await SweBenchDockerHarnessExecutor().execute(_request(instance_id, _NON_FIXING_PATCH))
-    # The patch applies but fixes nothing, so FAIL_TO_PASS tests still fail:
-    # an authoritative non-resolution, never an ERROR masquerading as one.
+    # This patch applies cleanly but doesn't touch anything relevant, so the
+    # tests that were supposed to start passing (FAIL_TO_PASS) still fail.
+    # That is a real, deliberate "no" verdict (status COMPLETED, resolved
+    # False) -- not an ERROR standing in for one.
     assert result.status is HarnessStatus.COMPLETED
     assert result.resolved is False

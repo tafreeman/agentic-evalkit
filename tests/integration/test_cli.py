@@ -1,9 +1,18 @@
-"""Hermetic integration tests for the runnable objective-only CLI.
+"""Hermetic integration tests for the CLI's core commands (the plain,
+non-judge "objective" grading path).
 
-The default ``not live`` suite must never contact Hugging Face. Tests in this
-module inject a canned provider whenever a CLI path needs a Hub-backed dataset;
-an autouse guard rejects accidental construction of the real CLI catalog.
-Real Hub and Dataset Viewer CLI coverage lives under ``tests/live``.
+"Hermetic" means these tests never reach out over the network: the default
+``not live`` test suite must never actually contact Hugging Face (the
+service that hosts many real datasets). Whenever a CLI code path needs a
+dataset that would normally come from the Hugging Face Hub, tests in this
+module hand it a "canned" stand-in provider instead -- a fake
+implementation that returns fixed, pre-scripted data rather than making a
+real network call. An autouse fixture (one that runs automatically for
+every test in this file, without being named as an argument) fails loudly
+if any test accidentally tries to build the real, network-capable CLI
+catalog instead of using the canned one. Coverage that does use the real
+Hugging Face Hub and its Dataset Viewer API lives separately, under
+``tests/live``.
 """
 
 from __future__ import annotations
@@ -63,7 +72,9 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def _reject_real_provider_catalogs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make an accidental network-capable CLI path fail immediately."""
+    """Make any CLI code path that would build the real, network-connected
+    dataset catalog fail immediately, instead of quietly working.
+    """
 
     def _fail(*, offline: bool) -> DatasetCatalog:
         del offline
@@ -73,7 +84,7 @@ def _reject_real_provider_catalogs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli_runs, "build_catalog", _fail)
 
 
-# --- Deterministic run fixtures for compare/report (no network) -------------
+# --- Fixed, repeatable run-result fixtures for compare/report (no network) --
 
 _STARTED_AT = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
 _FINISHED_AT = datetime(2026, 7, 3, 12, 5, 0, tzinfo=UTC)
@@ -168,14 +179,18 @@ def test_curated_and_init_work_without_manual_import(tmp_path) -> None:  # type:
     assert "valid" in validated.stdout.lower()
 
 
-# --- Hermetic Hugging Face CLI coverage -------------------------------------
+# --- CLI coverage for Hugging Face-backed commands, via a fake network-free provider ---
 
 
 class _CannedHubProvider:
-    """Hermetic stand-in for the Hugging Face provider (no network, no cache).
+    """A fake, network-free stand-in for the real Hugging Face dataset
+    provider (no network calls, no on-disk cache).
 
-    The provider supplies one GSM8K-shaped row so the CLI run path remains an
-    end-to-end integration test without depending on the Dataset Viewer.
+    It hands back exactly one GSM8K-shaped row of data, which is enough to
+    let the CLI's ``run`` command exercise its full, real code path
+    end-to-end -- without this test actually depending on Hugging Face's
+    "Dataset Viewer" API (the real service normally used to preview a
+    dataset's rows).
     """
 
     api_version = "1"
@@ -257,10 +272,12 @@ def test_provider_failure_exit_code_contract_without_network(
 
 
 def test_root_app_shows_help_without_a_subcommand() -> None:
-    # Typer/Click's no_args_is_help=True prints help and exits 2 (its
-    # standard "no command given" usage-error convention) rather than 0;
-    # this still surfaces every command name so a user immediately sees
-    # what is available.
+    # This CLI is built with Typer (on top of Click), and both treat "no
+    # command given" as a usage error by convention: with no_args_is_help=True
+    # set, running the bare CLI with no subcommand prints the help text but
+    # exits with code 2 (not 0). That help text still lists every available
+    # command, so a user immediately sees what's available even though the
+    # exit code signals an error.
     result = runner.invoke(app, [])
     assert result.exit_code == 2
     assert "doctor" in result.stdout
@@ -284,7 +301,10 @@ def test_doctor_runs_offline_and_reports_checks() -> None:
 def test_doctor_swebench_capability_reports_ok_when_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A present ``swebench`` module reports ok with no remediation (ADR-0009/ADR-0014)."""
+    """When the optional ``swebench`` package is installed, the "doctor"
+    diagnostic command reports that capability as ok, with no fix needed
+    (ADR-0009 / ADR-0014).
+    """
     monkeypatch.setattr(cli_doctor, "find_spec", lambda name: object())
     result = runner.invoke(app, ["doctor", "--offline", "--format", "json"])
     assert result.exit_code in (0, 3)
@@ -299,11 +319,17 @@ def test_doctor_swebench_capability_reports_ok_when_installed(
 def test_doctor_swebench_capability_warns_with_install_remediation_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An absent ``swebench`` module names the extra and the Docker daemon (ADR-0009/ADR-0014).
+    """When the optional ``swebench`` package is missing, "doctor" warns and
+    names both the fix (a pip "extra": an optional, named bundle of extra
+    dependencies) and the Docker daemon (the background service Docker
+    containers need running) that this capability actually depends on
+    (ADR-0009 / ADR-0014).
 
     ``pip install 'agentic-evalkit[swebench]'`` is a real, actionable fix
-    once the extra is populated (ADR-0014), unlike the reserved-placeholder
-    extras this repo removed 2026-07-11 -- so the warning names it.
+    now that the extra is actually populated with dependencies (ADR-0014) --
+    unlike the "reserved but empty" placeholder extras this repo removed on
+    2026-07-11. Because it's now real, the warning message is allowed to
+    name it.
     """
     monkeypatch.setattr(cli_doctor, "find_spec", lambda name: None)
     result = runner.invoke(app, ["doctor", "--offline", "--format", "json"])
@@ -410,25 +436,29 @@ def test_datasets_search_json_shape_without_network(monkeypatch: pytest.MonkeyPa
     assert payload["total_hits"] == 1
 
 
-# --- --offline CLI coverage (ADR-0010, plan Task 2 Step 3) -------------------
+# --- `--offline` flag CLI coverage (ADR-0010; plan Task 2 Step 3) -----------
 
 
 def _local_only_catalog(tmp_path: Path, *, with_cache: bool = False) -> DatasetCatalog:
-    """A real ``DatasetCatalog`` wired to only the genuine local provider.
+    """A real ``DatasetCatalog``, wired up with only the genuine local
+    provider registered.
 
-    Deliberately registers no ``huggingface`` provider at all, so any code
-    path that mistakenly tried to route to it would fail with a ``KeyError``
-    rather than silently succeeding -- this catalog can only ever serve the
-    real, network-free ``local`` provider.
+    This deliberately registers no ``huggingface`` provider at all. That
+    way, if some code path ever mistakenly tried to route to
+    "huggingface", it would fail loudly with a ``KeyError`` rather than
+    quietly succeeding -- this catalog can only ever serve the real,
+    network-free ``local`` provider.
 
-    ``with_cache``: ``preview`` is deliberately NOT gated by a provider's
-    ``requires_network`` declaration (ADR-0010) -- it is always
-    cache-backed, for every provider, so an offline ``preview`` still needs
-    a configured ``DatasetCache`` even when the underlying provider is
-    ``local``. Callers exercising ``search``/``resolve``/``iter_records``
-    offline against ``local`` do not need one (the exemption applies
-    directly); callers exercising ``preview`` offline do, matching how the
-    real CLI's ``build_catalog`` always configures one.
+    About the ``with_cache`` parameter: you might expect that since
+    ``local`` never needs the network, none of its operations would need a
+    cache either. That's true for ``search``/``resolve``/``iter_records``,
+    but not for ``preview``. Per ADR-0010, ``preview`` is deliberately
+    *not* exempted the way other operations are: it's always backed by the
+    on-disk cache, for every provider, even ones like ``local`` that never
+    make a network call. So calling ``preview`` while offline still needs
+    a configured ``DatasetCache`` to read from, even though the provider
+    underneath is ``local``. This matches how the real CLI's
+    ``build_catalog`` always configures a cache in practice.
     """
     provider = LocalDatasetProvider(allowed_roots=(tmp_path,))
     cache = DatasetCache(tmp_path / ".cache") if with_cache else None
@@ -439,9 +469,10 @@ def _local_only_catalog(tmp_path: Path, *, with_cache: bool = False) -> DatasetC
 def test_run_offline_over_local_dataset_succeeds_with_zero_network(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``run --offline`` over a local-provider dataset must reach the real
-    ``DatasetCatalog``/``LocalDatasetProvider`` and complete successfully
-    without ever attempting an outbound network connection (spec item 3a).
+    """Running ``run --offline`` over a dataset served by the local provider
+    must go through the real ``DatasetCatalog``/``LocalDatasetProvider``
+    code path and complete successfully, without ever attempting an
+    outbound network connection (spec item 3a).
     """
     monkeypatch.setattr(cli_runs, "build_catalog", lambda *, offline: _local_only_catalog(tmp_path))
 
@@ -463,12 +494,18 @@ def test_run_offline_over_local_dataset_succeeds_with_zero_network(
 def test_run_offline_over_uncached_hf_dataset_fails_with_typed_error_not_silence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``run --offline`` against a network-requiring provider with nothing
-    cached must fail loudly with the typed ``OfflineCacheMiss`` error
-    surfaced through the CLI's normal error boundary (a nonzero, mapped
-    exit code and the error's code/message in output) -- never silently
-    proceed as if offline had no effect (spec item 3b; this is the exact
-    "worse than absent" failure mode ADR-0010 exists to close).
+    """Running ``run --offline`` against a provider that needs the network,
+    when nothing is cached yet, must fail loudly with the typed
+    ``OfflineCacheMiss`` error. That error must surface through the CLI's
+    normal error-handling path (its "error boundary": the place where
+    internal exceptions get turned into a specific nonzero exit code plus
+    a message) -- a nonzero, mapped exit code with the error's code and
+    message in the output. It must never silently proceed as if
+    ``--offline`` had simply been ignored (spec item 3b). Silently
+    ignoring it would be a "worse than absent" failure: a user who asked
+    to run offline would believe they got that guarantee while a real
+    network call happened anyway. Closing that exact failure mode is what
+    ADR-0010 exists to do.
     """
     catalog = _canned_hub_catalog()
     monkeypatch.setattr(cli_runs, "build_catalog", lambda *, offline: catalog)
@@ -494,12 +531,13 @@ def test_run_offline_over_uncached_hf_dataset_fails_with_typed_error_not_silence
         app,
         ["run", str(manifest_path), "--yes", "--offline"],
     )
-    # The runner's own catalog.resolve() failure is an infrastructure-level
-    # abort of the run (agentic_evalkit.runner.EvalRunner.run re-raises the
-    # original exception unchanged after emitting RunFailed), which the
-    # CLI's error boundary maps like any other OfflineCacheMiss: exit code 4
-    # (PROVIDER_ERROR), never exit 0 as if --offline had simply been
-    # ignored.
+    # Here, catalog.resolve() itself fails inside the runner -- an
+    # infrastructure-level problem that aborts the whole run, not a normal
+    # graded failure. (Internally, agentic_evalkit.runner.EvalRunner.run
+    # emits a RunFailed event and then re-raises the original exception
+    # unchanged.) The CLI's error-handling boundary maps that the same way
+    # it maps any other OfflineCacheMiss: exit code 4 (PROVIDER_ERROR),
+    # never exit 0 as if --offline had simply been ignored.
     assert result.exit_code == 4, result.stdout
     assert "offline_cache_miss" in result.stdout
 
@@ -565,16 +603,22 @@ def test_datasets_inspect_offline_over_network_provider_fails_with_typed_error(
 def test_datasets_preview_offline_over_local_provider_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers the previously-half-hermetic bug directly: before this task,
-    ``preview --offline``'s inner ``resolve()`` call never received
-    ``offline=True`` at all, so this exact scenario would have made a live
-    (albeit locally-served) resolve even though ``local`` never needs one.
+    """A regression test for a bug where this code path was only *half*
+    actually hermetic: before this task existed, ``preview --offline``'s
+    inner ``resolve()`` call never actually received ``offline=True`` --
+    so even though the ``local`` provider never needs the network, this
+    exact scenario used to make what was technically a "live" resolve call
+    (it just happened to be harmless because ``local`` never reaches the
+    network anyway).
 
-    ``preview`` is not exempted by provider (ADR-0010 -- it is always
-    cache-backed for every provider), so this test first warms the cache
-    with one online preview (the same "resolve once online, then offline
-    calls succeed" story ADR-0004/ADR-0010 describe), then repeats the
-    exact call with ``--offline`` and expects success.
+    ``preview`` is never exempted by provider (per ADR-0010, it's always
+    backed by the on-disk cache, for every provider) -- so this test first
+    "warms" the cache with one ordinary, online ``preview`` call (writing
+    an entry into the cache so a later offline read has something to
+    find). This is the same "resolve once online, then later offline calls
+    succeed" pattern described by ADR-0004 and ADR-0010. It then repeats
+    the exact same call with ``--offline`` added, and expects it to
+    succeed.
     """
     dataset_path = tmp_path / "local.jsonl"
     dataset_path.write_text(
@@ -614,13 +658,19 @@ def test_datasets_preview_offline_over_network_provider_fails_with_typed_error(
 
 
 def test_canned_hub_preview_consumes_async_records_directly() -> None:
-    """Regression: ``_CannedHubProvider.preview()`` built its records with a
-    synchronous ``tuple()`` over an ``async for`` generator expression, which
-    raises ``TypeError: 'async_generator' object is not iterable`` the moment
-    ``preview()`` is awaited. Every other canned-hub preview test uses
-    ``--offline`` and fails early (``offline_cache_miss``) before reaching the
-    body, so the defect stayed latent. Drive the real coroutine to prove the
-    async records are consumed and a page is returned.
+    """Regression test for a real bug in ``_CannedHubProvider.preview()``: it
+    built its output records using a plain, synchronous ``tuple(...)``
+    around an ``async for`` generator expression. That doesn't work in
+    Python -- you cannot collect the results of an ``async for`` loop
+    synchronously like that -- so it raised ``TypeError: 'async_generator'
+    object is not iterable`` the moment ``preview()`` was actually awaited
+    (run as a coroutine).
+
+    This bug stayed hidden ("latent") because every *other* canned-hub
+    preview test in this file uses ``--offline``, which fails early with
+    ``offline_cache_miss`` before ever reaching the buggy line. This test
+    exists to actually run the real coroutine (via ``asyncio.run``) and
+    prove the async records get consumed correctly and a page comes back.
     """
     provider = _CannedHubProvider()
     dataset = ResolvedDataset(
@@ -713,7 +763,7 @@ def test_compare_missing_run_file_is_invalid_input(tmp_path: Path) -> None:
     assert result.exit_code == 2
 
 
-# --- compare --allow-cross-environment (ADR-0015) ---------------------------
+# --- compare --allow-cross-environment: opt-in cross-environment override (ADR-0015) ---
 
 
 def test_compare_environment_fingerprint_mismatch_is_gated_by_default(tmp_path: Path) -> None:
@@ -790,9 +840,14 @@ def test_compare_allow_cross_environment_json_output_carries_waived_fields(
 def test_compare_allow_cross_environment_still_gates_non_waivable_mismatch(
     tmp_path: Path,
 ) -> None:
-    # Scoping proof at the CLI boundary: a waivable fingerprint mismatch
-    # together with a non-waivable dataset revision mismatch still exits 2
-    # under --allow-cross-environment.
+    # This proves the override is scoped narrowly, right at the CLI
+    # boundary: --allow-cross-environment only waives the one kind of
+    # mismatch it's meant for (the "environment fingerprint" -- a hash
+    # summarizing things like OS/dependency versions, which can validly
+    # differ between machines without invalidating the comparison). A
+    # *different* kind of mismatch -- the dataset revision itself being
+    # different -- is never waivable, so the command still exits 2 (its
+    # "incompatible runs" error) even with the flag set.
     left = _write_run(
         tmp_path,
         "left",
@@ -833,7 +888,9 @@ def test_report_regenerates_jsonl(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     assert destination.exists()
     lines = destination.read_text(encoding="utf-8").strip().splitlines()
-    # header + one record per sample + trailer
+    # A JSONL report (one JSON object per line) always has this fixed shape:
+    # one header line, then one line per sample, then one trailer line. This
+    # fixture has 2 samples, so 1 (header) + 2 (samples) + 1 (trailer) = 4.
     assert len(lines) == 4
     header = json.loads(lines[0])
     assert header["record_type"] == "header"
@@ -861,13 +918,19 @@ def test_report_regenerates_self_contained_html(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     content = destination.read_text(encoding="utf-8")
     assert "<html" in content.lower()
-    # self-contained: no remote script/style/font references
+    # "Self-contained" means the HTML never references anything over the
+    # network -- no remote <script>, <link rel="stylesheet">, or web font
+    # URLs -- so checking that there's no http(s):// URL anywhere is a good
+    # proxy for that: the whole report has to work with no internet access.
     assert "http://" not in content
     assert "https://" not in content
 
 
 def _with_leaky_evidence(run: EvalRunResult, value: str) -> EvalRunResult:
-    """Copy ``run`` with a credential-shaped string planted in one grade's evidence."""
+    """Return a copy of ``run`` with a credential-shaped string (something
+    that looks like a real secret/API key) planted inside one grade's
+    evidence, so a test can check whether redaction catches it.
+    """
     first = run.samples[0]
     assert first.grade is not None
     grade = first.grade.model_copy(update={"evidence": {"note": value}})
@@ -917,16 +980,23 @@ def test_report_missing_run_file_is_invalid_input(tmp_path: Path) -> None:
     assert result.exit_code == 2
 
 
-# --- Story 2.3 (R-002): credential-hook runtime resolution never recorded ---
+# --- Story 2.3 (risk R-002): credential-hook secrets resolve but never persist ---
 #
-# The CLI-path half of Story 2.3: ``build_target_for_document`` is where the
-# credential hook actually resolves (``_load_http_target`` reads
-# ``os.environ.get(credential_hook)`` at build time). With the hook's env var
-# set to a sentinel secret, building the target must not write the resolved
-# value back into the document, and a canonical report of the run must never
-# contain it. (The manifest-persistence half is covered in
-# ``tests/unit/test_manifest.py``; recorded-evidence header redaction is
-# covered in ``tests/unit/targets/test_http_target.py``.)
+# This is the CLI-facing half of Story 2.3. A "credential hook" lets a
+# manifest reference a secret (like an API key) by naming an environment
+# variable, instead of writing the secret's actual value into the config
+# file. ``build_target_for_document`` is where that hook actually gets
+# resolved: internally, ``_load_http_target`` reads
+# ``os.environ.get(credential_hook)`` at build time to fetch the real
+# value. These tests set the hook's env var to a "sentinel" secret (an
+# obviously-fake value used only so a test can check whether it leaks) and
+# confirm two things: building the target must not write that resolved
+# value back into the document, and the run's canonical report (the
+# standard JSON output written to disk) must never contain it either. (The
+# other half of Story 2.3 -- making sure the secret never gets persisted
+# into a saved *manifest* -- is covered in ``tests/unit/test_manifest.py``;
+# redacting the secret out of *recorded HTTP evidence* is covered in
+# ``tests/unit/targets/test_http_target.py``.)
 
 _CRED_HOOK_SECRET = "hook-secret-XYZZY-do-not-persist"
 _CRED_HOOK_ENV_NAME = "AGENTIC_EVALKIT_TEST_CLI_CRED_HOOK"
@@ -951,9 +1021,11 @@ def _http_hook_document() -> ManifestDocument:
 def test_building_target_resolves_hook_without_persisting_the_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Building the target through the CLI dispatch reads the hook's env var
-    (the real resolution point) but leaves the source document carrying only
-    the hook name -- the resolved secret never lands on the document/manifest.
+    """Building the target (through the same code path the CLI uses) reads
+    the hook's environment variable -- this is the one real place the
+    secret actually gets resolved -- but the source document is left
+    carrying only the hook's *name*. The resolved secret value itself never
+    lands on the document or the manifest.
     """
     monkeypatch.setenv(_CRED_HOOK_ENV_NAME, _CRED_HOOK_SECRET)
     document = _http_hook_document()
@@ -961,11 +1033,12 @@ def test_building_target_resolves_hook_without_persisting_the_secret(
     target = build_target_for_document(document)
     try:
         assert isinstance(target, HttpTarget)
-        # Resolution actually happened: the hook's env var was read at build
-        # time and the resolved secret reached the target's header provider
-        # (an Authorization: Bearer <token> header), which is the mechanism a
-        # real request would carry. Without this the test could pass on a
-        # target that silently never resolved the hook at all.
+        # Confirm resolution actually happened (not just that the code didn't
+        # crash): the hook's env var was read at build time, and the
+        # resolved secret reached the target's header provider -- the piece
+        # that would generate a real "Authorization: Bearer <token>" header
+        # on an actual request. Without this check, the test could pass even
+        # if the target silently never resolved the hook at all.
         header_provider = target._headers  # type: ignore[attr-defined]
         assert header_provider is not None
         resolved_headers = header_provider()
@@ -978,26 +1051,37 @@ def test_building_target_resolves_hook_without_persisting_the_secret(
         assert _CRED_HOOK_ENV_NAME in serialized
         assert _CRED_HOOK_SECRET not in serialized
     finally:
-        # build_target_for_document constructs its own httpx client; close it
-        # so no unclosed-client ResourceWarning leaks into the suite. Guard the
-        # attribute access with getattr so a failed isinstance/assertion above
-        # is never masked by an AttributeError here.
+        # build_target_for_document creates its own httpx (HTTP client
+        # library) client under the hood; this closes it afterward so Python
+        # doesn't emit an "unclosed client" ResourceWarning into the test
+        # suite's output. Using getattr() (instead of target._client
+        # directly) means that if one of the assertions above already
+        # failed, this cleanup step can't itself blow up with an unrelated
+        # AttributeError and hide the real failure.
         client = getattr(target, "_client", None)
         if client is not None:
             asyncio.run(client.aclose())
 
 
-# --- Offline CLI coverage (ADR-0010, plan Task 2 Step 3) --------------------
+# --- Offline CLI coverage (ADR-0010; plan Task 2 Step 3) --------------------
 #
-# Loopback-allowlisting socket guard, duplicated (not imported) from
-# ``tests/unit/datasets/test_offline_socket_guard.py``'s more heavily
-# commented version -- see that module for the full two-round Windows
-# debugging rationale (a naive "block every socket call" guard breaks
-# ``pytest-asyncio``'s own event-loop setup on this platform via
-# ``ProactorEventLoop``'s ``socketpair()`` emulation). Kept local to this
-# module rather than shared via a new ``conftest.py`` fixture, matching this
-# test suite's existing convention of each module being self-sufficient (no
-# cross-module fixture sharing exists elsewhere in ``tests/``).
+# Below is a "loopback-allowlisting socket guard": a test helper that blocks
+# every outbound network connection except to loopback addresses
+# (127.0.0.1, ::1, "localhost"), so a test can prove it made zero real
+# network calls while still letting Python's own local plumbing work. This
+# is duplicated here (not imported) from
+# ``tests/unit/datasets/test_offline_socket_guard.py``, which has a more
+# heavily commented version -- see that module for the full two-round
+# Windows debugging story. In short: a naive "block every socket call"
+# guard breaks ``pytest-asyncio``'s own event-loop setup on Windows,
+# because Windows' ``ProactorEventLoop`` implements ``socketpair()`` (a
+# pair of connected sockets asyncio uses internally) by making a real
+# loopback connection under the hood -- blocking that call breaks
+# pytest-asyncio itself, not just this test. This guard is kept local to
+# this module instead of being shared through a new ``conftest.py``
+# fixture, matching this test suite's existing convention that each module
+# is self-sufficient (no cross-module fixture sharing exists anywhere else
+# in ``tests/``).
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -1029,13 +1113,20 @@ def _forbid_outbound_network(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _local_gsm8k_style_manifest_path(tmp_path: Path) -> Path:
-    """Write a local GSM8K-shaped dataset file plus a manifest pointing at it.
+    """Write a local, GSM8K-shaped dataset file plus a manifest that points at it.
 
-    Mirrors ``agentic-evalkit init --preset gsm8k``'s manifest shape but
-    with ``dataset_ref.provider = "local"`` instead of ``"huggingface"``, so
-    a real (non-fake) :class:`~agentic_evalkit.datasets.local.LocalDatasetProvider`
-    -- exercised through the CLI's real ``build_catalog`` -- is the code path
-    under test, not a canned double. Returns the manifest YAML path.
+    ("GSM8K" is a well-known dataset of grade-school math word problems,
+    often used as a benchmark for whether a system produces the right
+    numeric answer; "shaped like GSM8K" here just means the file has the
+    same question/answer JSON structure.)
+
+    This mirrors what ``agentic-evalkit init --preset gsm8k`` would
+    generate, except with ``dataset_ref.provider = "local"`` instead of
+    ``"huggingface"``. That swap matters: it means the code path under test
+    is a real (non-fake)
+    :class:`~agentic_evalkit.datasets.local.LocalDatasetProvider`, reached
+    through the CLI's real ``build_catalog`` -- not a canned test double
+    standing in for it. Returns the path to the written manifest YAML file.
     """
     dataset_path = tmp_path / "gsm8k_local.jsonl"
     dataset_path.write_text('{"question":"2+2?","answer":"work\\n#### 4"}\n')
@@ -1063,18 +1154,23 @@ def _local_gsm8k_style_manifest_path(tmp_path: Path) -> Path:
 def test_canonical_report_of_a_hook_run_contains_no_resolved_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A canonical report whose manifest *references the hook by name* (here in
-    ``run_name``, a serialized free-text field) records that hook NAME but never
-    the resolved secret VALUE, even though the hook's env var is set while the
-    report is written.
+    """A canonical (the run's standard, on-disk JSON) report whose manifest
+    *references the hook by name* -- here, via ``run_name``, an ordinary
+    free-text field -- records that hook's NAME but never the resolved
+    secret VALUE, even though the hook's environment variable is set while
+    the report gets written.
 
-    Anchoring the hook name into the serialized report makes the discrimination
-    real rather than vacuous: the persisted bytes provably carry a hook
-    reference, so if the pipeline ever resolved-and-persisted the secret it
-    could plausibly appear -- and it must not. What this does *not* cover: the
-    actual ``_load_http_target`` env-var resolution path (that is exercised by
-    ``test_building_target_resolves_hook_without_persisting_the_secret`` above);
-    here the run result is constructed directly, so no resolution runs.
+    Putting the hook's name into the serialized report is what makes this a
+    meaningful test rather than a trivial one: the persisted bytes provably
+    do carry a hook-related reference, so if the pipeline ever actually
+    resolved the secret and wrote it to disk, it plausibly *could* show up
+    right there -- and it must not. What this test does *not* cover: the
+    actual environment-variable resolution path inside
+    ``_load_http_target`` (that's exercised separately, by
+    ``test_building_target_resolves_hook_without_persisting_the_secret``
+    above). Here the run result is built directly in Python, so no hook
+    resolution actually runs -- this test only checks what gets
+    *persisted*.
     """
     monkeypatch.setenv(_CRED_HOOK_ENV_NAME, _CRED_HOOK_SECRET)
     base = _run_result(run_id="hook-run")

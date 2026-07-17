@@ -65,6 +65,10 @@ def test_grade_status_is_not_collapsed_to_boolean() -> None:
 
 
 # --- Additional round-trip serialization coverage for every public model ---
+# "Round-trip" means: build an object, serialize it to JSON with
+# model_dump_json(), parse that JSON back with model_validate_json(), and
+# check that you get back an object equal to the one you started with.
+# That proves the JSON form doesn't quietly drop or corrupt any data.
 # Pattern: construct -> model_dump_json -> model_validate_json -> equality.
 
 
@@ -368,7 +372,8 @@ def test_eval_run_result_round_trips() -> None:
 
 
 def test_eval_run_result_supports_appending_sample_results() -> None:
-    """EvalRunResult must not preclude appending results later (e.g. streaming runs)."""
+    """EvalRunResult must still support appending new results later on (for
+    example, during a streaming run that adds samples as they finish)."""
     now = datetime.now(UTC)
     manifest = EvalRunManifest(
         run_name="gsm8k-quickstart",
@@ -412,11 +417,18 @@ def test_eval_run_result_supports_appending_sample_results() -> None:
     )
     assert appended.samples == (new_sample_result,)
     assert appended.summary.total == 1
-    # The original is untouched, proving immutability was preserved.
+    # `initial` itself was never changed by the update above -- this is
+    # what proves a new object was created instead of the original being
+    # mutated in place (immutability, per ADR-0002).
     assert initial.samples == ()
 
 
 # --- Contamination metadata (ADR-0013) ---------------------------------------
+# "Contamination" means dataset rows that a model may have already seen
+# during training, which would let it "cheat" on the eval by recognizing a
+# memorized answer instead of actually solving the task. The tests below
+# cover the metadata that records what's known about that risk for a given
+# dataset.
 
 
 def test_contamination_metadata_round_trips_inside_resolved_dataset() -> None:
@@ -437,7 +449,9 @@ def test_contamination_status_is_not_collapsed_to_boolean() -> None:
     metadata = ContaminationMetadata(status=ContaminationStatus.SUSPECT)
     restored = ContaminationMetadata.model_validate_json(metadata.model_dump_json())
     assert restored.status is ContaminationStatus.SUSPECT
-    # The honest default is "never checked", distinguishable from "clean".
+    # The default status is UNKNOWN ("nobody has checked this yet"), kept
+    # as a distinct value from VERIFIED_CLEAN ("checked, and it's fine") --
+    # so "we don't know" can never be mistaken for "we know it's okay".
     assert ContaminationMetadata().status is ContaminationStatus.UNKNOWN
 
 
@@ -452,7 +466,9 @@ def test_authored_after_a_public_release_date_is_rejected_at_construction() -> N
             authored_after=datetime(2025, 1, 1, tzinfo=UTC),
             public_since=datetime(2024, 1, 1, tzinfo=UTC),
         )
-    # Authored-before-or-equal is the consistent case and constructs fine.
+    # It's fine (no error) when the data was authored on or before the
+    # public release date -- that is the only logically consistent
+    # ordering of the two dates.
     ok = ContaminationMetadata(
         authored_after=datetime(2024, 1, 1, tzinfo=UTC),
         public_since=datetime(2025, 1, 1, tzinfo=UTC),
@@ -461,6 +477,14 @@ def test_authored_after_a_public_release_date_is_rejected_at_construction() -> N
 
 
 # --- Judge response envelope + calibration coverage evidence (ADR-0020) ------
+# An LLM judge's raw verdict ("pass"/"fail" plus a score) isn't enough on
+# its own to know whether that verdict can be trusted. The "response
+# envelope" wraps it with a status (did the judge answer normally, refuse,
+# or hit an operational error?) and an optional rationale. "Calibration
+# coverage evidence" is the record of how the judge's accuracy was
+# measured -- e.g. how many labeled examples it was tested against -- which
+# is what decides whether that judge is trustworthy enough to gate a
+# release (see ADR-0007 and ADR-0020).
 
 
 def test_judge_response_status_and_rationale_round_trip() -> None:
@@ -476,7 +500,10 @@ def test_judge_response_status_and_rationale_round_trip() -> None:
     restored = JudgeResponse.model_validate_json(response.model_dump_json())
     assert restored == response
     assert restored.status is JudgeResponseStatus.REFUSED
-    # Additive fields keep the wire contract at schema_version "1" (ADR-0002).
+    # New fields were added without removing or renaming any old ones
+    # ("additive"), so the wire format is still schema_version "1" -- the
+    # version marker other systems check to confirm this JSON shape is
+    # still backward-compatible (ADR-0002).
     assert restored.schema_version == "1"
 
 
@@ -489,8 +516,12 @@ def test_judge_response_status_defaults_to_ok_and_is_not_collapsed_to_boolean() 
         abstained=False,
     )
     restored = JudgeResponse.model_validate_json(response.model_dump_json())
-    # A judge that never sets the envelope keeps its exact prior meaning: OK,
-    # with no rationale -- a distinct enum member, never a bare boolean.
+    # A JudgeClient implementation written before this envelope existed,
+    # and which therefore never sets status/rationale at all, must keep
+    # behaving exactly as it did before: status defaults to OK and
+    # rationale defaults to None. status is a named enum value
+    # (JudgeResponseStatus.OK), never a plain True/False, so a future state
+    # like REFUSED can never be confused with a boolean.
     assert restored.status is JudgeResponseStatus.OK
     assert restored.rationale is None
 
@@ -529,7 +560,11 @@ def test_calibration_artifact_coverage_fields_default_to_none() -> None:
     )
     restored = CalibrationArtifact.model_validate_json(artifact.model_dump_json())
     assert restored == artifact
-    # Optional and additive: absent means "not recorded", never a fabricated 0.
+    # These fields are optional and were added later without breaking
+    # existing data ("additive"). When they're left out entirely, they
+    # come back as None ("we don't have this number"), never silently as 0
+    # ("we counted zero and got nothing") -- a real difference this test
+    # protects.
     assert restored.total_labeled is None
     assert restored.abstained_count is None
     assert restored.error_count is None

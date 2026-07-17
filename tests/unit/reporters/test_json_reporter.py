@@ -1,4 +1,8 @@
-"""Tests for the canonical JSON reporter (design §11.3, plan Task 13)."""
+"""Tests for the JSON reporter. This produces the "canonical" report format --
+the one official, structured JSON report that every other format (JSONL,
+Markdown, HTML) is generated from or converted into (design doc §11.3, plan
+Task 13).
+"""
 
 import json
 from pathlib import Path

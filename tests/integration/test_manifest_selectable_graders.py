@@ -1,19 +1,31 @@
-"""End-to-end proof that judge/composite graders are selectable from a run
-manifest (T2-A(c)), and that selecting one never puts the default hermetic
-suite in a live-network or hard-gating position.
+"""End-to-end proof that judge and composite graders can be selected by
+name from a run manifest (plan item T2-A(c)) -- and that doing so never
+pushes the default hermetic test suite into actually calling a real
+network/model, or into actually hard-gating (forcing a FAIL that can't be
+overridden) when it shouldn't.
 
-Before this module's coverage existed, ``agentic_evalkit.cli.runs._KNOWN_GRADERS``
-had exactly one entry (``"normalized-exact@1"``): naming any other grader in
-a manifest's ``grader`` field -- including ``JudgeGrader``, fully
-implemented and unit-tested, but never reachable from the CLI -- failed
-manifest validation with "unknown grader". Selecting ``judge-reference@1``/
-``composite-reference@1`` here uses only the packaged, network-free
-``ReferenceJudgeClient`` (``agentic_evalkit.examples.reference_judge``), so
-this stays part of the default hermetic (``-m "not live"``) suite.
+Before this module's test coverage existed,
+``agentic_evalkit.cli.runs._KNOWN_GRADERS`` (the CLI's internal list of
+grader names it recognizes) had exactly one entry:
+``"normalized-exact@1"``. Naming any other grader in a manifest's
+``grader`` field -- including ``JudgeGrader``, which was fully implemented
+and had its own unit tests, but which the CLI simply didn't know the name
+of -- failed manifest validation with an "unknown grader" error. In other
+words, the grader existed and worked, but a manifest could never actually
+select it.
 
-Deliberately its own module, matching this suite's "each wiring-focused
-module is self-sufficient" convention (duplicated local-provider manifest
-helper, not imported from ``test_cli.py``/``test_run_report_wiring.py``).
+Selecting ``judge-reference@1`` or ``composite-reference@1`` here uses
+only the packaged, network-free ``ReferenceJudgeClient`` (in
+``agentic_evalkit.examples.reference_judge``) -- a fake judge
+implementation that never calls a real model. Because of that, this stays
+part of the default hermetic suite (the one run by ``-m "not live"``,
+which never makes network calls).
+
+This is deliberately its own module, matching this test suite's convention
+that each module focused on wiring multiple components together should be
+understandable entirely on its own (its local-provider manifest helper is
+duplicated here, not imported from ``test_cli.py`` or
+``test_run_report_wiring.py``).
 """
 
 from __future__ import annotations
@@ -92,9 +104,14 @@ def test_judge_reference_grader_runs_end_to_end_and_never_hard_gates(
     assert sample["execution"]["status"] == "completed"
     grade = sample["grade"]
     assert grade["grader"] == "judge-reference@1"
-    # Wired in permanently uncalibrated (calibration=None): design §9 means
-    # this can never hard-gate, regardless of the gate=True passed at
-    # construction in cli/runs.py.
+    # This reference judge is wired up permanently uncalibrated
+    # (calibration=None) -- it's a test/example implementation, never meant
+    # to carry real calibration evidence. Per design doc section 9, a judge
+    # can only ever actually hard-gate (force a FAIL that other scores can't
+    # average away) when it has real, ratified calibration evidence behind
+    # it. So even though cli/runs.py passes gate=True when constructing
+    # this grader (asking it to hard-gate if it can), the missing
+    # calibration means it never actually does.
     assert grade["hard_gate"] is False
     assert grade["judge_calibration_ref"] is None
 
@@ -103,14 +120,18 @@ def test_composite_reference_grader_runs_end_to_end_with_noncompensable_objectiv
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The packaged ``zero_target`` always answers ``"0"``, which never
-    matches this fixture's GSM8K reference ("4"), so the composite's
-    objective (exact-match) component genuinely fails. Because that
-    component is configured ``hard_gate=True``, the composite's overall
-    result must be a noncompensable ``FAIL`` (design §9: "hard objective
-    requirements cannot be averaged away by a judge score") regardless of
-    what the advisory judge component scored -- proving the hard gate comes
-    from the objective component, never from the permanently-uncalibrated
-    judge component (whose own per-child ``hard_gate`` stays ``False``).
+    matches this fixture's GSM8K reference answer ("4"), so the
+    composite's objective (exact-match) component genuinely fails on its
+    own merits. That component is configured with ``hard_gate=True``, so
+    the composite's overall result must be a "noncompensable" ``FAIL`` --
+    meaning no other component's score, however good, can average that
+    failure away (design doc section 9: "hard objective requirements
+    cannot be averaged away by a judge score"). This holds regardless of
+    what the advisory judge component scored (an "advisory" score
+    contributes information but can't by itself force a fail). That
+    proves the hard gate is coming from the objective component, never
+    from the permanently-uncalibrated judge component, whose own
+    per-child ``hard_gate`` stays ``False``.
     """
     envelope = _run_and_load_report(tmp_path, monkeypatch, grader="composite-reference@1")
     assert envelope["manifest"]["grader"] == "composite-reference@1"

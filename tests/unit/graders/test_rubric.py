@@ -1,9 +1,14 @@
 """Tests for :mod:`agentic_evalkit.graders.rubric` (plan Task 10 Step 4).
 
-``Rubric``/``RubricCriterion`` are validation-only immutable models (design
-§9): "atomic criteria with stable IDs, evidence requirements, weights,
-hard-gate flags, and explicit handling of missing evidence. Broad holistic
-scores are advisory only."
+``Rubric`` and ``RubricCriterion`` are just data models: they check that a
+rubric is well-formed when it's built, but they don't do any grading
+themselves. Design §9 states the policy they enforce: "atomic criteria with
+stable IDs, evidence requirements, weights, hard-gate flags, and explicit
+handling of missing evidence. Broad holistic scores are advisory only." In
+plain terms: a rubric should be made of small, specific, individually
+checkable items (not one vague "is this good overall?" question) -- and a
+criterion that IS just a vague, big-picture judgment call is never allowed
+to skip its evidence requirement or single-handedly fail the whole rubric.
 """
 
 import pytest
@@ -49,9 +54,11 @@ def test_criterion_rejects_negative_weight() -> None:
 
 
 def test_broad_criterion_without_evidence_requirement_is_rejected() -> None:
-    """A criterion whose description reads as a broad holistic judgment
-    (design §9: "Broad holistic scores are advisory only") must require
-    evidence; it cannot be a hard, evidence-free gate.
+    """A criterion whose description reads like a vague, big-picture opinion
+    (design §9: "Broad holistic scores are advisory only") is required to
+    set requires_evidence=True. In other words: if a criterion is really
+    just asking "overall, is this good?", it must still require evidence --
+    it can't be graded on a bare, unbacked "yes" or "no".
     """
     with pytest.raises(ValidationError, match="evidence"):
         _criterion(

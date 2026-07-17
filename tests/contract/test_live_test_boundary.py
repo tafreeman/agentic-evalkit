@@ -1,4 +1,16 @@
-"""Enforce the repository's offline/default versus opt-in/live test boundary."""
+"""Enforce the repository's offline/default versus opt-in/live test boundary.
+
+Most of this project's tests are hermetic: they never make a real network
+call or depend on any external service being up, and they run by default.
+A small number of tests ("live" tests) deliberately do call a real external
+provider, so they must be opted into explicitly and must never run as part
+of the default, always-on test suite. This module checks that the
+separation between the two is actually enforced: every test marked
+``@pytest.mark.live`` lives under ``tests/live/``, every module under
+``tests/live/`` is marked live as a whole (not just some tests within it),
+and both the default and the live-only CI workflows select tests using the
+exact filters that keep the two suites apart.
+"""
 
 from pathlib import Path
 

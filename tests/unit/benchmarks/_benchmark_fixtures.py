@@ -1,8 +1,12 @@
-"""Shared fixtures for benchmark tests.
+"""Shared test data for benchmark tests.
 
-Both the harness contract tests and the SWE-bench adapter tests build the
-same :class:`~agentic_evalkit.benchmarks.harness.HarnessRequest` shape, so it
-lives here once rather than being duplicated per-file.
+A ``HarnessRequest`` is the message this project sends to an external
+harness -- an official tool that actually checks whether a submitted fix
+works, rather than just guessing (see
+:mod:`agentic_evalkit.benchmarks.harness` for the full explanation). Both
+the harness contract tests and the SWE-bench adapter tests need to build one
+of these with the same shape, so the helper that builds it lives here once
+instead of being copy-pasted into every test file.
 """
 
 from agentic_evalkit.benchmarks.harness import HarnessRequest

@@ -1,4 +1,9 @@
-"""Contract and fixture-parity tests for LocalDatasetProvider (plan Task 5)."""
+"""Tests for LocalDatasetProvider: the dataset provider that reads datasets
+from the local filesystem (as opposed to a remote source like HuggingFace).
+Checks both that it behaves correctly on its own (raises the right errors on
+bad input, pages and iterates records correctly) and that the same dataset
+stored in different file formats -- JSONL, CSV, YAML -- decodes to identical
+data (plan Task 5)."""
 
 from pathlib import Path
 

@@ -1,10 +1,20 @@
 """Tests for :mod:`agentic_evalkit.graders.contamination` (ADR-0013).
 
-Hermetic, no network. Covers the helper's empty-input behavior, partial
-leak subsets, normalization-insensitive matching (case- and
-whitespace-mangled echoes), the fixed evidence payload shape, JSON
-round-trips, agreement with the grounded-citation grader's own canary
-check, and an end-to-end merge into a ``GradeResult``.
+"Contamination" here means the AI being evaluated may have already seen a
+test question during its own training, which would make the test unfairly
+easy to pass. To catch this, a "canary token" -- a unique, made-up marker
+that has no business appearing anywhere legitimate -- gets planted
+somewhere the AI shouldn't be able to reach it. If that marker later shows
+up in the AI's answer, that's a strong signal something leaked.
+
+These tests run fully self-contained, with no real network calls. They
+cover: what the helper functions do with empty input; the case where only
+some of several canary tokens actually leaked; that a leak is still caught
+even when its case or whitespace has been changed from the original; the
+fixed shape of the evidence data these helpers produce; that this evidence
+data survives being converted to and from JSON; agreement with the same
+canary check built into the grounded-citation grader; and a full round
+trip where this evidence gets merged into a ``GradeResult``.
 """
 
 import json
@@ -43,8 +53,11 @@ def test_partial_leak_returns_exactly_the_leaked_subset_in_canary_order() -> Non
 
 
 def test_case_mangled_leak_is_detected() -> None:
-    """Matching is normalization-insensitive (adversarial review finding,
-    2026-07-09): a case-mangled canary echo must not evade the tripwire."""
+    """A leaked canary token is still caught even if its uppercase/lowercase
+    letters got scrambled along the way -- a gap found during an
+    adversarial security review on 2026-07-09. Matching normalizes case on
+    both sides before comparing, so a case-scrambled echo can't sneak past
+    the check."""
     text = f"see {_CANARY_A.lower()} in the appendix"
     assert find_canary_leaks(text, (_CANARY_A,)) == (_CANARY_A,)
 
@@ -65,8 +78,11 @@ def test_duplicate_canary_ids_are_deduplicated() -> None:
 
 
 def test_blank_canary_token_never_matches() -> None:
-    """A whitespace-only canary normalizes to empty and must not vacuously
-    match every haystack (guards Python's ``"" in text`` truth)."""
+    """A canary token that's nothing but whitespace normalizes down to an
+    empty string. An empty string would technically be "found" inside any
+    text at all (in Python, ``"" in text`` is always ``True``), so this test
+    makes sure that trivial, always-true match is explicitly blocked --
+    instead of causing every canary check to wrongly report a leak."""
     assert find_canary_leaks("any text at all", ("   ",)) == ()
 
 
@@ -112,8 +128,10 @@ def _grounding_sample(document_text: str) -> EvalSample:
 
 @pytest.mark.asyncio
 async def test_helper_and_grounding_grader_agree_on_a_case_mangled_leak() -> None:
-    """The reusable helper and the grounded-citation grader share one
-    tripwire semantics: both must flag the same case-mangled echo."""
+    """The standalone helper function and the full grounded-citation grader
+    need to agree on what counts as a leak. This test checks that both flag
+    the exact same case-scrambled canary echo, so a caller can trust that
+    the helper gives the same answer the real grader would."""
     document_text = (
         f"the failover drill completed in ninety seconds. {_CANARY_A} "
         "Operators log every drill in the master ledger."
@@ -148,8 +166,9 @@ async def test_helper_and_grounding_grader_agree_on_a_case_mangled_leak() -> Non
 
 
 class _CanaryAwareGrader:
-    """Minimal grader proving the documented reuse path: call the helper,
-    merge its evidence payload, return a valid ``GradeResult``."""
+    """A minimal example grader demonstrating the intended reuse pattern:
+    call the canary-leak helper function, merge its evidence dictionary
+    into your own, and return a valid ``GradeResult``."""
 
     def __init__(self, *, canary_ids: tuple[str, ...]) -> None:
         self._canary_ids = canary_ids

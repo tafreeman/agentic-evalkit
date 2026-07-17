@@ -1,17 +1,35 @@
-"""End-to-end proof that the SWE-bench harness pair is manifest-selectable and
-degrades gracefully (ADR-0014).
+"""End-to-end test proving that the SWE-bench adapter-and-grader pair can be
+selected by name from a manifest file, and that it fails safely (rather than
+crashing, or silently lying about a result) when its real dependencies
+aren't installed (ADR-0014).
 
-A manifest naming adapter ``swebench-verified@1`` and grader
-``swebench-harness@1`` resolves via ``cli/runs.py``'s known tables and runs
-to a canonical report. Because the hermetic suite never installs the
-``swebench`` extra, the registered ``SweBenchDockerHarnessExecutor``'s real
-preflight reports the capability unavailable, so the grade is
-``UNAVAILABLE`` -- a graded non-verdict, never an operational error or a
-fabricated pass. The run still exits 0 (an unavailable capability is not a
-task failure, ADR-0008).
+SWE-bench is a benchmark where the AI system under test is asked to produce
+a code patch that fixes a real bug, and the "harness" -- an official,
+external tool -- actually applies that patch to the real project and runs
+its real test suite to see whether the fix worked (see
+``SweBenchDockerHarnessExecutor``). Running the real harness needs Docker
+and the optional ``swebench`` package (an "extra": a group of dependencies
+you can choose to install or skip), and this test suite -- which is meant to
+run fully self-contained, with no external services -- installs neither.
 
-Hermetic: local dataset + packaged ``zero_target``; no Docker, no swebench.
-Its own module per this suite's self-sufficient-wiring-module convention.
+This test writes a manifest that names adapter ``swebench-verified@1`` and
+grader ``swebench-harness@1``, confirms the CLI (in ``cli/runs.py``) can
+resolve both names from its table of known components, and runs it all the
+way through to a finished report. Because the real harness's own upfront
+check (a "preflight": checking whether it's actually able to run, before
+attempting to) reports that Docker/swebench aren't available here, the
+grade comes back as ``UNAVAILABLE``. That is a deliberate, valid outcome
+meaning "we couldn't produce a real verdict" -- it is not the same thing as
+an operational error (our own code breaking), and it must never be quietly
+reported as a fabricated pass instead. The CLI run still exits with code 0
+(success), because a capability being unavailable is not the same thing as
+the evaluated task having failed (ADR-0008).
+
+This test only uses a local, in-repo dataset file and the packaged
+``zero_target`` example -- no Docker, no real ``swebench`` package. It
+lives in its own file, following this test suite's convention that each
+test module proving one piece of "wiring" between components is
+self-contained.
 """
 
 from __future__ import annotations
@@ -37,8 +55,12 @@ runner = CliRunner()
 
 _TARGET_IMPORT_STRING = "agentic_evalkit.examples.zero_target:zero_target"
 
-# A minimal but schema-valid SWE-bench Verified row (FAIL_TO_PASS/PASS_TO_PASS
-# as JSON-encoded strings, which SweBenchVerifiedAdapter accepts).
+# One fake row of data, shaped like a real SWE-bench Verified dataset entry,
+# just valid enough to satisfy the schema. FAIL_TO_PASS and PASS_TO_PASS list
+# which tests the harness expects to change from failing to passing (and
+# which ones should simply keep passing) once a correct fix is applied; here
+# they're encoded as JSON strings, the format ``SweBenchVerifiedAdapter``
+# expects to parse.
 _SWEBENCH_ROW = {
     "instance_id": "org__repo-1",
     "repo": "org/repo",
@@ -92,8 +114,10 @@ def test_swebench_manifest_resolves_and_degrades_to_unavailable_without_the_extr
     result = runner.invoke(
         app, ["run", str(manifest_path), "--output-dir", str(output_dir), "--yes"]
     )
-    # An unavailable authoritative capability is not an operational error:
-    # the run resolves both names, completes, and exits 0.
+    # A missing real/official grading capability is not the same thing as
+    # our own code breaking (an operational error): the run still resolves
+    # both component names, still completes normally, and still exits 0
+    # (success).
     assert result.exit_code == 0, result.stdout
 
     envelope = json.loads(next(iter(output_dir.glob("*.json"))).read_text(encoding="utf-8"))

@@ -1,10 +1,20 @@
 """Tests for deterministic fingerprint helpers (design §5.6).
 
-Every fingerprint helper must be a pure function of its inputs: same
-inputs -> same ``"sha256:" + 64 hex chars`` digest, every time, regardless
-of dict key order for :func:`compute_target_fingerprint`. These tests pin
-that contract rather than any specific digest value, since the environment
-and code fingerprints legitimately vary across interpreters/installs.
+A "fingerprint" here is a hash that proves what exact code, environment, or
+target configuration produced a run -- see ``agentic_evalkit.provenance``'s
+own module docstring for the full explanation. Every fingerprint function
+must be "deterministic": call it twice with the exact same input and you
+always get back the exact same output, in the form ``"sha256:"`` followed
+by 64 hex characters. For :func:`compute_target_fingerprint` specifically,
+that determinism holds no matter what order a dict's keys happen to be
+listed in.
+
+These tests check that *shape* of guarantee -- same input always gives the
+same output, in the right format -- rather than pinning any one specific
+fingerprint value. That's deliberate: the environment and code fingerprints
+are allowed to come out differently across different interpreters or
+installs. What must never change is that calling the same function twice,
+on the same machine, always agrees with itself.
 """
 
 from __future__ import annotations

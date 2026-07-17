@@ -1,8 +1,13 @@
 """Tests for :class:`agentic_evalkit.graders.exact.ExactMatchGrader`.
 
-The grader takes an *injected* extractor callable rather than importing one
-from ``agentic_evalkit.benchmarks`` (Task 10 ownership boundary): benchmark
-wiring happens later, in Task 14, via ``EvalSample.grader`` / ``GraderSpec``.
+The grader is handed its "extractor" -- the function that pulls the actual
+answer text out of the raw execution output -- as a parameter by the
+caller, rather than importing one directly from
+``agentic_evalkit.benchmarks``. This keeps a firm boundary in place (drawn
+deliberately in Task 10): this grader only knows how to *compare* two
+answers, never anything about any specific benchmark's output format.
+Wiring a grader up to a real benchmark's own extractor happens later, in
+Task 14, via ``EvalSample.grader`` / ``GraderSpec``.
 """
 
 from collections.abc import Mapping
@@ -42,7 +47,8 @@ def _execution(output_text: str) -> NormalizedExecutionResult:
 
 
 def _extract_answer_field(output: Mapping[str, object]) -> str:
-    """A minimal injected extractor a caller might use: read one text field."""
+    """A minimal example of the extractor function a caller might supply:
+    it just reads one text field out of the output."""
     value = output["answer"]
     assert isinstance(value, str)
     return value
@@ -73,7 +79,11 @@ async def test_whitespace_is_normalized() -> None:
 
 @pytest.mark.asyncio
 async def test_unicode_is_normalized() -> None:
-    # "café" as a single precomposed é (NFC) vs. e + combining acute (NFD).
+    # The word "café" can be represented two different ways in Unicode: as
+    # one single character for "é" (called NFC form), or as a plain "e"
+    # plus a separate combining accent mark that renders on top of it
+    # (called NFD form). They look identical but are different bytes --
+    # this test checks that the grader treats them as the same answer.
     grader = ExactMatchGrader(name="exact@1", extractor=_extract_answer_field)
     result = await grader.grade(_sample(reference="café"), _execution("café"))
     assert result.status is GradeStatus.PASS

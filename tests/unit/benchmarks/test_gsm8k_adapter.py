@@ -1,3 +1,15 @@
+"""Tests for :mod:`agentic_evalkit.benchmarks.gsm8k`.
+
+GSM8K is a well-known grade-school math word-problem benchmark. Each row's
+``answer`` field mixes free-form reasoning text with a final ``####``
+marker followed by the actual numeric answer (e.g.
+``"... reasoning ... #### 42"``). These tests check that the adapter pulls
+out just that final number, cleans it up (dropping thousands-separator
+commas and a trailing ``.0`` on whole numbers), and raises
+``DatasetSchemaMismatch`` when a row's data doesn't have the shape it
+expects.
+"""
+
 import pytest
 
 from agentic_evalkit.benchmarks.gsm8k import Gsm8kAdapter, extract_final_answer
@@ -22,12 +34,20 @@ def test_extract_final_answer_strips_thousands_separator_commas() -> None:
 
 
 def test_extract_final_answer_uses_the_final_marker_not_the_first() -> None:
-    """Reasoning text may itself contain '####'; only the last one is authoritative."""
+    """The reasoning text earlier in the answer can itself contain '####'.
+
+    This checks that we always grab the *last* '####' in the string, which
+    is the one that actually marks the final answer.
+    """
     assert extract_final_answer("intermediate #### 3\nfinal #### 42") == "42"
 
 
 def test_extract_final_answer_preserves_non_integer_equivalent_decimals() -> None:
-    """Only an exact `.0` suffix collapses; a genuine fraction like 5.5 must not be truncated."""
+    """A trailing ".0" gets stripped from whole numbers (e.g. "5.0" -> "5").
+
+    But a real decimal like 5.5 is not a whole number, so it must be left
+    exactly as it is, not accidentally truncated to "5".
+    """
     assert extract_final_answer("#### 5.5") == "5.5"
 
 

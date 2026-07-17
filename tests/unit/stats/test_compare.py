@@ -1,24 +1,38 @@
-"""Tests for run compatibility checking and paired bootstrap comparison
-(design §10, ADR-0008).
+"""Tests for checking whether two runs are safe to compare, and for the
+paired bootstrap comparison itself (design section 10, ADR-0008).
 
-``compare_runs`` first verifies that two runs share every field that makes
-a delta between them meaningful: resolved dataset id/revision/config/
-split, adapter, grader, target policy (including target fingerprint),
-sampling policy, and attempt count. Any mismatch raises
-:class:`~agentic_evalkit.errors.IncompatibleRuns` listing *every*
-mismatched field, not just the first one found. A ``None`` fingerprint on
-one side and a pinned fingerprint on the other is itself a mismatch --
-unknown provenance is never treated as equal to verified provenance --
-while ``None`` on both sides still compares fine, for backward
-compatibility with runs recorded before fingerprints were captured.
+``compare_runs`` first checks that two runs share every fact about exactly
+what was run and how -- the resolved dataset's id/revision/config/split,
+the adapter, the grader, the target policy (including the target's exact
+recorded "fingerprint": a hash that uniquely identifies one exact version
+of something), the sampling policy, and the attempt count. Together, these
+facts are what ``compare.py``'s module docstring calls the runs'
+*provenance*; only if all of it matches is a difference between the two
+runs actually meaningful to report -- otherwise you might just be
+comparing, say, two different dataset splits, and mistaking that
+difference in difficulty for a real improvement. Any mismatch raises
+:class:`~agentic_evalkit.errors.IncompatibleRuns`, and the error lists
+*every* mismatched field it found, not just the first one. A ``None``
+fingerprint on one side paired with an actual, pinned fingerprint on the
+other counts as a mismatch too -- "we don't know what exact version this
+was" must never be silently treated as "these two match" -- while ``None``
+on *both* sides compares fine, since that is just what runs recorded
+before fingerprint capture existed look like.
 
-Only for compatible runs does it pair observations by sample and attempt
-id and bootstrap the paired success-rate delta with a local
-``random.Random(seed)`` instance, so the same seed always reproduces the
-same estimate. Zero paired observations is itself raised as
-``IncompatibleRuns`` rather than returned as a confident-looking zero
-delta. ``sample_count`` is the number of distinct sample ids represented,
-which is not the same as ``paired_count`` once ``attempts > 1``.
+Only once two runs are confirmed compatible does ``compare_runs`` pair up
+their individual results by matching ``(sample_id, attempt)``, then
+estimate a confidence interval around the paired difference in success
+rate using bootstrap resampling (repeatedly resampling, with replacement,
+from the paired results we already have -- see ``compare.py``'s module
+docstring for the full explanation of why this works), using a local
+``random.Random(seed)`` instance so that reusing the same seed always
+reproduces the exact same estimate. If there are zero paired observations
+at all, that itself raises ``IncompatibleRuns`` -- there is nothing to
+compute a difference from, so it must fail loudly rather than return a
+confident-looking "zero difference" that was actually computed from
+nothing. ``sample_count`` counts distinct sample ids, which is a different
+number from ``paired_count`` once ``attempts > 1`` (each sample can then
+contribute more than one paired observation, one per attempt).
 
 Covers the plan's verbatim snippet (docs/plans/
 2026-07-02-agentic-evalkit-initial-release.md, Task 12 Step 2) unmodified.
@@ -78,13 +92,15 @@ def _run(
     samples: tuple[SampleResult, ...] = (),
     run_id: str = "run-001",
 ) -> EvalRunResult:
-    """A complete two-sample ``EvalRunResult`` fixture (Task 12 Step 2).
+    """A complete, two-sample ``EvalRunResult`` fixture (Task 12 Step 2).
 
-    Every provenance field is independently parameterized so tests can
-    hold every field but one constant and assert only the intended field
-    triggers a mismatch. When ``samples`` is left empty, two default
-    passing samples at attempt 1 are used so a bootstrap comparison has
-    something to pair.
+    Every provenance field (every fact about exactly what was run and how
+    -- see the module docstring above) can be set independently through
+    this function's keyword arguments, so each test can hold every field
+    but one constant and check that changing only that one field is what
+    triggers a mismatch. When ``samples`` is left empty, this defaults to
+    two samples that both passed on attempt 1, so there is always
+    something for a bootstrap comparison to pair up and compare.
     """
     if not samples:
         samples = (
@@ -183,11 +199,13 @@ def test_rejects_different_target_fingerprint_policies() -> None:
         compare_runs(left, right, seed=1)
 
 
-# --- Actual target fingerprint comparison -------------------------------------
+# --- Comparing the actual target fingerprint, not just its name and policy --
 #
-# Same target_name and target_fingerprint_policy is not enough: two runs can
-# share both while having actually executed against provably different
-# targets. compare_runs must compare the recorded fingerprints themselves.
+# Sharing the same target_name and target_fingerprint_policy is not enough
+# proof that two runs tested the same thing: they could still have actually
+# run against two different, specific versions of the target system.
+# compare_runs must also compare the recorded fingerprints themselves -- the
+# hash that identifies exactly which version was used.
 
 
 def test_rejects_different_target_fingerprints() -> None:
@@ -205,9 +223,9 @@ def test_accepts_equal_non_none_target_fingerprints() -> None:
 
 
 def test_rejects_none_fingerprint_against_a_pinned_fingerprint() -> None:
-    # Unknown provenance (None) must never silently compare as equal to
-    # verified provenance (a pinned fingerprint) -- regardless of which
-    # side is which.
+    # An unknown/unrecorded fingerprint (None) must never silently be
+    # treated as equal to a verified, pinned-down fingerprint -- no matter
+    # which side of the comparison it is on.
     left = _run(target_fingerprint=None)
     right = _run(target_fingerprint="sha256:aaaa")
     with pytest.raises(IncompatibleRuns, match="fingerprint"):
@@ -220,8 +238,9 @@ def test_rejects_none_fingerprint_against_a_pinned_fingerprint() -> None:
 
 
 def test_accepts_none_target_fingerprint_on_both_sides() -> None:
-    # Backward compatibility: runs recorded before target_fingerprint
-    # capture existed both have None, and must still compare fine.
+    # Backward compatibility: runs recorded before target-fingerprint
+    # capture even existed will both have None here, and that must still
+    # be treated as a fine, matching comparison.
     left = _run(target_fingerprint=None)
     right = _run(target_fingerprint=None)
     result = compare_runs(left, right, seed=1)
@@ -230,9 +249,10 @@ def test_accepts_none_target_fingerprint_on_both_sides() -> None:
 
 # --- Environment and code fingerprint comparison (ADR-0015) -------------------
 #
-# environment_fingerprint/code_fingerprint join the provenance gate with the
-# same None-vs-None-is-fine / None-vs-pinned-is-a-mismatch semantics already
-# proven above for target_fingerprint.
+# environment_fingerprint and code_fingerprint get checked with the exact
+# same rule already proven above for target_fingerprint: None on both sides
+# is fine, but None on one side against a pinned value on the other side is
+# a mismatch.
 
 
 def test_rejects_different_environment_fingerprints() -> None:
@@ -250,8 +270,8 @@ def test_rejects_different_code_fingerprints() -> None:
 
 
 def test_accepts_none_environment_fingerprint_on_both_sides() -> None:
-    # Backward compatibility: runs recorded before provenance.py existed
-    # both have None, and must still compare fine.
+    # Backward compatibility: runs recorded before provenance.py even
+    # existed will both have None here, and that must still compare fine.
     left = _run(environment_fingerprint=None)
     right = _run(environment_fingerprint=None)
     result = compare_runs(left, right, seed=1)
@@ -266,9 +286,9 @@ def test_accepts_none_code_fingerprint_on_both_sides() -> None:
 
 
 def test_rejects_none_environment_fingerprint_against_a_pinned_fingerprint() -> None:
-    # Unknown provenance (None) must never silently compare as equal to
-    # verified provenance (a pinned fingerprint) -- regardless of which
-    # side is which.
+    # An unknown/unrecorded fingerprint (None) must never silently be
+    # treated as equal to a verified, pinned-down fingerprint -- no matter
+    # which side of the comparison it is on.
     left = _run(environment_fingerprint=None)
     right = _run(environment_fingerprint="sha256:env-aaaa")
     with pytest.raises(IncompatibleRuns, match="environment fingerprint"):
@@ -318,8 +338,10 @@ def test_allow_cross_environment_waives_both_fingerprints_together() -> None:
 
 
 def test_allow_cross_environment_waived_fields_empty_when_nothing_differs() -> None:
-    # allow_cross_environment=True with no actual mismatch waives nothing --
-    # the tuple is empty, not a placeholder for "waiver was available".
+    # Setting allow_cross_environment=True does not waive anything by
+    # itself if nothing actually differs -- the resulting tuple must be
+    # empty, not a placeholder that just means "a waiver was available if
+    # it had been needed."
     left = _run()
     right = _run()
     result = compare_runs(left, right, seed=1, allow_cross_environment=True)
@@ -327,9 +349,11 @@ def test_allow_cross_environment_waived_fields_empty_when_nothing_differs() -> N
 
 
 def test_allow_cross_environment_does_not_waive_non_waivable_mismatch() -> None:
-    # Scoping proof: a waivable field (environment_fingerprint) together with
-    # a non-waivable field (adapter) still raises IncompatibleRuns -- naming
-    # only the non-waivable mismatch -- even with allow_cross_environment=True.
+    # Proof that the waiver is properly scoped: mismatching a waivable
+    # field (environment_fingerprint) at the same time as a non-waivable
+    # field (adapter) must still raise IncompatibleRuns, and the error
+    # message must name only the non-waivable mismatch -- even with
+    # allow_cross_environment=True.
     left = _run(environment_fingerprint="sha256:env-aaaa", adapter="gsm8k@1")
     right = _run(environment_fingerprint="sha256:env-bbbb", adapter="gsm8k@2")
     with pytest.raises(IncompatibleRuns) as excinfo:
@@ -340,8 +364,9 @@ def test_allow_cross_environment_does_not_waive_non_waivable_mismatch() -> None:
 
 
 def test_allow_cross_environment_defaults_to_false() -> None:
-    # Regression: omitting the flag entirely still gates environment_fingerprint,
-    # confirming the new parameter's default is closed, not open.
+    # Regression check: leaving the flag out entirely must still block a
+    # mismatched environment_fingerprint, confirming this parameter
+    # defaults to the strict/safe behavior rather than the permissive one.
     left = _run(environment_fingerprint="sha256:env-aaaa")
     right = _run(environment_fingerprint="sha256:env-bbbb")
     with pytest.raises(IncompatibleRuns, match="environment fingerprint"):
@@ -457,7 +482,8 @@ def test_compatible_runs_pair_by_sample_and_attempt_id() -> None:
     result = compare_runs(left, right, bootstrap_samples=500, seed=42)
     assert result.paired_count == 2
     assert result.sample_count == 2
-    # right passes both, left passes only one: delta (right - left) is +0.5.
+    # right passed both samples, left passed only one, so the difference
+    # (right's pass rate minus left's) works out to +0.5.
     assert result.estimate == pytest.approx(0.5)
 
 
@@ -473,8 +499,10 @@ def test_unmatched_attempts_are_excluded_from_pairing() -> None:
         run_id="right",
         samples=(
             _sample_result("s0", attempt=1, passed=True),
-            # s1 is missing from the right run entirely -- and s2 exists
-            # only on the right, so neither one can be paired.
+            # s1 does not appear anywhere in the right run, and s2 only
+            # exists in the right run -- so neither one has a matching
+            # counterpart on both sides, and both get left out of the
+            # comparison.
             _sample_result("s2", attempt=1, passed=True),
         ),
     )
@@ -484,10 +512,11 @@ def test_unmatched_attempts_are_excluded_from_pairing() -> None:
 
 
 def test_zero_paired_overlap_raises_incompatible_runs_naming_both_run_ids() -> None:
-    # left and right are otherwise fully compatible (same manifest fields),
-    # but share no (sample_id, attempt) keys at all -- there is nothing to
-    # compute a delta from, so this must fail loudly rather than return a
-    # plausible-looking "no difference" verdict from literally nothing.
+    # left and right otherwise match on every provenance field, but they
+    # share no (sample_id, attempt) pairs at all -- there is nothing to
+    # compute a difference from. This must fail loudly with an error
+    # rather than quietly returning a plausible-looking "no difference"
+    # answer that was actually computed from nothing.
     left = _run(
         run_id="left-run",
         samples=(_sample_result("s0", attempt=1, passed=True),),
@@ -506,11 +535,12 @@ def test_zero_paired_overlap_raises_incompatible_runs_naming_both_run_ids() -> N
 
 
 def test_sample_count_counts_distinct_samples_not_attempt_pairs() -> None:
-    # 2 samples x 3 attempts each, fully overlapping between left and
-    # right: paired_count must be 6 (one pair per (sample_id, attempt)),
-    # but sample_count must stay 2 -- it counts distinct sample ids, not
-    # attempt-pairs, so it must never multiply with the attempt count the
-    # way paired_count does.
+    # 2 distinct questions (sample_ids), each attempted 3 times, and every
+    # attempt overlaps between left and right. paired_count must be 6 (one
+    # pair for each (sample_id, attempt) combination), but sample_count
+    # must stay at 2 -- it only counts distinct sample_ids, so unlike
+    # paired_count, it must never get multiplied up by the number of
+    # attempts.
     left_samples = tuple(
         _sample_result(sample_id, attempt=attempt, passed=True)
         for sample_id in ("s0", "s1")
@@ -567,9 +597,11 @@ def test_same_seed_is_deterministic_across_calls() -> None:
 
 
 def test_different_seeds_do_not_change_the_point_estimate() -> None:
-    # The point estimate (observed paired delta) is deterministic
-    # regardless of seed; only the bootstrap percentile bounds depend on
-    # the seed's resample draws.
+    # The point estimate (the actual observed difference between the two
+    # runs' paired results) does not depend on randomness at all, so it
+    # comes out identical no matter which seed is used. Only the
+    # bootstrap's confidence-interval bounds depend on the seed, since
+    # those come from the random resampling draws.
     left = _run(
         run_id="left",
         samples=tuple(_sample_result(f"s{i}", attempt=1, passed=(i % 2 == 0)) for i in range(10)),

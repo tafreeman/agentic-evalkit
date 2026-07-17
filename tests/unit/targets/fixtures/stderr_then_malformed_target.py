@@ -1,6 +1,9 @@
-"""Fixture: writes a diagnostic message to standard error, then emits
-malformed JSON on standard output, to exercise SubprocessTarget surfacing
-captured stderr content as part of the error evidence.
+"""Fixture script: writes a marker message to standard error, then sends
+back a broken (not valid) JSON response on standard output. Used to check
+that when SubprocessTarget reports an error, it includes the captured
+stderr text as part of the error evidence -- so someone debugging a failed
+run gets a real clue about what went wrong, not just a bare "invalid JSON"
+message.
 """
 
 import sys
