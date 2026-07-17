@@ -1,4 +1,8 @@
-"""Tests for the JSONL reporter (design §11.3, plan Task 13)."""
+"""Tests for the JSONL reporter -- JSONL ("JSON Lines") writes one JSON
+object per line instead of one big nested document; this format writes a
+header line, one line per sample, and a trailer line (design doc §11.3,
+plan Task 13).
+"""
 
 import json
 from pathlib import Path

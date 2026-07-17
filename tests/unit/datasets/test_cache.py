@@ -1,11 +1,22 @@
-"""Tests for the content-addressed dataset cache (ADR-0004, design §6.3).
+"""Tests for the on-disk dataset cache, which stores entries by content fingerprint.
 
-Covers cache-key identity (digest changes with any identity-bearing field),
-the corruption-vs-offline-miss distinction, atomic replace-based writes under
-concurrent same-key writers, and independent addressability of distinct page
-keys. The identity and corruption tests below reproduce the plan's verbatim
-snippet (docs/plans/2026-07-02-agentic-evalkit-initial-release.md, Task 4
-Step 2) unmodified.
+ADR-0004, design section 6.3.
+
+The cache stores each downloaded "page" of a dataset under a key built from
+every parameter that makes that page unique: which provider it came from, the
+dataset id, its exact pinned revision, its config and split, and its offset
+and limit within the page. This file checks four things: that the key's hash
+(its "digest") changes whenever any of those identity-defining fields
+changes, so two different requests can never collide on the same cache
+entry; that a corrupted cache entry is reported as a different, specific
+error than one that simply doesn't exist yet (a cache "miss"); that writes
+replace the old file atomically, so many threads writing the same cache key
+at the same time can never leave a half-written file behind; and that two
+different cache keys (for example, two different pages of the same dataset)
+are stored and read back completely independently of each other. The
+identity and corruption tests directly below are copied, unmodified, from a
+code snippet written out in full in the original implementation plan
+(docs/plans/2026-07-02-agentic-evalkit-initial-release.md, Task 4 Step 2).
 """
 
 from __future__ import annotations
@@ -14,32 +25,41 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from agentic_evalkit.datasets.cache import CacheKey, DatasetCache
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
 
-#: Bounded retry budget for the Windows sharing-violation collision below.
+if TYPE_CHECKING:
+    from pathlib import Path
+
+#: How many times to retry a write that hits the Windows file-locking
+#: collision described below, before giving up.
 _WRITE_RETRY_ATTEMPTS = 3
 _WRITE_RETRY_SLEEP_SECONDS = 0.01
-#: Generous wall-clock deadline for a racing reader to observe at least one
-#: checksum-valid read once writers have published (guards against a vacuous
-#: pass where every in-race read missed before the first write landed).
+#: A generous time limit for the "reader running while writers are still
+#: writing" test below to observe at least one fully successful read after
+#: the writers finish. Without this, the test could pass without actually
+#: checking anything: if every read happened to occur before any writer had
+#: finished, the real check further up (does a read ever see valid data
+#: while writes are still happening?) would never have run at all.
 _READER_OBSERVE_DEADLINE_SECONDS = 5.0
 
 
 def _write_with_windows_retry(cache: DatasetCache, key: CacheKey, payload: bytes) -> None:
-    """Write ``payload`` under ``key``, retrying a Windows sharing violation.
+    """Write ``payload`` under ``key``, retrying if Windows briefly locks the file.
 
-    On Windows, ``Path.replace()`` onto a payload/manifest that another
-    thread (a concurrent reader or a racing writer) currently holds open
-    raises ``PermissionError`` (a sharing violation) -- POSIX rename has no
-    such restriction. That collision is transient: retry a bounded number of
-    times with a tiny sleep and let the write land once the open handle is
-    released. Only ``PermissionError`` is treated as retryable; any other
-    exception propagates immediately so a real bug is never masked.
+    On Windows, replacing a file that another thread (a reader, or another
+    writer racing to write the same key) currently has open raises
+    ``PermissionError``. Mac and Linux don't have this restriction -- they
+    allow replacing a file that's still open elsewhere. The lock is only
+    ever temporary, so this just retries a bounded number of times with a
+    short pause, letting the write go through once the other thread closes
+    its handle. Only ``PermissionError`` is retried this way; any other
+    exception is left to propagate immediately, so a real bug never gets
+    silently hidden behind a retry loop.
     """
     for attempt in range(_WRITE_RETRY_ATTEMPTS):
         try:
@@ -51,7 +71,7 @@ def _write_with_windows_retry(cache: DatasetCache, key: CacheKey, payload: bytes
             time.sleep(_WRITE_RETRY_SLEEP_SECONDS)
 
 
-# --- Step 2 (plan verbatim): cache key identity and corruption tests -------
+# --- Step 2 (copied word-for-word from the plan doc): cache-key identity and corruption tests ---
 
 
 def test_cache_key_changes_for_revision_config_split_and_page() -> None:
@@ -231,7 +251,11 @@ def test_read_with_byte_count_mismatch_raises_integrity_error(tmp_path: Path) ->
     cache = DatasetCache(tmp_path)
     key = _sample_key()
     cache.write(key, b"twelve bytes")
-    # Truncate the payload without updating the manifest's checksum/byte count.
+    # Shrink the payload file on disk without touching its "manifest" -- the
+    # small JSON sidecar file that records what the payload's checksum and
+    # byte count are supposed to be. This simulates corruption: the actual
+    # data and the manifest's record of what that data should look like now
+    # disagree with each other.
     cache.payload_path(key).write_bytes(b"short")
     with pytest.raises(DatasetIntegrityError):
         cache.read(key)
@@ -284,10 +308,11 @@ def test_overwriting_same_key_replaces_payload_atomically(tmp_path: Path) -> Non
 
 # --- Step 5: concurrency -----------------------------------------------------
 #
-# These two tests are the ones the plan asks to run repeatedly via
-# `pytest -x --count=5` (module-level repetition, not a per-test marker) to
-# build confidence that concurrent same-key writes never race into a corrupt
-# or missing final entry.
+# The plan asks for these two tests to be run several times in a row (for
+# example, `pytest -x --count=5`, which repeats the whole test file rather
+# than a single test) to build confidence that when multiple threads write
+# to the same cache key at the same time, the result is never a half-written
+# or missing entry -- exactly one valid entry must always survive.
 
 
 def test_concurrent_same_key_writes_leave_exactly_one_valid_entry(tmp_path: Path) -> None:
@@ -325,17 +350,24 @@ def test_concurrent_writes_to_distinct_offsets_are_all_readable(tmp_path: Path) 
 
 # --- Story 4.1 (R-001): Windows concurrent-write & corruption guard ---------
 #
-# These close the gaps left above: a reader racing live writers (not just a
-# read after all writers have joined), a bounded in-test repeat loop so a
-# same-key write race surfaces as a suite failure without needing the
-# `--count` CLI flag, and the truncated-to-empty / equal-length bit-flip
-# corruption variants distinct from an offline miss. ADR-0004 requires
-# checksum + byte-count + key-identity verification on every read, so no
-# interleaving may ever surface a partially-written entry as valid.
+# These tests close the gaps left by the ones above:
+#   - a reader that reads WHILE writers are still actively writing, not only
+#     after every writer has already finished;
+#   - a repeat loop built directly into the test (instead of relying on
+#     someone remembering to pass `--count` on the command line), so a rare
+#     race condition is still likely to be caught during a normal test run;
+#   - two more ways a cached entry can go bad -- its payload file shrinking
+#     to zero bytes, and a single byte inside it flipping while its length
+#     stays the same -- checked separately from the "there's no entry at
+#     all" (offline miss) case.
+# ADR-0004 requires every read to verify the checksum, byte count, and key
+# all match before trusting a cache entry, specifically so that no timing of
+# reads and writes can ever make a half-written entry look valid.
 
-# A bounded iteration count: small enough that the whole loop stays well under
-# a second, large enough to make a genuine same-key write race improbable to
-# pass by luck on every iteration.
+# How many times to repeat the race below: small enough that the whole loop
+# still finishes in well under a second, but large enough that a real
+# same-key write race would be very unlikely to happen to pass "by luck" on
+# every single repeat.
 _RACE_ITERATIONS = 12
 
 
@@ -343,11 +375,13 @@ _RACE_ITERATIONS = 12
 def test_reader_racing_concurrent_writers_never_sees_corruption(
     tmp_path: Path, iteration: int
 ) -> None:
-    """A reader interleaved with many same-key writers must, on every read,
-    either return one fully-valid written payload or raise a typed
-    ``OfflineCacheMiss`` / ``DatasetIntegrityError`` -- never a torn or
-    checksum-invalid result. Repeated a bounded number of times so a race is
-    unlikely to slip through every iteration.
+    """While many writers are actively writing the same key at once, a
+    reader running at the same time must, on every single read, either get
+    back one complete and valid payload or cleanly raise
+    ``OfflineCacheMiss`` / ``DatasetIntegrityError`` -- it must never return
+    a mixed-up or partially written result. This whole scenario is repeated
+    a fixed number of times so that a rare race condition is unlikely to go
+    unnoticed on every single repeat.
     """
     cache = DatasetCache(tmp_path / f"iter-{iteration}")
     key = _sample_key()
@@ -383,11 +417,14 @@ def test_reader_racing_concurrent_writers_never_sees_corruption(
     # After every writer has finished, exactly one valid entry remains.
     assert cache.read(key) in valid
 
-    # Vacuity guard: if every in-race read happened to miss before the first
-    # write published, the contested-path assertion above never ran. All
-    # writers have now joined and a valid entry provably exists, so keep
-    # reading (bounded by a generous deadline) until at least one checksum-
-    # valid read is observed, then assert the test actually exercised it.
+    # Safety net against a test that passes without actually checking
+    # anything: if every read during the race above happened to miss before
+    # any write had landed yet, the key assertion inside `_read_repeatedly`
+    # (that a successful read returns valid data) never actually ran. By
+    # this point every writer has finished and a valid entry is guaranteed
+    # to exist, so keep reading (up to a generous time limit) until at least
+    # one successful, valid read is observed, and then confirm below that
+    # this actually happened.
     deadline = time.monotonic() + _READER_OBSERVE_DEADLINE_SECONDS
     while successful_reads[0] == 0 and time.monotonic() < deadline:
         try:

@@ -1,10 +1,26 @@
 """Tests for :mod:`agentic_evalkit.graders.grounding` (ADR-0012).
 
-Covers the deterministic grounding-hygiene tier check by check (including
-the degenerate one-word-quote regression the adversarial review found),
-the rubric binding (`RubricBoundJudgeClient`), and the composite factory's
-structural guarantees (weight-0.0 score inertness, hard-gate propagation,
-calibration-requires-client construction guard).
+"Grounded citation" grading checks that an AI's answer is actually backed
+up by real quotes from its source documents, rather than just sounding
+plausible. This file covers three layers:
+
+1. The deterministic tier -- rule-based checks, no AI judge involved --
+   tested one at a time: things like "does this quote actually appear in
+   the document it's attributed to" and "does the answer cite enough of
+   the documents it was required to use." Includes a regression test for a
+   loophole an adversarial review found, where a single trivial one-word
+   quote was enough to slip past these checks.
+2. The "rubric binding" (`RubricBoundJudgeClient`), which wraps an AI judge
+   so it always scores against a fixed, written rubric (a checklist of
+   criteria).
+3. The factory function that assembles the deterministic checks and the AI
+   judge into one combined grader, and the guarantees that assembly makes:
+   the judge's score carries zero weight so it can never move the final
+   numeric score by itself; a hard failure in the deterministic tier still
+   forces the whole result to fail (see the "hard gate" concept explained
+   in test_composite.py); and trying to attach saved calibration data
+   without also supplying a judge client is rejected right at construction
+   time.
 """
 
 from datetime import UTC, datetime
@@ -116,10 +132,14 @@ async def test_full_grounding_discipline_passes() -> None:
 
 @pytest.mark.asyncio
 async def test_degenerate_one_word_quotes_cannot_pass() -> None:
-    """Regression for the adversarial-review reward-hacking hole: one
-    trivial verbatim word per required document plus a nonempty answer must
-    NOT clear the floor -- the substance minimum, not faithfulness, is what
-    blocks it."""
+    """Regression test for a loophole an adversarial review found: an AI
+    could try to game this grader by "citing" just one real, verbatim word
+    per required document (e.g. quoting only the word "loop"), plus some
+    other non-empty answer text. That single word genuinely does appear in
+    the document, so the faithfulness check (is this quote really in the
+    source?) passes -- but it's too trivial to count as a real citation, so
+    the citation-present and evidence-coverage checks correctly still fail
+    and block the grade."""
     degenerate = _payload(
         citations=[
             {"doc_id": "doc-a", "quote": "loop"},
@@ -195,8 +215,12 @@ async def test_canary_leak_in_answer_fails() -> None:
 
 @pytest.mark.asyncio
 async def test_case_mangled_canary_leak_is_still_detected() -> None:
-    """Leak detection is normalization-insensitive (review finding): a
-    case-mangled canary echo cannot evade the tripwire."""
+    """A "canary" is a unique, made-up marker planted in a source document
+    to detect whether the AI is echoing content it shouldn't have direct
+    access to. This test checks that a leaked canary is still caught even
+    if its case has been scrambled along the way -- a gap found during
+    review: matching normalizes case on both sides before comparing, so a
+    case-scrambled echo can't dodge the check."""
     payload = _payload(answer=f"see {_CANARY_A.lower()} in the appendix")
     result = await _grader().grade(_grounding_sample(), _execution(payload))
     assert result.status is GradeStatus.FAIL
@@ -206,9 +230,12 @@ async def test_case_mangled_canary_leak_is_still_detected() -> None:
 
 @pytest.mark.asyncio
 async def test_canary_leak_via_quote_fails_even_when_faithful() -> None:
-    """A quote containing the embedded canary is verbatim (faithful) yet
-    still a leak: the canary check exists precisely for content the corpus
-    itself planted."""
+    """Here the canary marker is quoted word-for-word from the source
+    document, so it passes the faithfulness check (the quote really is
+    genuine). But it's still flagged as a leak: the canary check isn't
+    about whether a quote is accurate, it's about whether the answer
+    exposes a marker that was deliberately planted to catch exactly this
+    kind of leak -- faithful quoting included."""
     payload = _payload(
         citations=[
             {"doc_id": "doc-a", "quote": f"{_CANARY_A} The loop is inspected"},
@@ -229,8 +256,11 @@ async def test_blank_answer_fails_nonempty() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_quote_is_never_faithful() -> None:
-    """Guards Python's vacuous ``"" in text`` truth: an empty quote quotes
-    nothing and must fail faithfulness, not silently pass it."""
+    """In Python, checking whether an empty string appears inside any text
+    always returns ``True`` (``"" in text`` is always true). This test
+    makes sure that quirk doesn't let an empty quote count as faithful -- a
+    citation that quotes nothing should fail the faithfulness check, not
+    silently pass it."""
     payload = _payload(
         citations=[
             {"doc_id": "doc-a", "quote": ""},
@@ -254,9 +284,12 @@ async def test_malformed_payload_fails_structured_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_extra_payload_keys_fail_structured_contract() -> None:
-    """The documented contract is exactly ``{answer, citations}``
-    (``extra="forbid"``): undocumented keys are a contract violation, not
-    tolerated noise."""
+    """The AI's output is only allowed to contain exactly two fields,
+    ``answer`` and ``citations`` -- nothing else (enforced through
+    Pydantic's ``extra="forbid"`` setting, which rejects any undeclared
+    field). An extra, unexpected key in the payload is treated as a
+    contract violation that fails the check, not as harmless noise to
+    ignore."""
     payload = _payload()
     payload["debug"] = True
     result = await _grader().grade(_grounding_sample(), _execution(payload))
@@ -265,9 +298,14 @@ async def test_extra_payload_keys_fail_structured_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_citationless_answer_fails_presence_and_coverage() -> None:
-    """The packaged ``zero_target`` shape: ``{"answer": "0"}`` parses fine
-    (citations default to empty) and must fail on missing citations, not on
-    the contract."""
+    """This uses the exact output shape produced by the project's built-in
+    demo target, ``zero_target`` (a stand-in for a real AI that always
+    answers the literal string ``"0"`` with no citations at all -- used
+    elsewhere in the codebase purely as a smoke test, not a genuine answer
+    generator). That output, ``{"answer": "0"}``, is still valid enough to
+    parse successfully (the ``citations`` field just defaults to an empty
+    list), so it must fail because citations are missing, not because the
+    payload itself is malformed."""
     result = await _grader().grade(_grounding_sample(), _execution({"answer": "0"}))
     assert result.status is GradeStatus.FAIL
     checks = _checks(result.evidence)
@@ -350,7 +388,9 @@ async def test_substance_floor_is_configurable() -> None:
 
 
 class _ScriptedJudgeClient:
-    """Deterministic judge stub recording every request it receives."""
+    """A fake judge client for tests: instead of actually calling an AI
+    model, it always returns the same scripted verdict, and it records
+    every request it receives so a test can inspect what was sent to it."""
 
     fingerprint = "sha256:scripted-judge"
 
@@ -472,8 +512,11 @@ def test_calibration_without_judge_client_is_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_uncalibrated_judge_is_score_inert_and_never_gates() -> None:
-    """A judge FAIL at weight 0.0 must not move the composite score, and its
-    child result must never hard-gate: only the deterministic tier gates."""
+    """With no calibration data supplied, the AI judge's weight is 0.0.
+    This test checks that a FAIL verdict from that judge doesn't move the
+    combined score at all, and doesn't force the whole result to fail
+    either -- only the deterministic (rule-based) tier is allowed to do
+    that."""
     grader = build_grounded_citation_grader(
         judge_client=_ScriptedJudgeClient(verdict="fail", score=0.0)
     )
@@ -500,8 +543,9 @@ async def test_deterministic_failure_hard_gates_the_composite() -> None:
     deterministic_child = children["grounded-citation-deterministic@1"]
     assert deterministic_child["hard_gate"] is True
     assert deterministic_child["status"] == GradeStatus.FAIL.value
-    # The per-check audit trail survives composition into the composite's
-    # evidence (composite children carry each child's own evidence).
+    # Each individual check's pass/fail detail is still available here,
+    # even after being wrapped inside the combined grader's own evidence --
+    # every child result carries its own full evidence along with it.
     failed_checks = deterministic_child["evidence"]["failed_checks"]
     assert GroundingCheck.CITATION_PRESENT.value in failed_checks
 

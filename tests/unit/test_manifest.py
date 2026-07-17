@@ -1,11 +1,18 @@
 """Tests for safe manifest loading/dumping (plan Task 14, Steps 1 and 3).
 
-``load_manifest`` must use ``yaml.safe_load`` only (never resolve Python
-tags), require exactly one top-level mapping, validate the result against
-``EvalRunManifest`` plus the CLI-specific ``target`` block, and report field
-paths through ``ManifestValidationError`` rather than a raw Pydantic
-traceback. ``dump_manifest`` is the inverse: stable YAML with an explicit
-schema version and every field a run needs to be reproducible.
+A manifest is the YAML file that describes one evaluation run. ``load_manifest``
+must always parse it with ``yaml.safe_load`` -- never a plain ``yaml.load``,
+which can be tricked into constructing arbitrary Python objects via special
+YAML tags -- and must reject anything that doesn't decode to exactly one
+YAML mapping (a single set of key/value pairs) at the top level. Once
+parsed, it validates the result against ``EvalRunManifest`` plus the
+CLI-specific ``target`` block (which describes which execution target to
+build), and reports any problems it finds through
+``ManifestValidationError`` with a clear list of exactly which fields are
+wrong, instead of letting a raw Pydantic traceback leak through to the
+user. ``dump_manifest`` does the reverse job: turning a manifest back into
+stable YAML text that always includes an explicit schema version and every
+field needed to run it again exactly as it ran before.
 """
 
 from __future__ import annotations
@@ -26,8 +33,12 @@ from agentic_evalkit.manifest import (
 )
 from agentic_evalkit.models import DatasetRef, EvalRunManifest, SamplingPolicy
 
-#: A distinctive sentinel that must never be persisted anywhere: it is the
-#: *value* an ``HttpTargetConfig.credential_hook`` env var holds at run time.
+#: A distinctive, obviously-fake secret value used only in these tests, so
+#: it's easy to search for in output and prove it was never written
+#: anywhere. It represents the *actual value* an
+#: ``HttpTargetConfig.credential_hook`` environment variable would hold at
+#: run time -- the tests below check that this value never ends up
+#: persisted to disk.
 _HOOK_SECRET = "hook-secret-XYZZY-do-not-persist"
 _HOOK_ENV_NAME = "AGENTIC_EVALKIT_TEST_CRED_HOOK"
 
@@ -68,9 +79,15 @@ def test_never_resolves_python_tags(tmp_path: Path) -> None:
         tmp_path,
         "run_name: !!python/object/apply:os.system ['echo unsafe']\n",
     )
-    # yaml.safe_load itself refuses the !!python/object/apply tag: this must
-    # surface as our typed ManifestValidationError, never an executed side
-    # effect and never an unhandled yaml.constructor.ConstructorError.
+    # If this "!!python/object/apply" YAML tag were ever acted on, it would
+    # call os.system("echo unsafe") -- i.e. run an arbitrary shell command --
+    # just from loading this file. yaml.safe_load refuses to act on tags
+    # like this at all, which is exactly why load_manifest is required to
+    # use yaml.safe_load rather than the plain, unsafe yaml.load. What this
+    # test checks is that the refusal always surfaces to the caller as our
+    # own typed ManifestValidationError -- never as the command actually
+    # running, and never as an unhandled yaml.constructor.ConstructorError
+    # (PyYAML's own internal error type) leaking out instead.
     with pytest.raises(ManifestValidationError):
         load_manifest(path)
 
@@ -92,8 +109,9 @@ target:
     )
     with pytest.raises(ManifestValidationError) as excinfo:
         load_manifest(path)
-    # Whatever the exact set of missing/invalid fields, the error must name
-    # at least one field path so a user can find the problem in their file.
+    # No matter exactly which fields turn out to be missing or invalid, the
+    # error must name at least one specific field path, so a user editing
+    # their YAML file knows where to look.
     errors = excinfo.value.context.get("errors")
     assert errors
     assert any("import_string" in entry["path"] for entry in errors)  # type: ignore[union-attr]
@@ -186,9 +204,11 @@ def test_dump_manifest_never_interpolates_environment_variables() -> None:
     fixture = Path("tests/fixtures/manifests/gsm8k.yaml")
     document = load_manifest(fixture)
     dumped = dump_manifest(document)
-    # Environment interpolation is forbidden in manifests (plan Task 14 Step
-    # 3); the dumper must never emit shell/YAML interpolation syntax such as
-    # "${VAR}" even if a value happened to contain literal "$" text.
+    # Manifests are never allowed to do shell-style "${VAR}" substitution --
+    # expanding a placeholder like ${VAR} into an environment variable's
+    # actual value (plan Task 14 Step 3). This checks that dump_manifest
+    # never even writes out that "${...}" syntax in the first place, even
+    # if some value happened to literally contain a "$" character.
     assert "${" not in dumped
 
 
@@ -271,16 +291,20 @@ attempts: 1
     assert any("equal" in entry["message"] for entry in errors)  # type: ignore[union-attr]
 
 
-# --- Story 2.3 (R-002): credential-hook runtime resolution never recorded ---
+# --- Story 2.3 (R-002): a credential hook's real secret value must never be written to disk ---
 #
-# ``HttpTargetConfig.credential_hook`` stores the *name* of an env var the CLI
-# reads at run time (``agentic_evalkit.cli.runs._load_http_target`` does
-# ``os.environ.get(credential_hook)``); the resolved secret must never be
-# persisted. These manifest-level guards prove the persistence half of the
-# AC: with the env var actually set to the sentinel secret, neither the dumped
-# YAML nor a JSON round-trip of the document carries the resolved value -- only
-# the hook reference (the env-var name). The CLI-path (build + report)
-# assertions live in ``tests/integration/test_cli.py``.
+# ``HttpTargetConfig.credential_hook`` doesn't store a secret at all -- it
+# stores the *name* of an environment variable that the CLI reads at run
+# time (see ``agentic_evalkit.cli.runs._load_http_target``, which calls
+# ``os.environ.get(credential_hook)``). Whatever secret value that
+# environment variable actually holds must never be written down anywhere.
+# The tests below prove exactly that: with the environment variable set to
+# a fake secret value, neither the dumped YAML nor a JSON round-trip of the
+# document contains that value anywhere -- only the hook's name (which
+# environment variable to read from) is ever recorded. These tests only
+# cover the manifest/YAML side of that guarantee; the equivalent checks for
+# the full CLI path (building the target and writing a report) live in
+# ``tests/integration/test_cli.py``.
 
 
 def _http_hook_document() -> ManifestDocument:
@@ -300,14 +324,17 @@ def _http_hook_document() -> ManifestDocument:
 def test_manifest_stores_only_the_credential_hook_name_never_a_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Even with the hook's env var set to a real secret, the manifest target
-    carries only the hook *name*; the resolved value is nowhere on the model.
+    """Even with the environment variable actually set to a real-looking
+    secret, the manifest's target only ever stores the *name* of that
+    environment variable -- the resolved secret value itself never appears
+    anywhere on the model.
     """
     monkeypatch.setenv(_HOOK_ENV_NAME, _HOOK_SECRET)
     document = _http_hook_document()
     assert isinstance(document.target, HttpTargetConfig)
     assert document.target.credential_hook == _HOOK_ENV_NAME
-    # The whole document, serialized, references the hook name but not the value.
+    # Serializing the whole document to JSON includes the hook's name, but
+    # never the secret value it points to.
     serialized = document.model_dump_json()
     assert _HOOK_ENV_NAME in serialized
     assert _HOOK_SECRET not in serialized
@@ -316,16 +343,18 @@ def test_manifest_stores_only_the_credential_hook_name_never_a_value(
 def test_dumped_manifest_yaml_never_contains_the_resolved_hook_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``dump_manifest`` writes the hook name into the ``target`` block but
-    never the resolved secret, so a dumped manifest committed to disk cannot
-    leak the credential.
+    """``dump_manifest`` writes the environment variable's *name* into the
+    ``target`` block, but never the secret value it resolves to at run time
+    -- so if a dumped manifest is ever committed to a repo or shared with
+    someone, it can't leak the credential.
     """
     monkeypatch.setenv(_HOOK_ENV_NAME, _HOOK_SECRET)
     dumped = dump_manifest(_http_hook_document())
     assert _HOOK_ENV_NAME in dumped
     assert _HOOK_SECRET not in dumped
-    # And the parsed YAML confirms the hook is stored as the credential_hook
-    # reference, not an inlined token/value.
+    # Parsing the YAML back confirms the hook is stored as just the
+    # environment-variable name (credential_hook) -- not as an actual token
+    # or credential value written directly into the file.
     parsed = yaml.safe_load(dumped)
     assert parsed["target"]["credential_hook"] == _HOOK_ENV_NAME
     assert "authorization" not in dumped.lower()
@@ -334,8 +363,9 @@ def test_dumped_manifest_yaml_never_contains_the_resolved_hook_secret(
 def test_manifest_round_trip_preserves_hook_name_and_drops_no_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A dump -> load round-trip of an HTTP-hook manifest preserves the hook
-    name exactly and introduces no secret value at any point.
+    """Dump an HTTP-hook manifest to YAML and load it back again: the hook
+    name comes back exactly as it was, and the secret value never appears
+    anywhere along the way.
     """
     monkeypatch.setenv(_HOOK_ENV_NAME, _HOOK_SECRET)
     document = _http_hook_document()
@@ -346,5 +376,5 @@ def test_manifest_round_trip_preserves_hook_name_and_drops_no_secret(
     reloaded = load_manifest(round_trip_path)
     assert isinstance(reloaded.target, HttpTargetConfig)
     assert reloaded.target.credential_hook == _HOOK_ENV_NAME
-    # The on-disk file never held the secret.
+    # The file actually written to disk never contained the secret either.
     assert _HOOK_SECRET not in round_trip_path.read_text(encoding="utf-8")

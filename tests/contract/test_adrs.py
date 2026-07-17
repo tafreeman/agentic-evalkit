@@ -1,15 +1,21 @@
-"""ADR shape and cross-ADR consistency (plan Task 15 Step 1, design §16).
+"""Checks that every ADR has the required shape, and that ADRs agree with
+each other (plan Task 15 Step 1, design section 16).
 
-This module *verifies* the ADR log already committed under `docs/adr/`
-(``REQUIRED_ADR_PREFIXES`` below names each ratified record, and a
-completeness check below asserts that tuple matches the committed file
-listing); it never edits ADR content. Every ADR conforms to the required
-seven-heading template (Status, Context, Decision, Alternatives,
-Consequences, Validation, Supersession) and
-is `Accepted` -- Tasks 1-10 recorded each ADR before its governing production
-code, per the plan's "Every ADR is committed before the production code it
-governs" table. If any check here fails, that is a real documentation defect
-to report, not something this test should be weakened to tolerate.
+An ADR ("Architecture Decision Record") is a short markdown document under
+`docs/adr/` that records one architectural decision: the context that
+prompted it, what was decided, what alternatives were rejected, and how the
+decision was validated. This module *verifies* the ADR log already
+committed under `docs/adr/` (``REQUIRED_ADR_PREFIXES`` below names each
+accepted ADR, and a completeness check below confirms that tuple matches
+the files actually committed); it never edits ADR content itself. Every
+ADR must follow the same required seven-heading template (Status, Context,
+Decision, Alternatives, Consequences, Validation, Supersession) and have
+its Status set to `Accepted` -- the project's plan required every ADR to be
+written and committed before the production code it governs, so by the
+time that code ships, its ADR should already exist and already be
+accepted. If any check here fails, that means a real ADR is malformed or
+inconsistent -- don't weaken this test to make the failure go away; go fix
+the ADR instead.
 """
 
 import re
@@ -19,18 +25,35 @@ import pytest
 
 ADR_DIR = Path("docs/adr")
 
-#: Every ratified ADR this suite enforces, in filename-prefix order: the
-#: nine ADRs design §16 and the plan's ADR/task table require (Task 1-10
-#: committed them with these exact numeric prefixes), plus 0010 (offline
-#: dataset contract), 0011 (offline resolution cache), 0012
-#: (grounded-citation probe), 0013 (contamination metadata and canaries),
-#: 0014 (SWE-bench Docker harness executor), 0015 (environment/code
-#: fingerprints gate comparability), 0016 (cluster-robust intervals for
-#: repeated attempts), 0017 (grade before spilling large outputs), 0018
-#: (redact and bound judge candidate output), 0019 (retract unshipped
-#: entry-point plugin discovery), and 0020 (Wilson lower-bound judge floor,
-#: response envelope, and gating-scoped probe). Each prefix matches exactly
-#: one file under docs/adr/.
+#: Every accepted ADR this suite enforces, in filename-prefix order: the
+#: nine ADRs design section 16 and the plan's ADR/task table require (Task
+#: 1-10 committed them with these exact numeric prefixes), plus 0010
+#: (offline dataset contract -- makes the CLI's --offline flag actually
+#: guarantee no network calls, everywhere it is accepted), 0011 (offline
+#: resolution cache -- lets --offline mode reuse a dataset previously
+#: fetched online instead of failing), 0012 (grounded-citation probe --
+#: checks whether an answer's citations are real, complete, and not
+#: overreaching), 0013 (contamination metadata and canaries -- tracking
+#: and detecting whether benchmark data may have leaked into a model's
+#: training data), 0014 (SWE-bench Docker harness executor -- runs the
+#: SWE-bench coding benchmark inside Docker containers), 0015
+#: (environment/code fingerprints gate comparability -- checksums
+#: identifying the exact environment and code version decide whether two
+#: runs may be fairly compared), 0016 (cluster-robust intervals for
+#: repeated attempts -- statistically correct confidence intervals when
+#: the same sample is attempted more than once), 0017 (grade before
+#: spilling large outputs -- grading must see the full output before an
+#: oversized one gets swapped out for a stored reference), 0018 (redact
+#: and bound judge candidate output -- strip secrets from, and cap the
+#: size of, the system-under-test's output before it is sent to an LLM
+#: judge), 0019 (retract unshipped entry-point plugin discovery --
+#: formally remove a plugin-loading feature that was built but never
+#: actually wired up to anything), and 0020 (Wilson lower-bound judge
+#: floor, response envelope, and gating-scoped probe -- a stricter
+#: statistical bar before a judge may gate a release, a structured way for
+#: a judge to report refusal/error instead of just failing outright, and
+#: skipping an expensive bias-check probe when its result would not
+#: actually be used). Each prefix matches exactly one file under docs/adr/.
 REQUIRED_ADR_PREFIXES = (
     "0001",
     "0002",
@@ -55,9 +78,10 @@ REQUIRED_ADR_PREFIXES = (
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
-#: line, matching design §16: "Each ADR records context, decision,
+#: line, matching design section 16: "Each ADR records context, decision,
 #: alternatives, consequences, validation evidence, and supersession
-#: policy."
+#: policy" -- "supersession" means the rule for how and when a later ADR
+#: is allowed to replace this decision.
 REQUIRED_HEADINGS = (
     "## Context",
     "## Decision",
@@ -68,9 +92,12 @@ REQUIRED_HEADINGS = (
 )
 
 #: Decisions this package's ADRs must never contradict: the ADR-0001
-#: dependency boundary (no ARP/agentic-tools/EK imports; evaluation only
-#: through public targets) and the ADR-0003 Hugging Face baseline (shipped
-#: in the base wheel, not an optional extra; remote code disabled).
+#: dependency boundary (this package must never import from ARP,
+#: agentic-tools, or EK -- three separate, sibling systems -- and may only
+#: exercise a system under test through the public `ExecutionTarget`
+#: protocol) and the ADR-0003 Hugging Face baseline (the Hugging Face
+#: dataset provider ships in the base install rather than as an optional
+#: extra, and never runs remote code).
 _DEPENDENCY_BOUNDARY_MARKERS = (
     "imports no modules from ARP",
     "ExecutionTarget",
@@ -155,7 +182,8 @@ def test_adr_headings_appear_in_canonical_order(prefix: str, adr_paths: dict[str
 def test_no_adr_contradicts_dependency_or_baseline_decisions(
     adr_paths: dict[str, Path],
 ) -> None:
-    """No committed ADR may contain text contradicting ADR-0001/ADR-0003."""
+    """No committed ADR may contain text that contradicts ADR-0001 (the
+    dependency boundary) or ADR-0003 (the Hugging Face baseline)."""
     violations: list[str] = []
     for prefix, path in adr_paths.items():
         lowered = _normalize_whitespace(path.read_text(encoding="utf-8").lower())
@@ -210,24 +238,31 @@ def _committed_adr_prefixes() -> tuple[str, ...]:
 
 
 def test_required_prefixes_cover_every_committed_adr_file() -> None:
-    """``REQUIRED_ADR_PREFIXES`` cannot lag the ADR log.
+    """``REQUIRED_ADR_PREFIXES`` must always match the ADR log exactly --
+    it can never fall behind.
 
-    A new docs/adr/ file must be added to the tuple above in the same
-    change, or every shape/status/heading check in this module silently
-    skips it.
+    Whenever a new file is added under docs/adr/, its prefix must be added
+    to the tuple above in the same change. Otherwise every shape/status/
+    heading check in this module would silently skip the new ADR instead
+    of actually checking it.
     """
     assert _committed_adr_prefixes() == REQUIRED_ADR_PREFIXES
 
 
 def test_landing_page_adr_claims_match_committed_adr_count() -> None:
-    """docs/index.md's ADR stat tile and prose must track docs/adr/.
+    """docs/index.md's ADR count -- both the numeric "stat tile" and the
+    prose sentence -- must stay in sync with what's actually committed
+    under docs/adr/.
 
-    The 2026-07-08 audit found the landing page still claiming nine ADRs
-    (stat tile "9", prose "0001 through 0009") after
-    0010-offline-dataset-contract.md landed. Both claims are derived here
-    from the committed file listing so the undercount cannot recur
-    silently. CLAUDE.md repeats the range claim but is gitignored, so a CI
-    checkout deliberately cannot assert on it.
+    A "stat tile" is a small box on the landing page showing a number next
+    to a label (here, a count next to the word "ADRs"). The 2026-07-08
+    audit found the public landing page still claiming nine ADRs (the stat
+    tile read "9", and the prose read "0001 through 0009") even though
+    0010-offline-dataset-contract.md had already landed. Both claims are
+    derived here directly from the committed file listing, so that kind of
+    undercount cannot silently happen again. CLAUDE.md repeats the same
+    range claim but is gitignored (never committed to the repo), so a
+    fresh CI checkout has no copy of it to check against.
     """
     prefixes = _committed_adr_prefixes()
     count = len(prefixes)

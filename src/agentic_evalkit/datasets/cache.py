@@ -1,23 +1,41 @@
-"""Content-addressed, checksum-verified dataset cache (ADR-0004, design §6.3).
+"""A cache for dataset contents, looked up by a hash of "what request
+produced this data" rather than by a filename (ADR-0004, design §6.3).
 
-``CacheKey`` captures every field that changes which bytes a page or full
-dataset resolves to (provider, canonical ID, immutable revision, config,
-split, offset/limit, and optional projection/filter/data-file digests plus
-record type) and reduces them to a single stable SHA-256 digest over
-canonical JSON. ``DatasetCache`` stores the payload and a manifest (checksum,
-byte count, creation time, and the key JSON) for each digest, publishing both
-via a temp-file-then-``Path.replace()`` sequence under a per-key lock so
-concurrent writers to the same key never leave a torn payload/manifest pair
-readable.
+("Content-addressed" means: instead of naming a cache entry after a file or
+a dataset, we name it after a hash of everything that determines its
+content, so the same request always maps to the same cache entry, and a
+different request always maps to a different one.)
 
-``Path.replace()`` is atomic on POSIX filesystems but its atomicity on
-Windows depends on the local filesystem and is not guaranteed across all
-configurations (e.g. some network/mounted drives). This module does not rely
-on replace-atomicity alone for correctness: every ``read()`` verifies the
-manifest's key identity, byte count, and payload checksum before returning
-bytes, so a partially-applied replace is surfaced as a typed
-``DatasetIntegrityError`` rather than silently returning corrupt or
-mismatched data. See ``docs/adr/0004-content-addressed-dataset-cache.md``.
+``CacheKey`` collects every piece of information that affects exactly which
+bytes a cached page (or a full dataset) contains: the provider, the
+dataset's canonical ID, its immutable ``revision`` (an exact, pinned
+version identifier), its config and split, the offset/limit of the page
+being requested, optional hashes representing any projection/filter/
+data-file settings in play, and a record-type marker. All of that is
+boiled down into one short, stable fingerprint: a SHA-256 hash computed
+over a standardized ("canonical") JSON form of these fields. ``DatasetCache``
+then stores, for each fingerprint, both the raw payload bytes and a
+"manifest" -- a small JSON file recording a checksum of the payload, its
+byte count, when it was created, and the key's own JSON. Both files are
+published using the same safe pattern: write to a temporary file first,
+then swap it into place with ``Path.replace()``, all while holding a lock
+specific to that one key. That way, two writers racing to write the same
+key can never leave behind a mismatched pair where the payload is from one
+write and the manifest is from another.
+
+``Path.replace()`` is guaranteed atomic (meaning it either fully happens or
+doesn't happen at all, with no in-between state ever visible to a reader)
+on POSIX filesystems (Linux/Mac), but on Windows that guarantee depends on
+the specific filesystem in use and isn't certain in every configuration
+(for example, on some network or mounted drives). Because of that, this
+module does not depend on ``Path.replace()`` alone to guarantee
+correctness: every call to ``read()`` double-checks the manifest's
+recorded key, the payload's byte count, and the payload's checksum before
+handing back any bytes. So if a replace operation was ever interrupted
+partway through, the result is a clear, typed ``DatasetIntegrityError`` --
+never silently corrupt or mismatched data returned as if it were fine. See
+``docs/adr/0004-content-addressed-dataset-cache.md`` for the full design
+decision.
 """
 
 from __future__ import annotations
@@ -27,21 +45,25 @@ import json
 import os
 import threading
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
 from agentic_evalkit.models.base import FrozenModel
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _PAYLOAD_FILENAME = "payload.bin"
 _MANIFEST_FILENAME = "manifest.json"
 _DIGEST_PREFIX = "sha256:"
 
-# Per-key write locks, keyed by digest. A single registry-level lock guards
-# creation of new per-key locks so two threads racing to write *different*
-# keys for the first time cannot both "win" the get-or-create and end up
-# sharing (or losing) a lock object; the per-key lock itself then serializes
-# writers to that one key.
+# One write-lock per cache key (indexed by the key's digest/fingerprint). A
+# single, separate lock guards the *creation* of these per-key locks: if two
+# threads both try to write a *new* key (one with no lock yet) at the same
+# moment, this outer lock stops them from each creating their own separate
+# lock object, which would mean the two threads wouldn't actually be
+# synchronized with each other. Once a per-key lock exists, it's the one
+# that makes writers to that specific key wait their turn.
 _registry_lock = threading.Lock()
 _key_locks: dict[str, threading.Lock] = {}
 
@@ -56,12 +78,14 @@ def _lock_for_digest(digest: str) -> threading.Lock:
 
 
 class CacheKey(FrozenModel):
-    """Identifies one cached page or full-dataset payload (design §6.3).
+    """Identifies one cached page of data, or one full-dataset payload
+    (design §6.3).
 
-    Two keys with equal field values always hash to the same digest and
-    therefore address the same cache entry; any differing field (including
-    the optional projection/filter/data-file digests and ``record_type``)
-    changes the digest and therefore the entry.
+    Any two keys with exactly the same field values will always hash to the
+    same fingerprint (digest), and therefore point at the same cache entry.
+    Conversely, if even one field differs -- including the optional
+    projection/filter/data-file hashes and the ``record_type`` field -- the
+    resulting fingerprint changes, and so does the cache entry it points to.
     """
 
     provider: str
@@ -77,12 +101,15 @@ class CacheKey(FrozenModel):
     record_type: Literal["page", "full"] = "page"
 
     def digest(self) -> str:
-        """Return ``"sha256:" + hexdigest`` of this key's canonical JSON.
+        """Return this key's fingerprint: the text ``"sha256:"`` followed by
+        the SHA-256 hash of this key's fields written out as JSON.
 
-        Canonical form is UTF-8 JSON with sorted keys and compact separators
-        (``json.dumps(..., sort_keys=True, separators=(",", ":"))``), so the
-        digest depends only on field values, never on field-declaration
-        order or incidental whitespace.
+        The JSON is written in a standardized ("canonical") form -- UTF-8
+        text, keys sorted alphabetically, no extra whitespace
+        (``json.dumps(..., sort_keys=True, separators=(",", ":"))``) -- so
+        the resulting fingerprint depends only on the actual field values,
+        never on the order the fields happen to be declared in or on
+        incidental spacing.
         """
         canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
         return _DIGEST_PREFIX + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -93,13 +120,17 @@ def _checksum(payload: bytes) -> str:
 
 
 class DatasetCache:
-    """A directory-backed, content-addressed cache of dataset payloads.
+    """A cache of dataset payloads, stored as files on disk and looked up by
+    content fingerprint rather than by name.
 
-    Layout: ``root/<digest[7:9]>/<digest>/{payload.bin,manifest.json}``,
-    where ``digest`` is ``CacheKey.digest()`` (the ``"sha256:"`` prefix is
-    kept in the manifest and digest value but stripped from path segments)
-    and the two leading hex characters after the prefix form a fan-out
-    directory so no single directory accumulates every entry.
+    On disk, each entry lives at
+    ``root/<xx>/<digest>/{payload.bin,manifest.json}``, where ``digest`` is
+    the value returned by ``CacheKey.digest()`` (the ``"sha256:"`` prefix is
+    kept when the digest is written into the manifest file, but stripped
+    off when the digest is used as part of a directory/file path) and
+    ``<xx>`` is just its first two hex characters, used as a subdirectory
+    so that entries are spread out across many small directories instead of
+    all piling into one giant directory.
     """
 
     def __init__(self, root: Path) -> None:
@@ -119,15 +150,19 @@ class DatasetCache:
         return self._entry_dir(key) / _MANIFEST_FILENAME
 
     def write(self, key: CacheKey, payload: bytes) -> None:
-        """Publish ``payload`` for ``key``, replacing any prior entry.
+        """Save ``payload`` under ``key``, replacing any entry that was
+        there before.
 
-        Writes payload and manifest to temporary files in the entry
-        directory, flushes and ``fsync``s each, then atomically publishes
-        both with ``Path.replace()`` while holding a lock scoped to this
-        key's digest. Concurrent writers to the *same* key are serialized by
-        that lock, so the entry directory always contains either the
-        previous complete entry or the new one, never a mix; writers to
-        *different* keys never block each other.
+        Writes the payload and its manifest to temporary files in the
+        entry's directory first, flushes each one and calls ``fsync``
+        (which forces the operating system to actually write the data to
+        disk rather than just holding it in memory), then publishes both
+        files at once using ``Path.replace()`` -- all while holding a lock
+        specific to this key's digest (fingerprint). If multiple threads
+        try to write to the *same* key at once, this lock makes them go one
+        at a time, so the entry directory always holds either the complete
+        old entry or the complete new one, never a mix of the two; writers
+        to *different* keys, meanwhile, never block each other.
         """
         entry_dir = self._entry_dir(key)
         entry_dir.mkdir(parents=True, exist_ok=True)
@@ -148,11 +183,14 @@ class DatasetCache:
         with _lock_for_digest(digest):
             tmp_payload = self._write_temp(entry_dir, "payload", payload)
             tmp_manifest = self._write_temp(entry_dir, "manifest", manifest_bytes)
-            # Publish payload before manifest: a reader that observes a
-            # manifest but a missing/old payload always fails a checksum or
-            # byte-count check rather than reading half-written bytes as
-            # valid, and a reader that observes no manifest yet reports the
-            # entry as an offline miss rather than as corrupt.
+            # Publish the payload file before the manifest file, on purpose:
+            # this way, if a reader shows up in the middle of this
+            # operation, there are only two possible outcomes, and both are
+            # safe. Either it sees the new manifest but an old/missing
+            # payload -- which fails the checksum or byte-count check below,
+            # so the bad read is caught -- or it sees no manifest yet at
+            # all, which it correctly reports as "not cached yet" rather
+            # than "corrupted".
             tmp_payload.replace(payload_path)
             tmp_manifest.replace(manifest_path)
 
@@ -166,14 +204,18 @@ class DatasetCache:
         return tmp_path
 
     def read(self, key: CacheKey) -> bytes:
-        """Return the verified payload bytes for ``key``.
+        """Return the payload bytes saved under ``key``, after verifying
+        they are intact.
 
         Raises:
-            OfflineCacheMiss: no manifest or payload exists for this exact
-                key (no partial-match fallback is ever attempted).
-            DatasetIntegrityError: a manifest exists but its recorded key
-                does not match ``key``, or the on-disk payload's byte count
-                or checksum does not match the manifest.
+            OfflineCacheMiss: neither a manifest nor a payload file exists
+                for this exact key (this method never falls back to a
+                partial or approximate match -- it's this exact key or
+                nothing).
+            DatasetIntegrityError: a manifest file exists, but something
+                about it doesn't check out -- its recorded key doesn't
+                match ``key``, or the payload's on-disk byte count or
+                checksum doesn't match what the manifest says it should be.
         """
         manifest_path = self.manifest_path(key)
         payload_path = self.payload_path(key)

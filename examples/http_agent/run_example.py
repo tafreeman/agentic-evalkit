@@ -21,8 +21,8 @@ Usage (from this directory, in a separate terminal from the stub server):
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from pydantic import BaseModel, TypeAdapter
@@ -43,6 +43,9 @@ from agentic_evalkit.models import (
 from agentic_evalkit.reporters.json import JsonReporter
 from agentic_evalkit.runner import EvalRunner
 from agentic_evalkit.targets.http import HttpTarget
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 _QUESTIONS_PATH = Path(__file__).parent / "questions.jsonl"
 _AGENT_URL = "http://127.0.0.1:8765"
@@ -72,7 +75,10 @@ class QuestionsAdapter:
     def prepare(self, record: SourceRecord) -> EvalSample:
         question = record.data["question"]
         expected = record.data.get("expected_answer")
-        assert isinstance(question, str)
+        if not isinstance(question, str):
+            raise TypeError(
+                f"questions.jsonl row {record.row_id!r} has a non-string 'question' field"
+            )
         return EvalSample(
             sample_id=f"http-agent:{record.row_id}",
             input={"question": question},

@@ -1,7 +1,7 @@
 site_name: agentic-evalkit
 site_description: Evaluate agentic systems with reproducible, evidence-first grading.
-repo_name: agentic-evalkit/agentic-evalkit
-repo_url: https://github.com/agentic-evalkit/agentic-evalkit
+repo_name: tafreeman/agentic-evalkit
+repo_url: https://github.com/tafreeman/agentic-evalkit
 edit_uri: edit/main/docs/
 
 docs_dir: docs

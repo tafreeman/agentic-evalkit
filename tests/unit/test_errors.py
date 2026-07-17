@@ -109,28 +109,36 @@ def test_context_without_secrets_round_trips_into_message() -> None:
     assert error.context["dataset_id"] == "openai/gsm8k"
 
 
-# --- OfflineCacheMiss.retryable (ADR-0010) -----------------------------------
+# --- OfflineCacheMiss.retryable: can trying again ever help? (ADR-0010) -----
 
 
 def test_offline_cache_miss_retryable_defaults_to_true() -> None:
-    """The common case -- a plain cache miss on an otherwise-cacheable key --
-    is retryable by default: going online once and repeating the exact same
-    call succeeds."""
+    """The common case: we're missing a cache entry for something that
+    normally *can* be cached -- we just don't have it saved locally yet. For
+    that case, retryable defaults to True, meaning "go online once, save
+    the result, then repeat this exact same offline command and it will
+    succeed."""
     error = OfflineCacheMiss(message="no cache entry for digest sha256:abc")
     assert error.retryable is True
 
 
 def test_offline_cache_miss_retryable_can_be_set_false() -> None:
-    """A categorically-uncacheable rejection (e.g. a query-keyed search
-    against a network-requiring provider) explicitly opts out of the
-    retryable default."""
+    """Some requests can never be cached at all, no matter how many times you
+    try -- for example, a free-text search against a provider that always
+    requires a live network call, since there's no fixed, stable key to
+    cache the result under. Retrying the exact same offline request would
+    never succeed, so this case explicitly sets retryable=False instead of
+    relying on the (in this case wrong) default."""
     error = OfflineCacheMiss(message="search results are never cached", retryable=False)
     assert error.retryable is False
 
 
 def test_offline_cache_miss_retryable_does_not_disturb_base_error_shape() -> None:
-    """Adding the retryable discriminator must not change code/message/context
-    behavior inherited from AgenticEvalkitError."""
+    """OfflineCacheMiss adds one extra field (retryable) on top of
+    AgenticEvalkitError. This test checks that adding it doesn't change any
+    of the behavior the base class already provides -- code, message, and
+    context all still work exactly the way they do for every other error in
+    this hierarchy."""
     error = OfflineCacheMiss(
         message="offline preview requested but this catalog has no cache configured",
         context={"provider": "huggingface", "dataset_id": "openai/gsm8k"},

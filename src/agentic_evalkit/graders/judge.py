@@ -1,100 +1,117 @@
-"""Calibrated model judge grading (design §9, plan Task 10 Steps 6-9).
+"""Grading with an AI judge that's been checked against real human answers.
 
-"Model judges require a versioned calibration artifact containing model and
-prompt fingerprints, held-out human labels, confusion matrix, TPR, TNR,
-sample counts, thresholds, subgroup results when available, and expiry
-policy. An uncalibrated or expired judge cannot gate a release" (design
-§9). "Judge execution supports structured output, bounded retries,
-parse-failure reporting, position/order checks, and abstention. The
-framework never silently converts judge errors into task failures" (design
-§9).
+An AI judge is just another model call: ask it "is this answer good?" and
+it gives you a verdict. The problem is that an ungated judge can rubber-stamp
+a bad release just as confidently as a good one — there's no way to tell,
+from the verdict alone, whether the judge actually knows what it's talking
+about. So before ``JudgeGrader`` will let a judge's verdict block a release
+(``hard_gate=True`` on the returned :class:`GradeResult`), it requires proof
+that the judge is trustworthy, plus a series of runtime sanity checks. Every
+condition below has to hold, or the result falls back to an informational
+("advisory") grade that can't block anything:
 
-``JudgeGrader`` enforces every one of those conditions before it will ever
-set ``hard_gate=True`` on a returned :class:`GradeResult`:
+- **The judge actually responded.** If the call to the judge raises an
+  exception, that's treated as our infrastructure breaking, not the AI
+  getting a wrong answer — it becomes ``GradeStatus.ERROR`` for just that
+  one sample, and the rest of the run keeps going (ADR-0008 / ADR-0020).
+- **The judge's response says "here's my verdict," not something else.**
+  A judge can also say "I decline to answer" (mapped to
+  ``GradeStatus.ABSTAIN`` — a non-verdict, not a failure) or report its own
+  transport problem like a timeout or rate limit (mapped to
+  ``GradeStatus.ERROR``, kept separate from an actual wrong-answer failure,
+  ADR-0020).
+- **The judge we just called is the exact judge the calibration data is
+  about.** We check this by comparing fingerprints (a hash of the model +
+  prompt) — if they don't match, the calibration data doesn't apply to this
+  judge.
+- **The calibration hasn't expired.** An expired calibration is treated as
+  unusable outright: ``GradeStatus.UNAVAILABLE``.
+- **The judge's measured accuracy clears our minimum bar.** Concretely: it
+  has to correctly say "wrong" at least 95% of the time on real wrong
+  answers, and correctly say "right" at least 85% of the time on real right
+  answers (decision D-1). If the judge's own configured threshold is more
+  lenient than that, our minimum still wins — nobody can quietly lower the
+  bar. Falling short of this bar is solid proof the judge isn't reliable, so
+  it also demotes the result to ``GradeStatus.UNAVAILABLE``.
+- **That accuracy number is actually trustworthy, not just lucky.** We
+  compute a conservative lower estimate (a "Wilson lower bound" — a standard
+  statistics technique for asking "how bad could the true rate plausibly be,
+  given how few samples we tested on?") for both accuracy numbers above, and
+  require *that* to also clear the bar. A judge can look accurate on paper
+  while having only been tested on a handful of examples; this catches that.
+  Unlike an outright-bad accuracy number, this doesn't mean the judge is
+  broken — it means we don't have enough evidence yet — so it blocks the
+  release-gating verdict without marking the result ``UNAVAILABLE``; an
+  advisory grade still comes through (ADR-0020, updating ADR-0007's
+  original raw-accuracy-only check).
+- **The calibration data is dated, and it's recent.** We need to know when
+  the judge was checked (a timezone-aware ``calibrated_at`` timestamp), and
+  that check needs to be no older than 90 days. Missing or old data means we
+  simply can't gate — like the point above, it doesn't mean the judge is
+  bad, so it doesn't produce ``UNAVAILABLE``; it just can't approve a
+  release (D-1, as amended 2026-07-04).
+- **The calibration was actually tested on enough examples.** At least 30
+  real "wrong" examples and 30 real "right" examples, or the accuracy
+  numbers are just noise.
+- **The judge clears its own configured threshold too** — a caller-supplied
+  bar the judge must ALSO meet, on top of everything above.
+- **The judge doesn't flip its answer when we swap the order of the two
+  options it's comparing.** This "does the order of the answers change the
+  verdict" check only runs when the result could actually gate a release
+  (this keeps the advisory-only path down to a single judge call per
+  question, ADR-0020); it still runs for a calibrated ``FAIL`` result, not
+  just a ``PASS``, so we always know whether order-bias was a factor. If the
+  order-swapped call itself fails, that failure blocks gating too — it never
+  crashes the whole grading run.
+- **The judge gave a real, parseable answer** (not gibberish it couldn't
+  finish forming). Unparseable responses get retried up to twice (three
+  tries total); a hard transport failure, by contrast, doesn't get retried
+  at all — it's reported immediately.
 
-- the judge's transport call must not raise (a raised transport error is an
-  operational failure, mapped to ``GradeStatus.ERROR`` for that one sample,
-  never an aborted run -- ADR-0008 / ADR-0020);
-- the judge's structured response must carry an ``OK``
-  :class:`JudgeResponseStatus` -- a ``REFUSED`` envelope is a non-verdict and
-  maps to ``GradeStatus.ABSTAIN``; a ``TIMEOUT``/``RATE_LIMITED``/``ERROR``
-  envelope is operational and maps to ``GradeStatus.ERROR`` (ADR-0020);
-- the judge's live ``fingerprint`` must equal ``CalibrationArtifact.judge_fingerprint``;
-- the calibration must not be expired (an expired artifact is unusable
-  outright: the result is ``GradeStatus.UNAVAILABLE``);
-- the ratified project floor must hold on the point estimates: TNR >= 0.95 and
-  TPR >= 0.85 (decision D-1) -- a sub-floor calibration is affirmatively bad
-  evidence and likewise demotes the result to ``GradeStatus.UNAVAILABLE``, so a
-  lax caller-supplied ``threshold`` can never gate below the floor;
-- the 95% Wilson *lower bound* of TNR and TPR must each clear the same project
-  floor: a point estimate can sit above the floor while its lower bound does
-  not, meaning the held-out sample is too small to *prove* the rate clears the
-  floor. Such a calibration is not affirmatively bad (that is the UNAVAILABLE
-  demotion above) but its evidence is insufficient to gate, so -- like an
-  absent/stale age -- it blocks gating while advisory grading continues
-  (ADR-0020, superseding ADR-0007's point-estimate-only floor);
-- the calibration must be dated (timezone-aware ``calibrated_at``) and within
-  the ratified maximum age of 90 days -- an undated or stale artifact cannot
-  prove its age, so it can never gate, though it may still grade advisorily
-  (D-1 as amended 2026-07-04: absent evidence blocks gating; only
-  affirmatively bad evidence is UNAVAILABLE);
-- held-out positives (TP+FN) and negatives (TN+FP) must each be >= 30;
-- TPR and TNR must each be >= ``CalibrationArtifact.threshold``;
-- a reversed-order ("position-bias") probe must agree with the primary verdict.
-  The probe is issued *only* on the gating path -- when ``gate=True`` and the
-  calibration is usable -- so the uncalibrated/advisory path costs exactly one
-  judge call per sample (ADR-0020); the probe is kept for calibrated ``FAIL``
-  samples too, so a position-bias ``reason`` survives even when the primary
-  verdict is not ``PASS``. A probe transport raise is itself a gate-blocking
-  reason, never a propagated exception;
-- the judge must return a parseable, non-abstained structured response
-  (parse failures retry at most twice, i.e. three attempts total; a transport
-  raise terminates immediately and does *not* consume the parse-retry budget).
-
-Any single failed condition demotes the result to an advisory (non-gating)
-outcome; several are also distinct non-PASS statuses so the *reason* survives
-into ``evidence["reason"]`` rather than being collapsed into a bare FAIL. When
-the judge supplies a ``rationale`` it is persisted -- redacted and truncated
-exactly as ``candidate_output`` is (ADR-0018) -- to ``evidence["judge_rationale"]``
-purely as recorded evidence; it is never read by any gating decision.
+If any single one of these isn't satisfied, the result falls back to an
+advisory grade rather than one that can block a release. Several of these
+cases also get their own specific status (rather than a generic "fail") so
+the actual reason survives in ``evidence["reason"]`` instead of being
+flattened into a plain pass/fail. If the judge includes a free-text
+explanation of its verdict, we keep it — redacted and length-capped the same
+way the AI's actual answer is (ADR-0018) — in ``evidence["judge_rationale"]``
+purely as a record for a human to read later; nothing in the grading logic
+itself ever looks at it.
 """
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import Field, JsonValue
 
+from agentic_evalkit.graders.calibration import (
+    PROJECT_MAX_CALIBRATION_AGE_DAYS as PROJECT_MAX_CALIBRATION_AGE_DAYS,
+)
+from agentic_evalkit.graders.calibration import (
+    PROJECT_MIN_TNR as PROJECT_MIN_TNR,
+)
+from agentic_evalkit.graders.calibration import (
+    PROJECT_MIN_TPR as PROJECT_MIN_TPR,
+)
+from agentic_evalkit.graders.calibration import (
+    CalibrationArtifact as CalibrationArtifact,
+)
 from agentic_evalkit.models import EvalSample, GradeResult, GradeStatus, NormalizedExecutionResult
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
-from agentic_evalkit.stats import wilson_interval
 
-# Minimum held-out positive/negative label counts a calibration must have
-# before it is trusted to gate a release (plan Task 10 KEY REQUIREMENTS).
-_MINIMUM_CLASS_SAMPLE_COUNT = 30
-
-# Ratified project calibration floor (decision D-1, 2026-07-04). A caller-
-# supplied ``CalibrationArtifact.threshold`` may be laxer than these, but it
-# can never lower the bar below the project minimums: a calibration must clear
-# ALL of these before it may hard-gate a release, independent of its own
-# ``threshold``.
-PROJECT_MIN_TNR = 0.95
-PROJECT_MIN_TPR = 0.85
-PROJECT_MAX_CALIBRATION_AGE_DAYS = 90
-
-# Parse failures retry at most this many times (plan Task 10 KEY
-# REQUIREMENTS: "parse retries <= 2"), i.e. up to 3 total judge calls.
+# If the judge's response doesn't parse, we try again -- but only up to
+# this many extra times, so 3 judge calls total at most.
 _MAXIMUM_PARSE_RETRIES = 2
 
-# Approximate cap, in characters (not bytes -- an approximation, not a
-# byte-precise UTF-8 bound; that level of precision isn't needed for a
-# truncation heuristic), on the stringified `candidate_output` sent to a
-# caller-supplied `JudgeClient` (ADR-0018). Mirrors `runner.py`'s own
-# `_LARGE_OUTPUT_THRESHOLD_BYTES` (8192) as an already-reasoned, familiar
-# bound; defined independently here rather than imported, since that
-# constant is private to `runner.py`.
+# How long (in characters, not bytes -- close enough for a length cutoff,
+# no need for byte-exact precision here) the AI's answer is allowed to be
+# before we cut it short when sending it to the judge (ADR-0018). Matches
+# `runner.py`'s own `_LARGE_OUTPUT_THRESHOLD_BYTES` (8192) -- same number,
+# reused for consistency -- but defined again here rather than imported,
+# since that constant is private to `runner.py`.
 _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS = 8192
 
 
@@ -113,17 +130,19 @@ class JudgeRequest(FrozenModel):
 
 
 class JudgeResponseStatus(StrEnum):
-    """Transport/response envelope for one :class:`JudgeResponse` (ADR-0020).
+    """What happened when we called the judge -- not the verdict itself (ADR-0020).
 
-    A fixed vocabulary -- a ``StrEnum`` rather than a boolean or free string,
-    per the wire-status rule ADR-0002 applies everywhere -- so a caller-supplied
-    ``JudgeClient`` can signal *why* a verdict is absent without collapsing the
-    distinction into a task pass/fail. ``OK`` is the only status that reaches
-    verdict grading; every other status short-circuits to a non-gating outcome
-    in :meth:`JudgeGrader.grade` (``REFUSED`` -> ``GradeStatus.ABSTAIN`` because
-    a refusal is a non-verdict, never a task failure; ``RATE_LIMITED``/
-    ``TIMEOUT``/``ERROR`` -> ``GradeStatus.ERROR`` because they are operational
-    failures kept separate from task failures, ADR-0008).
+    This is a fixed list of named outcomes rather than a plain boolean or a
+    free-form string (ADR-0002 requires that everywhere in this project), so
+    a ``JudgeClient`` implementation can say *why* it isn't returning a real
+    verdict, instead of that distinction getting lost. ``OK`` is the only
+    status where :meth:`JudgeGrader.grade` actually looks at the verdict;
+    every other status is handled before we even get there: ``REFUSED``
+    becomes ``GradeStatus.ABSTAIN`` (the judge declined to answer, which
+    isn't the same as the AI failing the task), and
+    ``RATE_LIMITED``/``TIMEOUT``/``ERROR`` become ``GradeStatus.ERROR`` (our
+    infrastructure had a problem, which is also not the same as the AI
+    failing the task -- ADR-0008 keeps those two kinds of failure separate).
     """
 
     OK = "ok"
@@ -134,19 +153,22 @@ class JudgeResponseStatus(StrEnum):
 
 
 class JudgeResponse(FrozenModel):
-    """A judge's structured verdict for one :class:`JudgeRequest`.
+    """A judge's answer to one :class:`JudgeRequest`.
 
-    ``parse_ok=False`` means the judge's raw output could not be parsed
-    into a structured verdict at all (never treated as a task failure --
-    see module docstring). ``abstained=True`` means the judge parsed fine
-    but explicitly declined to render a verdict.
+    ``parse_ok=False`` means we couldn't make sense of the judge's raw
+    output at all -- that's a problem with the judge's response, not a
+    failing grade for the AI being evaluated (see the module docstring).
+    ``abstained=True`` means the response parsed fine, but the judge
+    explicitly said "I'm not going to render a verdict here."
 
-    ``status`` is the response envelope (ADR-0020): additive, optional, and
-    defaulting to :attr:`JudgeResponseStatus.OK` so every existing
-    ``JudgeClient`` that never sets it keeps its exact prior meaning
-    (``schema_version`` stays ``"1"``). ``rationale`` is optional free-text the
-    judge may attach explaining its verdict; it is recorded as evidence only
-    (redacted/truncated first) and is never read by any gating decision.
+    ``status`` records what actually happened on the call (see
+    :class:`JudgeResponseStatus`, added in ADR-0020). It's optional and
+    defaults to :attr:`JudgeResponseStatus.OK`, so any existing
+    ``JudgeClient`` written before this field existed still behaves exactly
+    as it did before (``schema_version`` stays ``"1"``). ``rationale`` is an
+    optional free-text explanation the judge can attach to its verdict --
+    it's kept purely as a record for a human to read (redacted and
+    length-capped first), and nothing in the grading logic itself reads it.
     """
 
     fingerprint: str
@@ -167,239 +189,6 @@ class JudgeClient(Protocol):
     async def judge(self, request: JudgeRequest) -> JudgeResponse: ...
 
 
-class CalibrationArtifact(FrozenModel):
-    """Held-out human-labeled calibration evidence for one judge configuration.
-
-    Attributes:
-        calibration_id: Stable identifier for this calibration run.
-        judge_fingerprint: Fingerprint of the exact model+prompt combination
-            this calibration is valid for. A live judge with a different
-            fingerprint can never use this artifact to gate.
-        expires_at: Timestamp after which this calibration is stale and
-            must not gate, regardless of how strong its historical TPR/TNR
-            were.
-        calibrated_at: Timestamp the held-out labels were collected. Optional
-            and additive (schema_version stays "1"); when absent the artifact
-            cannot prove it is within the ratified maximum age and is treated
-            as unusable for gating (decision D-1).
-        true_positive/true_negative/false_positive/false_negative: Confusion
-            matrix counts from held-out human-labeled samples.
-        threshold: Minimum TPR *and* TNR this calibration must clear.
-        total_labeled/abstained_count/error_count: Additive, optional coverage
-            evidence (ADR-0020) recording how many held-out samples were labeled
-            in total and how many the judge abstained on or errored on during
-            calibration. Recorded for auditability only -- no gate reads them
-            yet; each defaults to ``None`` so ``schema_version`` stays ``"1"``,
-            and non-negative when present.
-    """
-
-    calibration_id: str
-    judge_fingerprint: str
-    expires_at: datetime
-    calibrated_at: datetime | None = None
-    true_positive: int
-    true_negative: int
-    false_positive: int
-    false_negative: int
-    threshold: float
-    total_labeled: int | None = None
-    abstained_count: int | None = None
-    error_count: int | None = None
-
-    @model_validator(mode="after")
-    def _validate_counts(self) -> "CalibrationArtifact":
-        for field_name in (
-            "true_positive",
-            "true_negative",
-            "false_positive",
-            "false_negative",
-        ):
-            if getattr(self, field_name) < 0:
-                raise ValueError(f"{field_name} must be non-negative")
-        # Additive ADR-0020 coverage fields: non-negative when supplied, but
-        # optional (``None`` means "not recorded"), so they are checked only
-        # when present rather than folded into the required-count loop above.
-        for optional_field_name in ("total_labeled", "abstained_count", "error_count"):
-            optional_value = getattr(self, optional_field_name)
-            if optional_value is not None and optional_value < 0:
-                raise ValueError(f"{optional_field_name} must be non-negative")
-        if not 0.0 <= self.threshold <= 1.0:
-            raise ValueError(f"threshold must be within [0, 1], got {self.threshold}")
-        return self
-
-    @model_validator(mode="after")
-    def _validate_calibrated_at(self) -> "CalibrationArtifact":
-        """Reject timestamps that cannot support the age floor or expiry check.
-
-        A naive ``expires_at`` or ``calibrated_at`` would make the age/expiry
-        arithmetic against the UTC clock raise at grade time -- and a crash is
-        not a demotion (D-1 is fail-closed, never fail-crashed). ``expires_at``
-        is required on every artifact (unlike optional ``calibrated_at``), so
-        it is validated unconditionally. A calibration taken after its own
-        expiry is self-contradictory data and is rejected outright.
-        """
-        if self.expires_at.tzinfo is None:
-            raise ValueError("expires_at must be timezone-aware")
-        if self.calibrated_at is None:
-            return self
-        if self.calibrated_at.tzinfo is None:
-            raise ValueError("calibrated_at must be timezone-aware")
-        if self.calibrated_at > self.expires_at:
-            raise ValueError("calibrated_at must not be after expires_at")
-        return self
-
-    @property
-    def positive_count(self) -> int:
-        return self.true_positive + self.false_negative
-
-    @property
-    def negative_count(self) -> int:
-        return self.true_negative + self.false_positive
-
-    @property
-    def true_positive_rate(self) -> float | None:
-        if self.positive_count == 0:
-            return None
-        return self.true_positive / self.positive_count
-
-    @property
-    def true_negative_rate(self) -> float | None:
-        if self.negative_count == 0:
-            return None
-        return self.true_negative / self.negative_count
-
-    def is_expired(self, *, now: datetime | None = None) -> bool:
-        return self.expires_at <= (now or datetime.now(UTC))
-
-    def age_failure_reason(self, *, now: datetime | None = None) -> str | None:
-        """Return why this calibration's age disqualifies it from gating, or
-        ``None`` if it is dated and within the ratified maximum (decision D-1).
-
-        An artifact with no ``calibrated_at`` cannot prove its age, so it can
-        never gate -- a laxer caller cannot bypass the age floor by simply
-        omitting the timestamp. Age failures block gating only; advisory
-        grading continues (D-1 as amended 2026-07-04: absent evidence is not
-        the same as affirmatively bad evidence).
-        """
-        if self.calibrated_at is None:
-            return (
-                f"calibration {self.calibration_id!r} has no calibrated_at; "
-                f"cannot verify age within {PROJECT_MAX_CALIBRATION_AGE_DAYS} days"
-            )
-        effective_now = now or datetime.now(UTC)
-        if self.calibrated_at > effective_now:
-            # A future-dated calibration is self-contradictory evidence, not
-            # merely "fresh": ``effective_now - calibrated_at`` would be
-            # negative and never exceed the max-age bound below, silently
-            # treating an impossible timestamp as trustworthy. Construction
-            # only rejects calibrated_at *after* expires_at, which does not
-            # catch a future calibrated_at still comfortably before expiry.
-            return (
-                f"calibration {self.calibration_id!r} calibrated_at "
-                f"{self.calibrated_at.isoformat()} is in the future"
-            )
-        if effective_now - self.calibrated_at > timedelta(days=PROJECT_MAX_CALIBRATION_AGE_DAYS):
-            return (
-                f"calibration {self.calibration_id!r} age exceeds the maximum of "
-                f"{PROJECT_MAX_CALIBRATION_AGE_DAYS} days"
-            )
-        return None
-
-    def floor_failure_reason(self) -> str | None:
-        """Return why this calibration sits below the ratified project floor
-        (decision D-1), or ``None`` when it clears the floor or its rates are
-        not yet statistically meaningful.
-
-        A sub-floor calibration is affirmatively bad evidence: the judge's
-        result demotes to ``GradeStatus.UNAVAILABLE`` outright, so a lax
-        caller-supplied ``threshold`` can never gate below the project
-        minimums. With fewer than the minimum held-out samples per class the
-        rates are noise, not evidence, so the floor defers to
-        ``usability_failure_reason``'s insufficient-sample report.
-        """
-        if (
-            self.positive_count < _MINIMUM_CLASS_SAMPLE_COUNT
-            or self.negative_count < _MINIMUM_CLASS_SAMPLE_COUNT
-        ):
-            return None
-        tnr = self.true_negative_rate
-        if tnr is not None and tnr < PROJECT_MIN_TNR:
-            return f"calibration TNR={tnr} is below the project minimum {PROJECT_MIN_TNR}"
-        tpr = self.true_positive_rate
-        if tpr is not None and tpr < PROJECT_MIN_TPR:
-            return f"calibration TPR={tpr} is below the project minimum {PROJECT_MIN_TPR}"
-        return None
-
-    def wilson_lower_bound_failure_reason(self) -> str | None:
-        """Return why the 95% Wilson lower bound of TNR/TPR fails the floor, or
-        ``None`` when both bounds clear it (ADR-0020, superseding ADR-0007).
-
-        Distinct from :meth:`floor_failure_reason`: a *point* estimate below the
-        floor is affirmatively bad evidence (UNAVAILABLE); a point estimate that
-        clears the floor while its 95% Wilson *lower* bound does not is merely
-        *insufficient* evidence -- the held-out sample is too small to prove the
-        rate is above the floor. Insufficient evidence blocks gating only, so
-        this reason is surfaced through :meth:`usability_failure_reason`
-        alongside the age check while advisory grading continues. The
-        :func:`~agentic_evalkit.stats.wilson_interval` helper is imported rather
-        than reimplemented (unlike ``runner._redact``, which cannot import its
-        sibling's private helper): ``wilson_interval`` is public
-        (``agentic_evalkit.stats.__all__``) and ``stats`` imports nothing from
-        ``graders``, so there is no import cycle.
-        """
-        tnr_lower, _ = wilson_interval(successes=self.true_negative, total=self.negative_count)
-        if tnr_lower is not None and tnr_lower < PROJECT_MIN_TNR:
-            return (
-                f"calibration TNR 95% Wilson lower bound {tnr_lower:.4f} is below the project "
-                f"minimum {PROJECT_MIN_TNR}: insufficient held-out evidence to gate"
-            )
-        tpr_lower, _ = wilson_interval(successes=self.true_positive, total=self.positive_count)
-        if tpr_lower is not None and tpr_lower < PROJECT_MIN_TPR:
-            return (
-                f"calibration TPR 95% Wilson lower bound {tpr_lower:.4f} is below the project "
-                f"minimum {PROJECT_MIN_TPR}: insufficient held-out evidence to gate"
-            )
-        return None
-
-    def usability_failure_reason(self, *, now: datetime | None = None) -> str | None:
-        """Return a human-readable reason this calibration cannot gate, or
-        ``None`` if it clears every usability bar (design §9 / plan Task 10).
-        """
-        if self.is_expired(now=now):
-            return f"calibration {self.calibration_id!r} expired at {self.expires_at.isoformat()}"
-        if self.positive_count < _MINIMUM_CLASS_SAMPLE_COUNT:
-            return (
-                f"calibration has {self.positive_count} held-out positive samples, "
-                f"below the required minimum of {_MINIMUM_CLASS_SAMPLE_COUNT}"
-            )
-        if self.negative_count < _MINIMUM_CLASS_SAMPLE_COUNT:
-            return (
-                f"calibration has {self.negative_count} held-out negative samples, "
-                f"below the required minimum of {_MINIMUM_CLASS_SAMPLE_COUNT}"
-            )
-        tpr = self.true_positive_rate
-        if tpr is None or tpr < self.threshold:
-            return f"calibration TPR={tpr} is below threshold={self.threshold}"
-        tnr = self.true_negative_rate
-        if tnr is None or tnr < self.threshold:
-            return f"calibration TNR={tnr} is below threshold={self.threshold}"
-        # The age floor lives here, in the documented "can this calibration
-        # gate" seam, so no caller can bypass it (D-1 as amended: undated or
-        # stale artifacts never gate but may still grade advisorily). The
-        # PROJECT_MIN_TNR/TPR *point* floor is deliberately NOT here -- a
-        # sub-floor point estimate is unusable outright and is enforced as
-        # UNAVAILABLE via ``floor_failure_reason`` in ``JudgeGrader.grade``.
-        # The Wilson *lower-bound* floor, by contrast, is insufficient-evidence
-        # (not affirmatively-bad) and blocks gating only, exactly like the age
-        # check, so it belongs here alongside it (ADR-0020). Age is reported
-        # first: a stale or undated artifact fails for a reason independent of
-        # the confusion-matrix counts.
-        age_reason = self.age_failure_reason(now=now)
-        if age_reason is not None:
-            return age_reason
-        return self.wilson_lower_bound_failure_reason()
-
-
 def _passing_score_to_status(score: float | None, threshold: float) -> GradeStatus:
     if score is None:
         return GradeStatus.UNAVAILABLE
@@ -407,51 +196,55 @@ def _passing_score_to_status(score: float | None, threshold: float) -> GradeStat
 
 
 class JudgeGrader:
-    """Grades an execution using a calibrated (or advisory-only) model judge.
+    """Grades one execution using an AI judge, gating only when it's proven reliable.
 
     Args:
-        judge: The provider-neutral :class:`JudgeClient` to query.
-        calibration: The calibration artifact backing this judge
-            configuration, or ``None`` if uncalibrated. An uncalibrated
-            judge always grades in advisory mode (``hard_gate`` is always
-            ``False``, and the ``GradeResult`` carries no calibration
-            reference).
-        gate: Caller's intent to allow this judge to gate a release *if*
-            every calibration/consistency condition is met. Even when
-            ``True``, any single failed condition demotes the result to
-            advisory-only.
-        pass_score_threshold: Minimum judge ``score`` counted as a pass,
-            once a verdict is otherwise trustworthy.
-        name: Stable grader identifier reported on the ``GradeResult``.
-        redaction_policy: Policy applied to the stringified
-            ``candidate_output`` before it is sent to the judge (never to
-            ``prompt`` or ``reference`` -- see the note below). Defaults to
+        judge: The judge to call. Any object with an async ``judge()``
+            method and a ``fingerprint`` attribute works (see
+            :class:`JudgeClient`) -- this class doesn't care which AI
+            provider it's talking to.
+        calibration: The proof that this judge is reliable, or ``None`` if
+            we don't have any. Without it, the judge can still be asked for
+            an opinion, but that opinion can never block a release
+            (``hard_gate`` is always ``False``, and the result won't
+            reference any calibration).
+        gate: Whether the caller *wants* this judge's verdict to be able to
+            block a release, assuming every reliability check below passes.
+            Even when this is ``True``, a single failed check is enough to
+            fall back to an advisory-only grade.
+        pass_score_threshold: The minimum score (once we trust the verdict)
+            that counts as a pass.
+        name: A stable label for this grader, recorded on the result so you
+            can tell which grader produced it.
+        redaction_policy: What counts as a "secret-shaped" string (an API
+            key, a token, etc.) that should be blanked out of the AI's
+            answer before it's shown to the judge. This is never applied to
+            the original question or the reference answer -- see the note
+            below for why. Defaults to
             :data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`,
-            so secret-shaped substrings never reach a caller-supplied
-            ``JudgeClient`` by default. Pass ``None`` (or a
-            ``RedactionPolicy()`` with empty ``secret_patterns``) to opt out.
-        max_candidate_output_chars: Maximum length, in characters, of the
-            stringified ``candidate_output`` sent to the judge; longer
-            values are truncated with a trailing marker. Defaults to
-            ``_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS`` (8192). Pass ``None`` to
-            disable truncation.
+            so secrets don't leak to a judge by accident. Pass ``None`` (or
+            an empty policy) to turn this off.
+        max_candidate_output_chars: The longest the AI's answer is allowed
+            to be before we cut it short (with a marker showing it was cut)
+            when sending it to the judge. Defaults to 8192 characters. Pass
+            ``None`` to never cut it short.
 
-    Since ADR-0018, the ``candidate_output`` a ``JudgeClient`` actually
-    receives may differ from ``execution.output``'s literal content:
-    secret-shaped substrings are redacted and an overlong string is
-    truncated before it crosses the process boundary into ``judge.judge()``.
-    A ``JudgeClient`` implementation must not assume byte-for-byte fidelity
-    between the two. ``prompt`` and ``reference`` are never altered -- both
-    are dataset/task-authored content this framework itself controls, not
-    target-controlled output.
+    Since ADR-0018, what the judge actually sees for the AI's answer can
+    differ from the AI's literal, original output: secret-shaped text gets
+    blanked out and an overly long answer gets cut short before it's sent.
+    A judge implementation shouldn't assume it's seeing the exact original
+    text. The question itself and the reference answer, by contrast, are
+    never touched -- they come from the dataset/task definition, which this
+    framework controls, not from the AI being tested.
 
-    Judge-call cost (ADR-0020): the reversed-order position-bias probe -- a
-    second judge call -- is issued *only* on the gating path, i.e. when
-    ``gate=True`` **and** the calibration is usable (no calibration failure).
-    The uncalibrated/advisory path (``gate=False``, or any calibration failure)
-    therefore makes exactly one judge call per graded sample, not two. A judge
-    transport call that raises is mapped to a single ``GradeStatus.ERROR``
-    sample -- one raising ``JudgeClient`` never aborts the whole run (ADR-0008).
+    On judge-call cost (ADR-0020): the extra "does the verdict flip if we
+    swap answer order" check is a second call to the judge, and it only
+    happens when the result could actually gate a release -- meaning
+    ``gate=True`` and every reliability check already passed. So an
+    advisory-only grade (``gate=False``, or any failed check) costs exactly
+    one judge call, not two. If the judge call itself throws an exception,
+    that becomes a single ``GradeStatus.ERROR`` for that one sample -- it
+    never takes down the whole evaluation run (ADR-0008).
     """
 
     def __init__(
@@ -480,10 +273,11 @@ class JudgeGrader:
         )
         request = JudgeRequest(
             sample_id=sample.sample_id,
-            # `prompt`/`reference` are dataset/task-authored content this
-            # framework itself controls, never the system-under-test's own
-            # output -- only `candidate_output` is redacted/truncated before
-            # crossing the process boundary (see `_prepare_candidate_output`).
+            # `prompt`/`reference` come from the dataset/task definition,
+            # which this framework controls -- never from the AI being
+            # tested. Only `candidate_output` (the AI's own answer) gets
+            # redacted/truncated before being sent to the judge; see
+            # `_prepare_candidate_output`.
             prompt=_stringify_input(sample.input),
             candidate_output=candidate_output,
             reference=sample.reference,
@@ -491,122 +285,53 @@ class JudgeGrader:
 
         response, retry_evidence = await self._judge_with_bounded_retries(request)
         if response is None:
-            # No usable response: a transport raise and a parse-retry
-            # exhaustion both land here but are distinct operational failures
-            # (ADR-0020). The bounded-retries helper records
-            # ``judge_transport_error`` on the former and only
-            # ``parse_attempts`` on the latter, so one raising ``JudgeClient``
-            # yields one graded ERROR sample rather than aborting the run.
-            if "judge_transport_error" in retry_evidence:
-                none_reason = "judge transport call raised before a verdict was returned"
-            else:
-                none_reason = "judge response could not be parsed after bounded retries"
-            return self._result(
-                sample,
-                now,
-                status=GradeStatus.ERROR,
-                score=None,
-                hard_gate=False,
-                reason=none_reason,
-                extra_evidence={**candidate_output_evidence, **retry_evidence},
+            return self._missing_response_result(
+                sample, now, retry_evidence, candidate_output_evidence
             )
 
-        # A parsed response may still carry a rationale (recorded evidence
-        # only, redacted/truncated like candidate_output -- ADR-0018 -- and
-        # never read by gating).
+        # A response that parsed fine can still include the judge's own
+        # explanation of its verdict; we keep that as a record (redacted and
+        # length-capped like the AI's answer was, ADR-0018), but nothing
+        # below reads it when deciding pass/fail.
         response_evidence = self._response_evidence(response)
 
-        if response.status is not JudgeResponseStatus.OK:
-            # Non-OK envelope short-circuits BEFORE fingerprint/abstention
-            # handling (ADR-0020): a refusal is a non-verdict (ABSTAIN, never a
-            # task FAIL); a rate-limit/timeout/error envelope is operational
-            # (ERROR, kept separate from task failure per ADR-0008). Never
-            # gating either way; the reason names the status.
-            if response.status is JudgeResponseStatus.REFUSED:
-                envelope_status = GradeStatus.ABSTAIN
-                envelope_reason = (
-                    f"judge declined to render a verdict (status {response.status.value!r})"
-                )
-            else:
-                envelope_status = GradeStatus.ERROR
-                envelope_reason = (
-                    f"judge reported an operational failure (status {response.status.value!r})"
-                )
-            return self._result(
-                sample,
-                now,
-                status=envelope_status,
-                score=None,
-                hard_gate=False,
-                reason=envelope_reason,
-                extra_evidence={
-                    **candidate_output_evidence,
-                    **retry_evidence,
-                    **response_evidence,
-                },
-            )
+        # Each check below either returns a non-gating GradeResult (meaning
+        # "stop here, this is the answer") or None (meaning "this check
+        # passed, keep going to the next one"). We compare with `is not
+        # None` on purpose, rather than just `if result:` -- that way this
+        # sequence can't be silently broken if GradeResult ever grows a
+        # custom truthiness check down the line.
+        non_ok_result = self._non_ok_envelope_result(
+            response, sample, now, candidate_output_evidence, retry_evidence, response_evidence
+        )
+        if non_ok_result is not None:
+            return non_ok_result
 
-        if response.fingerprint != self._judge_fingerprint():
-            return self._result(
-                sample,
-                now,
-                status=GradeStatus.ERROR,
-                score=None,
-                hard_gate=False,
-                reason=(
-                    f"judge fingerprint {response.fingerprint!r} does not match "
-                    f"live judge fingerprint {self._judge_fingerprint()!r}"
-                ),
-                extra_evidence={**candidate_output_evidence, **response_evidence},
-            )
+        fingerprint_result = self._fingerprint_mismatch_result(
+            response, sample, now, candidate_output_evidence, response_evidence
+        )
+        if fingerprint_result is not None:
+            return fingerprint_result
 
-        if response.abstained:
-            return self._result(
-                sample,
-                now,
-                status=GradeStatus.ABSTAIN,
-                score=None,
-                hard_gate=False,
-                reason="judge explicitly abstained from rendering a verdict",
-                extra_evidence={**candidate_output_evidence, **response_evidence},
-            )
+        abstained_result = self._abstained_result(
+            response, sample, now, candidate_output_evidence, response_evidence
+        )
+        if abstained_result is not None:
+            return abstained_result
 
-        if self._calibration is not None:
-            # Affirmatively bad calibration evidence makes grading capability
-            # UNAVAILABLE outright (plan Task 10 Step 6 for expiry; ratified
-            # decision D-1 for the project floor): an expired artifact is
-            # unusable, and a sub-floor TNR/TNR overclaim is precisely the
-            # failure R-003 exists to prevent. This runs BEFORE the advisory
-            # path so bad evidence never yields an advisory PASS. Absent or
-            # insufficient evidence (undated/stale ``calibrated_at``, or a
-            # Wilson lower bound below the floor) is different: it only blocks
-            # gating, via ``usability_failure_reason`` below (D-1 as amended
-            # 2026-07-04; ADR-0020).
-            if self._calibration.is_expired(now=now):
-                unusable_reason: str | None = (
-                    f"calibration {self._calibration.calibration_id!r} expired at "
-                    f"{self._calibration.expires_at.isoformat()}"
-                )
-            else:
-                unusable_reason = self._calibration.floor_failure_reason()
-            if unusable_reason is not None:
-                return self._result(
-                    sample,
-                    now,
-                    status=GradeStatus.UNAVAILABLE,
-                    score=None,
-                    hard_gate=False,
-                    reason=unusable_reason,
-                    extra_evidence={**candidate_output_evidence, **response_evidence},
-                )
+        unusable_result = self._unusable_calibration_result(
+            sample, now, candidate_output_evidence, response_evidence
+        )
+        if unusable_result is not None:
+            return unusable_result
 
         calibration_failure = self._calibration_failure_reason(now=now)
-        # Position-bias probe on the gating path only (ADR-0020): issued when
-        # ``gate=True`` AND the calibration is usable (no calibration failure),
-        # regardless of whether the primary verdict is PASS -- so a calibrated
-        # FAIL sample is still probed and a position-bias ``reason`` survives.
-        # The advisory path (``gate=False``, or any calibration failure) makes
-        # exactly one judge call per sample, never a second probe call.
+        # We only run the answer-order check when this result could actually
+        # gate a release: `gate=True` and every reliability check above
+        # passed (ADR-0020). We still run it even if the verdict itself is a
+        # FAIL, not just a PASS, so we always know whether order-bias was a
+        # factor. Any other case (gate=False, or a failed reliability check)
+        # costs exactly one judge call for this sample -- never a second one.
         position_bias_reason: str | None = None
         if self._gate and calibration_failure is None:
             position_bias_reason = await self._position_bias_failure_reason(request, response)
@@ -635,32 +360,188 @@ class JudgeGrader:
             extra_evidence={**candidate_output_evidence, **retry_evidence, **response_evidence},
         )
 
+    def _missing_response_result(
+        self,
+        sample: EvalSample,
+        now: datetime,
+        retry_evidence: dict[str, JsonValue],
+        candidate_output_evidence: dict[str, JsonValue],
+    ) -> GradeResult:
+        """Build the ERROR result for when the judge call failed or gave garbage.
+
+        Two different things land here, but both are our infrastructure
+        having a problem, not the AI failing the task (ADR-0020): either the
+        call to the judge itself raised an exception, or the judge kept
+        returning unparseable output even after we retried it. The retry
+        helper tells us which one happened via the evidence it records
+        (`judge_transport_error` for the former). Either way, this produces
+        one ERROR result for this one sample -- it doesn't abort the run.
+        """
+        if "judge_transport_error" in retry_evidence:
+            reason = "judge transport call raised before a verdict was returned"
+        else:
+            reason = "judge response could not be parsed after bounded retries"
+        return self._result(
+            sample,
+            now,
+            status=GradeStatus.ERROR,
+            score=None,
+            hard_gate=False,
+            reason=reason,
+            extra_evidence={**candidate_output_evidence, **retry_evidence},
+        )
+
+    def _non_ok_envelope_result(
+        self,
+        response: JudgeResponse,
+        sample: EvalSample,
+        now: datetime,
+        candidate_output_evidence: dict[str, JsonValue],
+        retry_evidence: dict[str, JsonValue],
+        response_evidence: dict[str, JsonValue],
+    ) -> GradeResult | None:
+        """Handle a call that didn't come back with a real verdict, or return ``None`` if it did.
+
+        Checked before we even look at the fingerprint or whether the judge
+        abstained (ADR-0020): a refusal means the judge chose not to answer
+        (ABSTAIN -- that's not the same as the AI failing the task), and a
+        rate-limit/timeout/error means our infrastructure hit a snag (ERROR,
+        kept separate from an actual task failure per ADR-0008). Neither can
+        gate a release; the returned reason says exactly which one happened.
+        """
+        if response.status is JudgeResponseStatus.OK:
+            return None
+        if response.status is JudgeResponseStatus.REFUSED:
+            status = GradeStatus.ABSTAIN
+            reason = f"judge declined to render a verdict (status {response.status.value!r})"
+        else:
+            status = GradeStatus.ERROR
+            reason = f"judge reported an operational failure (status {response.status.value!r})"
+        return self._result(
+            sample,
+            now,
+            status=status,
+            score=None,
+            hard_gate=False,
+            reason=reason,
+            extra_evidence={
+                **candidate_output_evidence,
+                **retry_evidence,
+                **response_evidence,
+            },
+        )
+
+    def _fingerprint_mismatch_result(
+        self,
+        response: JudgeResponse,
+        sample: EvalSample,
+        now: datetime,
+        candidate_output_evidence: dict[str, JsonValue],
+        response_evidence: dict[str, JsonValue],
+    ) -> GradeResult | None:
+        """Return an ERROR if the response's judge doesn't match this calibration."""
+        if response.fingerprint == self._judge_fingerprint():
+            return None
+        return self._result(
+            sample,
+            now,
+            status=GradeStatus.ERROR,
+            score=None,
+            hard_gate=False,
+            reason=(
+                f"judge fingerprint {response.fingerprint!r} does not match "
+                f"live judge fingerprint {self._judge_fingerprint()!r}"
+            ),
+            extra_evidence={**candidate_output_evidence, **response_evidence},
+        )
+
+    def _abstained_result(
+        self,
+        response: JudgeResponse,
+        sample: EvalSample,
+        now: datetime,
+        candidate_output_evidence: dict[str, JsonValue],
+        response_evidence: dict[str, JsonValue],
+    ) -> GradeResult | None:
+        """Return an ABSTAIN result if the judge chose not to answer, else ``None``."""
+        if not response.abstained:
+            return None
+        return self._result(
+            sample,
+            now,
+            status=GradeStatus.ABSTAIN,
+            score=None,
+            hard_gate=False,
+            reason="judge explicitly abstained from rendering a verdict",
+            extra_evidence={**candidate_output_evidence, **response_evidence},
+        )
+
+    def _unusable_calibration_result(
+        self,
+        sample: EvalSample,
+        now: datetime,
+        candidate_output_evidence: dict[str, JsonValue],
+        response_evidence: dict[str, JsonValue],
+    ) -> GradeResult | None:
+        """Return UNAVAILABLE if we have solid proof the judge is unreliable, else ``None``.
+
+        This only covers the "we have solid proof this judge can't be
+        trusted" case: its calibration expired, or its measured accuracy is
+        genuinely below our minimum bar (decision D-1). This check runs
+        first, before anything else, so a genuinely bad judge can never
+        sneak through with an advisory PASS. The other case -- we simply
+        don't have *enough* proof either way, because the calibration record
+        is missing/old or the sample size was too small -- is different: it
+        blocks gating too, but through `usability_failure_reason` elsewhere,
+        and it doesn't mark the result UNAVAILABLE (D-1, as amended
+        2026-07-04; ADR-0020).
+        """
+        if self._calibration is None:
+            return None
+        if self._calibration.is_expired(now=now):
+            unusable_reason: str | None = (
+                f"calibration {self._calibration.calibration_id!r} expired at "
+                f"{self._calibration.expires_at.isoformat()}"
+            )
+        else:
+            unusable_reason = self._calibration.floor_failure_reason()
+        if unusable_reason is None:
+            return None
+        return self._result(
+            sample,
+            now,
+            status=GradeStatus.UNAVAILABLE,
+            score=None,
+            hard_gate=False,
+            reason=unusable_reason,
+            extra_evidence={**candidate_output_evidence, **response_evidence},
+        )
+
     def _judge_fingerprint(self) -> str:
         return self._judge.fingerprint
 
     def _prepare_candidate_output(
         self, output: dict[str, JsonValue] | None
     ) -> tuple[str, dict[str, JsonValue]]:
-        """Stringify, redact, then truncate ``execution.output`` for the judge.
+        """Turn the AI's answer into text, blank out secrets, then shorten it if needed.
 
-        Applied only to ``candidate_output`` -- the system-under-test's own
-        words. Deliberately NOT applied to ``prompt``
-        (``_stringify_input(sample.input)``) or ``reference``
-        (``sample.reference``): both are dataset/task-authored content this
-        framework itself controls, not target-controlled output, mirroring
-        the same target's-own-words-vs-framework-authored-content
-        distinction ``reporters.base._redact_execution``'s docstring draws
-        for precisely this reason.
+        This only touches ``candidate_output`` -- the actual words the AI
+        being tested produced. It's deliberately never applied to the
+        question (``prompt``) or the reference answer (``reference``),
+        because both of those come from the dataset/task definition, which
+        this framework controls; they aren't something the AI wrote, so
+        there's nothing in them to blank out or worry about leaking
+        (``reporters.base._redact_execution``'s docstring explains the same
+        reasoning).
 
-        Redaction runs BEFORE truncation, never the reverse: truncating
-        first risks cutting a secret-shaped pattern in half at the boundary
-        and letting the un-redacted remainder through.
+        We blank out secrets before shortening the text, never the other way
+        around: shortening first could cut a secret-shaped string in half at
+        the cutoff point and let the un-blanked remainder slip through.
 
-        Returns the final string plus an evidence dict that only carries
-        ``candidate_output_redacted``/``candidate_output_truncated``/
-        ``candidate_output_original_chars`` keys when that step actually
-        fired -- mirroring ``HarnessGrader``'s "only add the key when
-        applicable" convention for ``evidence["harness_error"]``.
+        Returns the final text plus a small evidence dict -- it only
+        includes a key for something that actually happened (e.g. it won't
+        say "redacted" if nothing was found to redact), matching how
+        ``HarnessGrader`` handles its own evidence keys.
         """
         stringified = _stringify_output(output)
         evidence: dict[str, JsonValue] = {}
@@ -677,17 +558,20 @@ class JudgeGrader:
         return truncated, evidence
 
     def _response_evidence(self, response: JudgeResponse) -> dict[str, JsonValue]:
-        """Recorded (non-gating) evidence extracted from a parsed response.
+        """Pull out anything worth recording from a parsed response, for humans only.
 
-        Currently just the optional ``rationale`` (ADR-0020): a judge's own
-        free-text explanation of its verdict. Being judge output that can echo
-        target-controlled content, it is redacted then truncated exactly as
-        ``candidate_output`` is (ADR-0018) before it is persisted to
-        ``evidence["judge_rationale"]``. Only added when a rationale is present,
-        mirroring the "only add the key when applicable" convention the
-        candidate-output evidence keys already follow. This is evidence only:
-        no gating decision ever reads a rationale (or any confidence-like
-        content) -- design §9's objective-first ordering forbids it.
+        Right now that's just the optional ``rationale`` (ADR-0020) -- the
+        judge's own free-text explanation of its verdict. Since that text
+        could echo back parts of the AI's answer, we blank out secrets and
+        shorten it exactly the way we do for the AI's answer itself
+        (ADR-0018) before saving it to ``evidence["judge_rationale"]``. We
+        only add that key when there actually is a rationale to record, the
+        same "don't add a key for nothing" rule the AI's-answer evidence
+        keys follow. This is purely a record for a human to read later --
+        the grading logic never looks at a rationale (or anything else that
+        reads like the judge's confidence) when deciding pass/fail, by
+        design (§9 requires objective checks to come before anything
+        subjective).
         """
         if response.rationale is None:
             return {}
@@ -697,15 +581,15 @@ class JudgeGrader:
         return {"judge_rationale": redacted_rationale}
 
     def _redact_candidate_output(self, value: str) -> str:
-        """Replace every secret-pattern match in ``value`` with ``"[REDACTED]"``.
+        """Replace anything that looks like a secret in ``value`` with ``"[REDACTED]"``.
 
-        A pure string -> string function mirroring
-        ``agentic_evalkit.reporters.base._redact_string`` and
-        ``EvalRunner._redact`` (``runner.py``): this module cannot import
-        either private helper (``runner.py``'s own docstring explains why it
-        doesn't import ``reporters.base``'s -- the same reasoning applies
-        here), so the same substitution behavior is reimplemented locally
-        against the same public :class:`RedactionPolicy` contract.
+        Just a plain text-in, text-out function. Two other places in this
+        codebase do the same thing (``reporters.base._redact_string`` and
+        ``EvalRunner._redact`` in ``runner.py``), but this module can't
+        import either of those private helpers directly (``runner.py``'s
+        own docstring explains why, and the same reasoning applies here),
+        so this is the same logic written again locally against the same
+        shared :class:`RedactionPolicy` settings.
         """
         redacted = value
         for pattern in self._compiled_secret_patterns():
@@ -713,12 +597,13 @@ class JudgeGrader:
         return redacted
 
     def _truncate_candidate_output(self, value: str) -> str:
-        """Cut ``value`` to ``self._max_candidate_output_chars`` plus a marker.
+        """Cut ``value`` down to ``self._max_candidate_output_chars`` and note that we did.
 
-        ``None`` disables truncation entirely (the class default,
-        ``_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS``, does not). The appended
-        marker makes it unambiguous to a human or the judge model that this
-        is not the verbatim full output.
+        Pass ``None`` to never cut it short (the actual default,
+        ``_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS``, does have a limit). The
+        marker we add at the end makes it obvious -- to a human or to the
+        judge model reading this -- that this isn't the complete original
+        text.
         """
         limit = self._max_candidate_output_chars
         if limit is None or len(value) <= limit:
@@ -727,14 +612,14 @@ class JudgeGrader:
         return f"{value[:limit]}...[truncated, {omitted} chars omitted]"
 
     def _compiled_secret_patterns(self) -> tuple[re.Pattern[str], ...]:
-        """Compile ``self._redaction_policy.secret_patterns``, or none at all.
+        """Turn the configured secret patterns into ready-to-use regexes, or none.
 
-        Mirrors ``EvalRunner._compiled_secret_patterns`` (``runner.py``):
-        returns an empty tuple both when the policy was explicitly set to
-        ``None`` (opting out of judge-bound redaction) and when a policy was
-        supplied with no ``secret_patterns`` of its own. The constructor
-        default is :data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`,
-        which does carry patterns, so the ordinary path compiles those.
+        Works the same way ``EvalRunner._compiled_secret_patterns`` does in
+        ``runner.py``: you get nothing back both when redaction was
+        explicitly turned off (``None``) and when a policy was given that
+        just happens to list no patterns. Normally, though, the default
+        policy (:data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`)
+        does list real patterns, so the usual case compiles those.
         """
         if self._redaction_policy is None:
             return ()
@@ -753,15 +638,17 @@ class JudgeGrader:
     async def _position_bias_failure_reason(
         self, request: JudgeRequest, primary: JudgeResponse
     ) -> str | None:
-        """Issue a reversed-order probe and require verdict agreement.
+        """Ask the judge again with the two answers swapped, and check it still agrees with itself.
 
-        A judge whose verdict flips when option order is swapped exhibits
-        position bias and can never gate, even with otherwise-valid
-        calibration (plan Task 10 Step 8). A probe transport raise is itself a
-        gate-blocking reason and never propagates out to abort the run
-        (ADR-0020): the raised message is redacted then truncated (ADR-0018)
-        before it is surfaced, since an exception message can echo target
-        output.
+        If the judge changes its mind just because we changed which answer
+        it saw first, that's a sign it's biased by order rather than by
+        which answer is actually better -- and a judge like that can't be
+        trusted to gate a release, even if everything else about its
+        calibration checks out. If this second call itself throws an
+        exception, that's treated as a reason we can't gate (not a crash
+        that takes down the run, ADR-0020) -- and since an exception message
+        could contain text from the AI's answer, we blank out secrets and
+        shorten it (ADR-0018) before including it in that reason.
         """
         reversed_request = request.model_copy(update={"metadata": {"reversed": True}})
         try:
@@ -774,31 +661,37 @@ class JudgeGrader:
                 f"position-bias probe raised {type(error).__name__} "
                 f"({redacted_message}); cannot confirm order-invariance, so cannot gate"
             )
-        if reversed_response.parse_ok and not reversed_response.abstained:
-            if reversed_response.verdict != primary.verdict:
-                return (
-                    "position-bias check failed: verdict changed from "
-                    f"{primary.verdict!r} to {reversed_response.verdict!r} under "
-                    "reversed option order"
-                )
+        if (
+            reversed_response.parse_ok
+            and not reversed_response.abstained
+            and reversed_response.verdict != primary.verdict
+        ):
+            return (
+                "position-bias check failed: verdict changed from "
+                f"{primary.verdict!r} to {reversed_response.verdict!r} under "
+                "reversed option order"
+            )
         return None
 
     async def _judge_with_bounded_retries(
         self, request: JudgeRequest
     ) -> tuple[JudgeResponse | None, dict[str, JsonValue]]:
-        """Call the judge, retrying only *parse* failures (at most twice).
+        """Call the judge, and only retry if its response didn't parse (at most twice).
 
-        A transport raise is not a parse failure: it terminates immediately
-        (no retry storm) and does NOT consume the parse-retry budget (ADR-0020).
-        On a raise this returns ``(None, evidence)`` where ``evidence`` carries
-        ``judge_transport_error`` (the exception type name) and a bounded,
-        redacted ``judge_transport_error_message`` -- an exception message can
-        echo target-controlled output, so it is redacted then truncated exactly
-        as ``candidate_output`` is (ADR-0018) before being persisted.
-        ``grade`` maps that sentinel to a single ``GradeStatus.ERROR`` sample,
-        so one raising ``JudgeClient`` never aborts the whole run.
-        ``asyncio.CancelledError`` (a ``BaseException``, not an ``Exception``)
-        is deliberately *not* caught, so run cancellation still propagates.
+        A call that raises an exception is a different problem from a call
+        that parses badly, and we don't retry it -- it fails immediately
+        instead of hammering the judge with retries, and it doesn't use up
+        any of our two allowed parse-retries (ADR-0020). When that happens,
+        this returns ``(None, evidence)``, where ``evidence`` records the
+        exception's type (``judge_transport_error``) and a shortened,
+        secret-blanked version of its message (``judge_transport_error_message``)
+        -- an exception message could contain text from the AI's answer, so
+        it gets the same treatment as ``candidate_output`` (ADR-0018) before
+        we keep it. ``grade`` turns that ``None`` into a single
+        ``GradeStatus.ERROR`` for this one sample, so one bad judge call
+        never takes down the whole run. We deliberately don't catch
+        ``asyncio.CancelledError`` here (it isn't a regular ``Exception``),
+        so cancelling a run still actually cancels it.
         """
         attempts = 0
         max_attempts = _MAXIMUM_PARSE_RETRIES + 1

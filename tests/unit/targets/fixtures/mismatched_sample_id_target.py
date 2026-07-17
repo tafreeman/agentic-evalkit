@@ -1,5 +1,8 @@
-"""Fixture: responds with a sample_id that does not match the request, to
-exercise SubprocessTarget's sample-ID-matching validation.
+"""Fixture script: always answers with a fixed, wrong sample_id
+("wrong-sample-id") instead of echoing back the sample_id it was actually
+asked about. Used to check that SubprocessTarget notices this mismatch and
+reports an error, rather than silently accepting a response that might
+belong to a different request than the one that was sent.
 """
 
 import json

@@ -1,8 +1,12 @@
 """Tests for :class:`agentic_evalkit.artifacts.ArtifactStore` (plan Task 11, Step 1).
 
-The first test below is copied verbatim from
-``docs/plans/2026-07-02-agentic-evalkit-initial-release.md`` (Task 11, Step 1);
-its digest for ``b"same"`` is pinned and must not change.
+The first test below is copied word-for-word from the original project plan
+(``docs/plans/2026-07-02-agentic-evalkit-initial-release.md``, Task 11, Step
+1). Its expected digest -- the SHA-256 hash ``ArtifactStore`` computes for
+the exact bytes ``b"same"`` -- is a fixed value baked directly into the
+test. If that hash ever came out differently, it would mean something about
+how content gets hashed had changed, which is exactly what this test exists
+to catch.
 """
 
 from pathlib import Path
@@ -21,7 +25,7 @@ def test_artifacts_are_content_addressed_and_deduplicated(tmp_path: Path) -> Non
     assert first.digest == "sha256:0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5"
 
 
-# --- Additional ArtifactStore coverage (sidecar, bounds, redaction) --------
+# --- Additional ArtifactStore coverage: sidecar metadata, size limits, and redaction ---
 
 
 def test_different_content_produces_different_digests(tmp_path: Path) -> None:

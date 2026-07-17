@@ -1,5 +1,6 @@
-"""Fixture: emits a line that is not valid JSON, to exercise the
-ExecutionStatus.ERROR mapping for malformed subprocess responses.
+"""Fixture script: sends back a line of text that is not valid JSON at all.
+Used to check that SubprocessTarget correctly reports this as an
+ExecutionStatus.ERROR result, instead of crashing while trying to parse it.
 """
 
 import sys

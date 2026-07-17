@@ -1,17 +1,27 @@
-"""Tests for the dataset catalog, built-in presets, and cache decoration.
+"""Tests for the dataset catalog: the router that dispatches requests to
+dataset providers, the built-in dataset presets, and the caching layer
+wrapped around the whole thing.
 
-Covers built-in preset field pinning, provider routing (including the
-explicit-KeyError-on-unknown-provider requirement), cache-hit/cache-miss
-decoration around ``preview``, ``offline=True`` never calling a provider, and
-plugin-vs-built-in provider name collisions. The first two tests reproduce
-the plan's verbatim Task 7 Step 1 snippet
-(docs/plans/2026-07-02-agentic-evalkit-initial-release.md) unmodified.
+Covers: built-in presets (like "gsm8k") have exactly the field values they're
+supposed to -- their dataset id, config, split, grading adapter, and so on
+are all "pinned" (locked to fixed, known-correct values); the catalog picks
+the right provider by name and raises a clear ``KeyError`` for an
+unrecognized one instead of failing silently or confusingly; calling
+``preview`` twice with identical arguments is served from the cache the
+second time (a "cache hit") rather than calling the provider again, while
+different arguments correctly trigger a fresh provider call (a "cache
+miss"); passing ``offline=True`` must never reach out to a provider, even
+when the requested data isn't cached; and registering a plugin provider
+under a name that collides with a built-in one is rejected, while a
+genuinely new name is accepted. The first two tests below are copied,
+unmodified, from a code snippet written out in full in the original
+implementation plan (Task 7 Step 1 of
+docs/plans/2026-07-02-agentic-evalkit-initial-release.md).
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -30,7 +40,11 @@ from agentic_evalkit.models import (
     SourceRecord,
 )
 
-# --- Step 1 (plan verbatim): preset and provider-routing tests --------------
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping
+    from pathlib import Path
+
+# --- Step 1 (copied word-for-word from the plan doc): preset and provider-routing tests ---
 
 
 def test_builtin_presets_pin_configs_splits_and_adapters() -> None:
@@ -75,7 +89,12 @@ def test_builtin_presets_full_field_set() -> None:
     assert swe.required_capabilities == ("swebench",)
     assert swe.ref.provider == "huggingface"
 
-    # Both are long-public benchmarks, honestly labeled SUSPECT (ADR-0013).
+    # Both gsm8k and SWE-bench-Verified are long-established, publicly
+    # available benchmarks, so there's a real chance parts of them ended up
+    # in some model's training data ("contamination") without anyone being
+    # able to say for sure either way. ADR-0013 says we must not pretend
+    # they're clean -- both are honestly labeled SUSPECT rather than left
+    # unmarked.
     assert gsm.contamination is not None
     assert gsm.contamination.status is ContaminationStatus.SUSPECT
     assert swe.contamination is not None
@@ -83,9 +102,11 @@ def test_builtin_presets_full_field_set() -> None:
 
 
 def test_all_builtin_presets_declare_a_contamination_status() -> None:
-    """A future preset shipped without a contamination annotation fails here
-    immediately rather than silently shipping unlabeled (ADR-0013), mirroring
-    ``_build_builtin_presets``'s own eager-fail discipline for duplicates."""
+    """If a preset is ever added later without a contamination label, this
+    test fails immediately instead of letting it silently ship unlabeled
+    (ADR-0013 requires every preset to carry one). This mirrors how
+    ``_build_builtin_presets`` itself refuses to even start up if it finds a
+    duplicate preset, rather than quietly ignoring the problem."""
     for preset in BUILTIN_PRESETS.values():
         assert preset.contamination is not None, preset.name
 
@@ -105,11 +126,14 @@ def test_builtin_presets_mapping_is_immutable() -> None:
 
 
 class _CountingFakeProvider:
-    """A minimal ``DatasetProvider`` that counts ``preview`` invocations.
+    """A minimal fake dataset provider that counts how many times
+    ``preview`` is called.
 
-    Used to prove cache decoration: an identical ``preview`` call must not
-    increase ``preview_calls``, while a call with different pagination
-    parameters must.
+    Used to prove the catalog's caching actually works: calling ``preview``
+    again with the exact same arguments must NOT increase
+    ``preview_calls`` (it should be served from the cache instead), while
+    calling it with different pagination arguments (asking for a different
+    page of results) must.
     """
 
     api_version = "1"
@@ -240,7 +264,7 @@ async def test_registering_plugin_with_new_name_succeeds() -> None:
     assert resolved.dataset_id == "x"
 
 
-# --- offline rejection on non-cacheable operations ----------------------------
+# --- offline mode on operations that have no cache entry to fall back on ------
 
 
 @pytest.mark.asyncio
@@ -262,18 +286,24 @@ async def test_iter_records_offline_raises_at_call_time() -> None:
     catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
     ref = _fake_ref()
     dataset = await catalog.resolve(ref)
-    # ``iter_records`` is a plain method returning the provider's iterator, so
-    # the offline rejection must surface synchronously at the call, not on the
-    # first ``__anext__``. The fake provider's ``iter_records`` raises
-    # ``NotImplementedError``, so reaching the provider would fail differently.
+    # ``iter_records`` is a regular (non-async) method that just hands back
+    # an async iterator -- it isn't itself a coroutine that gets awaited. So
+    # the offline error must be raised immediately when ``iter_records`` is
+    # called, not later when the caller starts pulling items out of the
+    # iterator (its first ``__anext__``). We can tell the check happens at
+    # the right time because the fake provider's real ``iter_records`` body
+    # raises ``NotImplementedError`` instead -- if the offline check were
+    # accidentally skipped, we'd see that error instead of the one we
+    # actually expect.
     with pytest.raises(OfflineCacheMiss, match="not cache-backed"):
         catalog.iter_records(ref, dataset, offline=True)
 
 
 @pytest.mark.asyncio
 async def test_offline_with_unknown_provider_reports_missing_provider() -> None:
-    # Provider validation precedes the offline rejection: a typo'd provider
-    # must not be misreported as an offline limitation.
+    # Checking whether the provider name is valid happens before checking
+    # the offline rules: a typo'd provider name must be reported as an
+    # unknown provider, not confusingly blamed on the offline restriction.
     catalog = DatasetCatalog(providers={})
     with pytest.raises(KeyError, match="provider 'missing'"):
         await catalog.search("x", provider="missing", offline=True)
@@ -288,16 +318,19 @@ def test_list_presets_returns_all_builtins() -> None:
     assert names == {"gsm8k", "swe-bench-verified"}
 
 
-# --- requires_network provider exemption (ADR-0010) --------------------------
+# --- providers that don't need the network are exempt from offline checks (ADR-0010) ---
 
 
 class _NetworkFreeFakeProvider(_CountingFakeProvider):
-    """A fake that declares network independence, unlike its parent class.
+    """A fake provider that declares it doesn't need the network, unlike its
+    parent class.
 
-    Reuses ``_CountingFakeProvider``'s bodies (in-memory, already network-free
-    in practice) but adds the ``requires_network = False`` declaration so
-    ``DatasetCatalog`` treats it the way it treats the real
-    ``LocalDatasetProvider``: exempt from offline rejection on every method.
+    It reuses all of ``_CountingFakeProvider``'s behavior (which is already
+    in-memory and doesn't touch the network in practice), but adds a
+    ``requires_network = False`` flag. That flag tells ``DatasetCatalog`` to
+    treat it the way it treats the real ``LocalDatasetProvider``: since it
+    never needs the network anyway, none of its methods are blocked when
+    ``offline=True``.
     """
 
     requires_network = False
@@ -321,11 +354,14 @@ async def test_resolve_offline_succeeds_for_a_network_free_provider() -> None:
 
 @pytest.mark.asyncio
 async def test_iter_records_offline_does_not_raise_for_a_network_free_provider() -> None:
-    """Confirms the offline rejection is skipped entirely for such a provider
-    -- reaching the fake's real (non-``NotImplementedError``-raising)
-    ``iter_records`` body would still fail if this test's fixture provider
-    did not override it, so the parent's ``NotImplementedError`` stand-in is
-    replaced here with a working body to prove the call actually proceeds."""
+    """Confirms the offline rejection is skipped entirely for a
+    network-free provider. The parent class's ``iter_records`` just raises
+    ``NotImplementedError`` as a placeholder, which would make it impossible
+    to tell "the call correctly reached the provider" apart from "the call
+    was blocked" -- both would look like a failure. So this test defines a
+    version of ``iter_records`` that actually returns data, to prove the
+    call really does reach the provider and succeed, rather than merely
+    failing to raise the offline error for some unrelated reason."""
 
     class _IterableNetworkFreeProvider(_NetworkFreeFakeProvider):
         def iter_records(
@@ -345,23 +381,28 @@ async def test_iter_records_offline_does_not_raise_for_a_network_free_provider()
 
 @pytest.mark.asyncio
 async def test_provider_without_requires_network_attribute_still_rejects_offline() -> None:
-    """Pre-ADR-0010 fakes (like ``_CountingFakeProvider`` itself, which
-    declares no ``requires_network`` at all) must keep today's behavior: the
-    safe getattr-default is ``True`` (network-required), so offline is still
-    rejected rather than silently becoming exempt."""
+    """Providers written before ADR-0010 introduced this flag (like
+    ``_CountingFakeProvider`` itself, which doesn't declare
+    ``requires_network`` at all) must keep behaving exactly as they always
+    did: when the catalog looks for the flag and doesn't find it, it must
+    default to ``True`` (assume the network IS required) as the safe
+    choice, so ``offline=True`` still correctly rejects the call instead of
+    silently treating an unmarked provider as network-free."""
     assert not hasattr(_CountingFakeProvider(), "requires_network")
     catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
     with pytest.raises(OfflineCacheMiss):
         await catalog.search("x", provider="fake", offline=True)
 
 
-# --- retryable discriminator values (ADR-0010) --------------------------------
+# --- the "is this retryable?" flag on offline errors (ADR-0010) --------------
 
 
 @pytest.mark.asyncio
 async def test_search_offline_rejection_is_not_retryable() -> None:
-    """A query-keyed search has no stable cache key at all -- no amount of
-    warming ever makes the exact same offline call succeed."""
+    """A free-text search query has no fixed, reusable cache key at all (the
+    same words could match different results later on), so no amount of
+    "warming the cache" by running the search online first could ever make
+    this exact same offline search succeed afterward."""
     catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
     with pytest.raises(OfflineCacheMiss) as excinfo:
         await catalog.search("x", provider="fake", offline=True)
@@ -413,13 +454,16 @@ async def test_preview_offline_cache_miss_is_retryable(tmp_path: Path) -> None:
     assert excinfo.value.retryable is True
 
 
-# --- unbounded query truncation in error context (ADR-0010) ------------------
+# --- long search queries: shortened in structured error details, not in the message (ADR-0010) ---
 
 
 @pytest.mark.asyncio
 async def test_search_offline_rejection_truncates_long_query_in_context_only() -> None:
-    """The structured ``context["query"]`` value is bounded; the free-text
-    error message is left untruncated for a human reading it directly."""
+    """The machine-readable ``context["query"]`` value is cut off at a
+    length limit (so a huge query can't bloat structured logs or error
+    data), but the plain-English error message keeps the query in full,
+    since a person reading the message directly still needs to see all of
+    it."""
     long_query = "q" * 5000
     catalog = DatasetCatalog(providers={"fake": _CountingFakeProvider()})
     with pytest.raises(OfflineCacheMiss) as excinfo:
@@ -466,11 +510,13 @@ async def test_resolve_offline_succeeds_via_resolution_cache_after_online_resolv
 async def test_resolve_offline_without_prior_online_resolve_is_retryable_when_configured(
     tmp_path: Path,
 ) -> None:
-    """Unlike the no-``resolution_cache`` case (``retryable=False``, covered by
-    ``test_resolve_offline_rejection_is_not_retryable`` above), a configured
-    but not-yet-warmed resolution cache means the exact same offline call
-    *would* succeed after one online resolve -- the genuine "warm the cache"
-    case."""
+    """Unlike the case with no ``resolution_cache`` configured at all
+    (``retryable=False``, covered by
+    ``test_resolve_offline_rejection_is_not_retryable`` above), here a
+    resolution cache IS configured, just not warmed up yet. That means
+    running this exact same call online once first would make the offline
+    call succeed afterward -- this is the genuine "just warm the cache"
+    case, so ``retryable`` must be ``True``."""
     catalog = DatasetCatalog(
         providers={"fake": _CountingFakeProvider()}, resolution_cache=ResolutionCache(tmp_path)
     )
@@ -497,12 +543,17 @@ async def test_resolve_offline_via_resolution_cache_still_rejects_a_different_da
 
 
 class _RevisionEchoingFakeProvider(_CountingFakeProvider):
-    """A fake whose ``resolve`` echoes the *requested* ``ref.revision`` into
-    the resolved dataset, so a test can tell which pinned revision was served.
+    """A fake whose ``resolve`` copies the *requested* ``ref.revision``
+    straight into the resolved dataset it returns, so a test can check
+    exactly which requested version ("pinned revision") ends up served
+    back.
 
-    ``ResolvedDataset.revision`` is a required, non-null field: an unpinned
-    (``ref.revision is None``) request still resolves to a concrete revision
-    ("latest at resolution time"), modeled here by a fixed sentinel.
+    ``ResolvedDataset.revision`` is required and can never be null: even a
+    request that didn't ask for a specific revision (``ref.revision is
+    None``) must still resolve to some concrete version -- in real life,
+    "whatever the latest one happens to be right now". This fake models
+    that case with a fixed placeholder value instead of a real "latest"
+    lookup.
     """
 
     _LATEST_SENTINEL = "sha256:" + "0" * 64
@@ -521,13 +572,20 @@ class _RevisionEchoingFakeProvider(_CountingFakeProvider):
 async def test_offline_resolve_of_a_pinned_revision_never_returns_a_different_pin(
     tmp_path: Path,
 ) -> None:
-    """CRITICAL regression (2026-07-09): resolving ``ref@revA`` online then
-    ``ref@revB`` online (same provider/dataset/config/split, different
-    pinned revision) must cache BOTH; an offline ``resolve(ref@revA)`` must
-    return ``revA``'s resolution, never be silently served ``revB``'s. The
-    revision-blind key this fix replaced collapsed both pins into one slot,
-    so the second online resolve overwrote the first and the offline resolve
-    returned the wrong pinned revision with no error."""
+    """CRITICAL regression test (bug found and fixed 2026-07-09): resolving
+    ``ref`` pinned to revision A online, and then the same ``ref`` pinned to
+    revision B online (same provider/dataset/config/split -- just a
+    different exact version requested), must cache BOTH resolutions
+    separately. An offline resolve of revision A afterward must return
+    revision A's data -- it must never be silently handed revision B's data
+    instead.
+
+    The bug: the old cache key didn't include the revision at all, so
+    resolving two different pinned versions of the same dataset made the
+    second online resolve silently overwrite the first one's cache entry.
+    An offline resolve for revision A would then quietly come back with
+    revision B's data instead -- wrong data, with no error raised to warn
+    anyone."""
     provider = _RevisionEchoingFakeProvider()
     catalog = DatasetCatalog(
         providers={"fake": provider}, resolution_cache=ResolutionCache(tmp_path)
@@ -558,9 +616,11 @@ async def test_offline_resolve_of_a_pinned_revision_never_returns_a_different_pi
 async def test_offline_resolve_of_an_uncached_pinned_revision_raises_not_wrong_data(
     tmp_path: Path,
 ) -> None:
-    """A pinned revision that was never resolved online must raise
-    ``OfflineCacheMiss`` rather than being served a *different* revision's
-    cached resolution -- a miss is safe; wrong data is the defect."""
+    """Requesting a pinned revision that was never resolved online before
+    must raise ``OfflineCacheMiss`` -- it must never instead be quietly
+    served a *different* revision's cached data. Raising an error is the
+    safe outcome here; silently returning the wrong data would be the
+    defect."""
     provider = _RevisionEchoingFakeProvider()
     catalog = DatasetCatalog(
         providers={"fake": provider}, resolution_cache=ResolutionCache(tmp_path)
@@ -578,9 +638,10 @@ async def test_offline_resolve_of_an_uncached_pinned_revision_raises_not_wrong_d
 async def test_offline_resolve_of_the_unpinned_request_still_round_trips(
     tmp_path: Path,
 ) -> None:
-    """The pre-fix common path (``revision is None``) is unchanged: an
-    unpinned online resolve is cached and an unpinned offline resolve
-    returns it."""
+    """The common case from before this fix -- a request with no specific
+    revision pinned (``revision is None``) -- still works the same way as
+    before: an online resolve with no pinned revision gets cached, and an
+    offline resolve with no pinned revision returns that cached result."""
     provider = _RevisionEchoingFakeProvider()
     catalog = DatasetCatalog(
         providers={"fake": provider}, resolution_cache=ResolutionCache(tmp_path)
@@ -596,9 +657,11 @@ async def test_offline_resolve_of_the_unpinned_request_still_round_trips(
 async def test_resolve_offline_still_raises_not_retryable_without_resolution_cache(
     tmp_path: Path,
 ) -> None:
-    """Backward compatibility: a catalog that opts into a page ``cache`` but
-    not a ``resolution_cache`` keeps ADR-0010's original resolve() behavior
-    unchanged -- the two caches are independent opt-ins."""
+    """Backward compatibility check: a catalog configured with a page
+    ``cache`` but no ``resolution_cache`` must keep behaving exactly as it
+    did under ADR-0010, before the resolution cache existed -- the page
+    cache and the resolution cache are two separate features that must each
+    be turned on independently."""
     provider = _CountingFakeProvider()
     catalog = DatasetCatalog(providers={"fake": provider}, cache=DatasetCache(tmp_path))
     await catalog.resolve(_fake_ref())
@@ -607,7 +670,8 @@ async def test_resolve_offline_still_raises_not_retryable_without_resolution_cac
     assert excinfo.value.retryable is False
 
 
-# --- cache: offline iter_records after a prior online preview (ADR-0011) --------
+# --- page cache: offline iter_records() succeeds if the page was already
+# previewed online (ADR-0011) ---
 
 
 @pytest.mark.asyncio

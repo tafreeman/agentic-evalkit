@@ -1,11 +1,19 @@
-"""``agentic-evalkit doctor``: environment/capability preflight (design §11.1).
+"""``agentic-evalkit doctor``: checks the environment before you try to run an evaluation.
 
-Checks Python version, cache read/write, Hugging Face provider health, and
-optional-capability availability. Each check reports ``ok``, ``warning``, or
-``error`` plus a short remediation string; ``doctor`` never raises for an
-individual failed check (a broken target or an unreachable provider is
-exactly the situation a user runs ``doctor`` to diagnose) -- it aggregates
-every check's status into one exit code instead.
+Design doc, section 11.1.
+
+This command runs a handful of checks -- Python version, whether the cache
+directory can actually be read from and written to, whether the Hugging
+Face dataset provider is reachable, and whether optional add-on
+capabilities are installed -- and reports each one as ``ok``, ``warning``,
+or ``error``, plus a short suggestion for how to fix it when it isn't
+``ok``. Note that ``doctor`` itself never raises an exception just because
+one check failed: a broken target or an unreachable provider is exactly
+the kind of problem a user runs ``doctor`` to find out about in the first
+place, so a failed check is data to report, not an error to crash on.
+Instead, after running every check, ``doctor`` looks at all of their
+statuses together and picks one single exit code for the whole command
+based on that.
 """
 
 from __future__ import annotations
@@ -74,12 +82,22 @@ def _check_cache_read_write() -> DoctorCheck:
 
 async def _check_huggingface_health() -> DoctorCheck:
     try:
-        # HfApi structurally satisfies datasets.huggingface's private
-        # _HubClient protocol at runtime (verified there via
-        # @runtime_checkable isinstance checks) but mypy cannot prove it
-        # statically; _HubClient itself is not exported, so this casts
-        # through Any rather than importing a private symbol -- mirroring
-        # the identical situation and fix in cli/datasets.py.
+        # This needs to pass an HfApi instance somewhere that expects the
+        # private "_HubClient" protocol from datasets.huggingface. A
+        # "protocol" here is just a structural interface: it lists the
+        # methods an object must have, and anything with matching methods
+        # counts as satisfying it, without needing to formally inherit from
+        # it. HfApi does have matching methods -- and that really is
+        # checked at runtime over there, via an isinstance check that
+        # Python's @runtime_checkable decorator enables -- but mypy (the
+        # static type checker) can't confirm that just by reading the code,
+        # because HfApi's actual methods spell out specific keyword
+        # parameters where the protocol's methods are declared more loosely
+        # with **kwargs. On top of that, _HubClient is private (never
+        # exported from its module), so this file cannot even import it to
+        # spell out the match directly. So this casts through Any instead
+        # -- telling mypy to stop type-checking this one value -- which is
+        # the same workaround used for the same reason in cli/datasets.py.
         async with HuggingFaceDatasetProvider.create(hub=cast("Any", HfApi())) as provider:
             health = await provider.healthcheck()
     except httpx.HTTPError as error:
@@ -105,15 +123,23 @@ async def _check_huggingface_health() -> DoctorCheck:
 
 
 def _check_swebench_capability() -> DoctorCheck:
-    """Report whether the ``swebench`` optional capability is usable (ADR-0009, ADR-0014).
+    """Report whether the optional ``swebench`` add-on is usable.
 
-    Unlike the reserved-placeholder extras this repo removed 2026-07-11,
-    ``swebench`` is a real, populated extra: ``pip install
-    'agentic-evalkit[swebench]'`` installs the ``swebench`` and ``docker``
-    packages the container-backed harness executor needs (ADR-0014). A
-    present ``swebench`` module means the extra is installed; it is not by
-    itself sufficient to run the harness, since that also needs a reachable
-    Docker daemon -- so the absent-capability remediation names both.
+    This project keeps its base install small and lets users opt into
+    heavier, provider-specific features through "extras" -- optional
+    groups of extra dependencies you install with, e.g., ``pip install
+    'agentic-evalkit[swebench]'`` (that policy is ADR-0009). Two extras
+    that were only ever placeholders, never actually wired up to anything,
+    were removed from this project on 2026-07-11 -- but ``swebench`` is not
+    one of them. It is a real, working extra: installing it pulls in the
+    ``swebench`` and ``docker`` packages needed to run evaluations through
+    the container-based SWE-bench test harness (that harness executor is
+    described in ADR-0014). Finding the ``swebench`` module installed only
+    tells you the extra itself is present, though -- it is not enough on
+    its own to actually run that harness, since doing so also needs a
+    Docker daemon this code can connect to. That's why the remediation
+    message below, for when this check fails, mentions installing the
+    extra *and* having Docker running.
     """
     if find_spec("swebench") is not None:
         return DoctorCheck(
@@ -155,11 +181,13 @@ def _render_table(checks: list[DoctorCheck]) -> None:
     status_styles = {"ok": "green", "warning": "yellow", "error": "red"}
     for check in checks:
         style = status_styles[check.status]
-        # check.name is a hardcoded literal (safe as markup-free plain
-        # text either way); check.detail/remediation are free-form dynamic
-        # text (may legitimately contain "[...]", e.g. a pip extra name)
-        # and must render literally via safe_text rather than be
-        # re-parsed as Rich markup.
+        # check.name always comes from one of the hardcoded check names
+        # defined above (e.g. "python_version"), so it's safe to print as a
+        # plain string either way. check.detail and check.remediation,
+        # though, are free-form text that can legitimately contain a
+        # "[...]"-shaped chunk (a pip extra name, for instance) -- that
+        # must not be misread as Rich style markup, so those two go
+        # through safe_text (see cli/app.py) to render exactly as written.
         table.add_row(
             check.name,
             f"[{style}]{check.status}[/{style}]",

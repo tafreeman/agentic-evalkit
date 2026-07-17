@@ -1,20 +1,36 @@
-"""``agentic-evalkit compare``/``report``: analytics over canonical run JSON.
+"""``agentic-evalkit compare``/``report``: turn a saved run into a comparison or a report.
 
-Both commands consume the canonical run JSON that ``run`` writes (Slice 4a's
-single source of truth). :func:`load_run_result` is the inverse of
-``reporters.json.build_envelope``: it reads that envelope's top-level keys
-back into a real :class:`~agentic_evalkit.models.EvalRunResult` via
-``model_validate``, so ``compare`` and ``report`` operate on the same
-immutable contract a Python caller would, with no re-execution and no
-network access.
+(A few comments below cite internal project-planning labels like "Slice
+4a", "Task 12", or "Task 13" -- these just point back to the
+implementation phase that made or built a given decision; they're not
+concepts you need to look anything up to understand.)
 
-``compare`` runs the Task 12 paired-bootstrap comparison
-(:func:`agentic_evalkit.stats.compare_runs`) between two runs; incompatible
-runs are surfaced as invalid *user input* (exit 2) with every mismatch
-listed, since the user chose two runs that cannot be meaningfully compared.
-``report`` regenerates a JSONL, Markdown, or self-contained HTML report from
-one run's canonical JSON using the Task 13 reporters -- the canonical JSON
-stays the source of truth and every other format derives from it.
+When ``agentic-evalkit run`` finishes, it writes one JSON file that this
+project treats as the single, authoritative record of that run (a choice
+made in Slice 4a) -- both commands in this module read that file back
+rather than re-running anything. :func:`load_run_result` undoes what
+``reporters.json.build_envelope`` did when that file was first written: it
+reads the same top-level keys back out of the file and rebuilds them, via
+Pydantic's ``model_validate``, into a real
+:class:`~agentic_evalkit.models.EvalRunResult` object. So ``compare`` and
+``report`` both end up working with the exact same frozen, structured
+object a Python caller would get directly from the library -- with no
+re-running of the evaluation and no network access needed.
+
+``compare`` (implemented as Task 12) statistically compares two runs'
+success rates using a paired bootstrap -- a resampling technique for
+estimating how much two matched sets of results could plausibly differ
+just by chance, implemented in :func:`agentic_evalkit.stats.compare_runs`.
+If the two runs turn out not to be comparable at all (for example, they
+used different graders or datasets), that counts as bad input from the
+user rather than a system failure: the command exits with code 2 and
+lists every specific mismatch it found, since the user is the one who
+chose two runs that cannot be meaningfully compared. ``report``
+(implemented as Task 13) instead regenerates a JSONL, Markdown, or
+self-contained HTML report file from one run's saved JSON. Either way,
+that saved JSON file stays the one source of truth, and everything else
+here -- comparison statistics, alternate report formats -- is derived
+from it, never the other way around.
 """
 
 from __future__ import annotations
@@ -34,11 +50,14 @@ from agentic_evalkit.stats import ComparisonResult, build_report_aggregates, com
 
 __all__ = ["compare", "load_run_result", "report"]
 
-#: The subset of ``build_envelope``'s top-level keys that reconstruct an
-#: ``EvalRunResult``. ``provenance`` and ``generated_at`` are derived/echoed
-#: fields in the envelope (not model fields), so they are intentionally not
-#: read back here -- ``model_validate`` rebuilds provenance from the manifest
-#: and resolved dataset it already carries.
+#: The top-level keys, out of everything ``build_envelope`` writes, that are
+#: actually needed to rebuild an ``EvalRunResult`` object. The envelope also
+#: contains ``provenance`` and ``generated_at``, but those two are only
+#: extra information echoed into the file for a human or another tool to
+#: read -- they aren't fields ``EvalRunResult`` itself has, so they're
+#: deliberately left out of this tuple. ``model_validate`` recomputes
+#: provenance on its own anyway, from the manifest and resolved-dataset
+#: values it gets back from the keys listed here.
 _REQUIRED_ENVELOPE_KEYS = (
     "run_id",
     "manifest",
@@ -51,21 +70,25 @@ _REQUIRED_ENVELOPE_KEYS = (
 
 
 def load_run_result(path: str | Path) -> EvalRunResult:
-    """Reconstruct an :class:`EvalRunResult` from a canonical run JSON file.
+    """Read a saved run's JSON file back into a real :class:`EvalRunResult` object.
 
-    The exact inverse of ``reporters.json.build_envelope``: it validates the
-    envelope's ``run_id``/``manifest``/``resolved_dataset``/``summary``/
-    ``samples``/``started_at``/``finished_at`` keys back into the frozen
-    model via ``model_validate`` (which re-parses the nested manifest,
-    resolved-dataset, sample, and summary submodels). ``schema_version`` is
-    validated as part of ``EvalRunResult`` itself.
+    This does exactly the reverse of what ``reporters.json.build_envelope``
+    did when it first wrote that file: it takes the envelope's ``run_id``,
+    ``manifest``, ``resolved_dataset``, ``summary``, ``samples``,
+    ``started_at``, and ``finished_at`` keys and validates them back into
+    the frozen ``EvalRunResult`` model via Pydantic's ``model_validate``
+    (which, along the way, also re-parses the nested manifest,
+    resolved-dataset, sample, and summary objects that those keys contain).
+    ``schema_version`` gets checked too, as part of ``EvalRunResult``'s own
+    validation.
 
     Raises:
-        ManifestValidationError: The file is missing/unreadable, is not JSON,
-            does not decode to a mapping, is missing a required envelope key,
-            or fails ``EvalRunResult`` validation. ``context["errors"]``
-            names the problem so the failure is actionable at the CLI
-            boundary rather than a raw traceback.
+        ManifestValidationError: Raised if the file can't be found or read,
+            isn't valid JSON, doesn't decode to a JSON object, is missing
+            one of the required keys listed above, or fails
+            ``EvalRunResult``'s own validation. ``context["errors"]`` spells
+            out exactly what went wrong, so a caller sees an actionable
+            message at the CLI level instead of a raw Python traceback.
     """
     resolved_path = Path(path)
     try:
@@ -143,20 +166,36 @@ def _validate_bootstrap_samples(value: int) -> None:
 
 @app.command()
 def compare(
-    left: Annotated[Path, typer.Argument(help="Baseline canonical run JSON file.")],
-    right: Annotated[Path, typer.Argument(help="Candidate canonical run JSON file.")],
+    left: Annotated[
+        Path, typer.Argument(help="Baseline run's saved JSON file (from 'agentic-evalkit run').")
+    ],
+    right: Annotated[
+        Path, typer.Argument(help="Candidate run's saved JSON file (from 'agentic-evalkit run').")
+    ],
     bootstrap_samples: Annotated[
         int,
-        typer.Option("--bootstrap-samples", help="Bootstrap resamples (100-10000)."),
+        typer.Option(
+            "--bootstrap-samples",
+            help="Number of resamples to draw for the bootstrap confidence interval (100-10000).",
+        ),
     ] = 1000,
-    seed: Annotated[int, typer.Option("--seed", help="Seed for the deterministic bootstrap.")] = 0,
+    seed: Annotated[
+        int,
+        typer.Option(
+            "--seed",
+            help="Random seed for resampling, so the same seed always reproduces the same result.",
+        ),
+    ] = 0,
     allow_cross_environment: Annotated[
         bool,
         typer.Option(
             "--allow-cross-environment",
             help=(
-                "Waive an environment_fingerprint/code_fingerprint mismatch instead of "
-                "rejecting the comparison (ADR-0015); every other provenance field still gates."
+                "Allow comparing two runs even if they were produced on different "
+                "machines/environments or different code versions (i.e., their "
+                "environment_fingerprint and/or code_fingerprint differ), instead of refusing "
+                "the comparison outright (ADR-0015). Every other consistency check between the "
+                "two runs is still enforced."
             ),
         ),
     ] = False,
@@ -165,14 +204,19 @@ def compare(
     ] = "table",
     debug: Annotated[bool, typer.Option("--debug", help="Show full tracebacks on error.")] = False,
 ) -> None:
-    """Compare two runs' paired success rates with a seeded bootstrap interval.
+    """Compare two runs' paired success rates, with a confidence interval from a seeded bootstrap.
 
-    Incompatible runs (different dataset revision, adapter, grader, target or
-    sampling policy) are an invalid *choice of inputs*, so they exit 2 with
-    every mismatch listed -- not a provider/infrastructure error.
-    ``--allow-cross-environment`` narrowly waives an environment_fingerprint
-    and/or code_fingerprint mismatch (ADR-0015); the waived field(s) are
-    reported back, not silently dropped.
+    If the two runs are not actually compatible with each other -- say, they
+    used a different dataset revision, adapter, grader, target, or sampling
+    policy -- that counts as the user choosing two things that can't be
+    meaningfully compared, not a provider or infrastructure problem. So the
+    command exits with code 2 and lists every specific mismatch it found.
+    ``--allow-cross-environment`` narrowly waives just an
+    environment_fingerprint and/or code_fingerprint mismatch -- meaning the
+    two runs were produced on different machines/environments or different
+    code versions (ADR-0015) -- while every other consistency check between
+    the two runs still applies. Any field waived this way is reported back
+    to you, never silently dropped.
     """
 
     def _action() -> ComparisonResult:
@@ -211,10 +255,19 @@ def compare(
 
 # --- report -----------------------------------------------------------------
 
-# Derived from the canonical REPORTER_FORMATS registry so this second write
-# boundary can never drift from it: a newly registered format is regeneratable
-# here automatically, and an unregistered reporter is unreachable (R-002).
-# "json" is excluded because this command regenerates FROM canonical run JSON.
+# This dict is built directly from REPORTER_FORMATS -- the one master list
+# (defined in reporters/__init__.py) of every report format this project
+# knows how to write -- instead of listing the formats again by hand here.
+# That way this command can never quietly drift out of sync with that
+# master list: add a new format to REPORTER_FORMATS and this command can
+# already regenerate it, and nothing can be written by some other path
+# without also being registered there (that "every writable format must
+# come from the one registry" rule is tracked as Story 2.2 / R-002). "json"
+# itself is left out here because this command's whole job is to
+# regenerate other formats starting from a run's canonical JSON file --
+# "canonical" meaning that saved file is already treated as the one
+# authoritative record of the run -- so regenerating "json" from "json"
+# would be pointless.
 _REPORTERS: dict[str, Reporter] = {
     name: reporter_type() for name, reporter_type in REPORTER_FORMATS.items() if name != "json"
 }
@@ -222,7 +275,12 @@ _REPORTERS: dict[str, Reporter] = {
 
 @app.command()
 def report(
-    source: Annotated[Path, typer.Argument(help="Canonical run JSON file to regenerate from.")],
+    source: Annotated[
+        Path,
+        typer.Argument(
+            help="The run's saved JSON file to build a report from (from 'agentic-evalkit run')."
+        ),
+    ],
     format_: Annotated[
         str, typer.Option("--format", help="Output format: jsonl, markdown, or html.")
     ] = "markdown",
@@ -231,20 +289,28 @@ def report(
     ] = None,
     debug: Annotated[bool, typer.Option("--debug", help="Show full tracebacks on error.")] = False,
 ) -> None:
-    """Regenerate a JSONL, Markdown, or self-contained HTML report from run JSON.
+    """Regenerate a JSONL, Markdown, or self-contained HTML report from a run's saved JSON.
 
-    The default redaction policy is re-applied before rendering: ``run``
-    already writes redacted canonical JSON, so this is defense in depth for
-    run files produced by older tools or edited by hand -- a credential-shaped
-    evidence value can never reach a regenerated report either way.
+    "Self-contained" for the HTML report means that one HTML file has
+    everything it needs embedded in it (styles, data, and so on) -- it
+    doesn't load anything else, so it can be opened directly or emailed
+    around. Before rendering, this command re-applies the project's
+    default redaction policy (the step that blanks out anything that looks
+    like a secret). ``run`` already writes out redacted JSON in the first
+    place, so doing it again here is just a defense-in-depth safety net --
+    for example, a run file produced by an older version of this tool, or
+    hand-edited afterward, might not already be clean. Either way, a
+    credential-shaped piece of evidence can never make it into a
+    regenerated report.
 
-    ``aggregates`` is recomputed here via
-    :func:`agentic_evalkit.stats.build_report_aggregates` rather than read
-    back from the source file's own ``"aggregates"`` key (present only for
-    JSON reports written after that field was wired in): recomputing from
-    the reconstructed ``EvalRunResult`` means a regenerated report always
-    carries the statistics layer, even when regenerating from an older or
-    hand-edited canonical run file that predates it.
+    ``aggregates`` (the summary statistics shown in the report) is
+    recomputed here, via :func:`agentic_evalkit.stats.build_report_aggregates`,
+    rather than simply copied from the source file's own ``"aggregates"``
+    key -- which only exists on JSON reports written after that field was
+    added to the format. Recomputing it fresh from the reconstructed
+    ``EvalRunResult`` means every regenerated report includes these
+    statistics, even one regenerated from an older or hand-edited run file
+    that predates that field.
     """
 
     def _action() -> Path:

@@ -1,17 +1,24 @@
-"""Dataset provider protocol and shared provider health contract.
+"""Defines the interface ("protocol") every dataset provider must implement,
+plus a shared type describing a provider's health status.
 
-Design §6.1: every provider implements ``search``, ``resolve``, ``preview``,
-``iter_records``, and ``healthcheck``. The protocol is structural, so host
-adapters do not inherit framework classes; providers register through the
-``agentic_evalkit.providers.v1`` entry-point group.
+Design §6.1: every provider must implement five methods -- ``search``,
+``resolve``, ``preview``, ``iter_records``, and ``healthcheck``. This is
+defined as a ``Protocol`` (Python's structural-typing mechanism), which
+means a class counts as a valid provider just by having methods with
+matching names and signatures -- it does not need to explicitly inherit
+from any base/framework class. Providers make themselves discoverable by
+registering under the ``agentic_evalkit.providers.v1`` entry-point group (a
+standard Python packaging mechanism plugins use to advertise themselves).
 
-Per ADR-0010, every provider also declares ``requires_network`` -- a
-structural marker parallel to ``api_version`` that says whether the provider
-can ever legitimately be called while ``offline=True`` is in effect.
-``DatasetCatalog`` reads this attribute (defaulting an unmarked provider to
-``True``, the conservative assumption) to decide whether an offline call may
-reach the provider at all, rather than special-casing the literal name
-``"local"``.
+Per ADR-0010, every provider must also declare a ``requires_network``
+attribute -- a flag, alongside ``api_version``, that says whether this
+provider can ever legitimately be called while ``offline=True`` is set
+(i.e. while the caller has said "don't touch the network"). ``DatasetCatalog``
+reads this attribute to decide whether it's safe to let an offline call
+reach a given provider at all. If a provider doesn't declare this
+attribute, it's treated as ``True`` (needs network) by default -- the
+cautious assumption -- rather than the catalog trying to guess based on
+whether the provider happens to be named ``"local"``.
 """
 
 from collections.abc import AsyncIterator, Mapping
@@ -32,15 +39,18 @@ class ProviderHealth(FrozenModel):
 
 @runtime_checkable
 class DatasetProvider(Protocol):
-    """The provider boundary (design §6.1)."""
+    """The interface that separates evalkit's core from any specific dataset
+    provider (design §6.1). Anything that implements these methods with
+    these signatures counts as a valid provider."""
 
     api_version: str
-    #: Whether this provider ever needs network access to satisfy any of its
-    #: methods. ``False`` marks a provider as safe to call under
-    #: ``offline=True`` (ADR-0010) -- for example, a filesystem-only
-    #: provider. ``True`` (or the attribute being absent on an older
-    #: provider) means ``DatasetCatalog`` continues to reject
-    #: ``offline=True`` calls to it.
+    #: Whether this provider ever needs network access to do any of its
+    #: jobs. ``False`` means this provider is safe to call even when
+    #: ``offline=True`` is set (ADR-0010) -- for example, a provider that
+    #: only reads from the local filesystem. ``True`` (or simply leaving
+    #: this attribute off, on an older provider written before this flag
+    #: existed) means ``DatasetCatalog`` will keep rejecting
+    #: ``offline=True`` calls made to this provider.
     requires_network: bool
 
     async def search(

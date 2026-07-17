@@ -1,13 +1,21 @@
-"""Grader protocol (design §9).
+"""The shared interface every grader must implement (design §9).
 
-Every grader implements a single async ``grade`` method that consumes a
-completed sample/execution pair and returns a :class:`GradeResult`. The
-protocol is structural (``Protocol`` + ``runtime_checkable``), matching
-``agentic_evalkit.datasets.base.DatasetProvider``, so host code and test
-doubles never need to inherit a framework base class.
+A "grader" is the piece of code that looks at what the AI produced and
+decides pass/fail/score. Every grader implements a single async ``grade``
+method: it takes a completed sample/execution pair and returns a
+:class:`GradeResult`. The interface is "structural" (Python's ``Protocol``
++ ``runtime_checkable``) -- meaning any object with a matching ``grade``
+method automatically counts as a ``Grader``, without needing to inherit
+from a shared base class or explicitly declare that it implements this
+interface. This matches how ``agentic_evalkit.datasets.base.DatasetProvider``
+works, so neither this framework's own code nor a test's stand-in objects
+ever need to inherit from a framework base class just to qualify.
 
-Graders never execute targets themselves (design §9); they consume an
-already-normalized :class:`NormalizedExecutionResult`.
+Graders never run the AI system being evaluated themselves (design §9). By
+the time a grader is called, something else has already run the AI and
+packaged up what happened into a :class:`NormalizedExecutionResult`; the
+grader's only job is to look at that result (and the original sample) and
+decide the outcome.
 """
 
 from typing import Protocol, runtime_checkable
@@ -17,7 +25,7 @@ from agentic_evalkit.models import EvalSample, GradeResult, NormalizedExecutionR
 
 @runtime_checkable
 class Grader(Protocol):
-    """The grading boundary (design §9)."""
+    """The grading boundary: anything with an async ``grade(sample, execution)`` method (§9)."""
 
     async def grade(
         self, sample: EvalSample, execution: NormalizedExecutionResult

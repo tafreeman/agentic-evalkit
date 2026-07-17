@@ -13,16 +13,26 @@ tested support for calibrated judge evidence while leaving model-provider
 selection to the caller. The built-in reference judge is deterministic and
 advisory only; it cannot approve a release.
 
+**Why not just use promptfoo, Inspect, DeepEval, Braintrust, or LangSmith?**
+Those tools are great at the *workflow* side of evals — running lots of
+prompts, wiring checks into CI, tracking experiments over time. If that's
+your job, use one of them. This package is built for a narrower, stricter
+problem: making sure you can actually trust the result you get. Concretely,
+that means an AI judge has to prove it agrees with real human-labeled
+answers before it's allowed to approve anything; two runs are only
+compared once we can prove they ran under matching conditions; a bug in
+your own code is never confused with the AI simply getting the answer
+wrong; a fuzzy AI opinion can never override a hard requirement like "the
+code must compile"; and test questions that leaked into the AI's training
+data get caught before they inflate a score. The tools above don't treat
+these as first-class problems. See [docs/prior-art.md](docs/prior-art.md)
+for the full comparison and the reasoning behind building this instead of
+adopting one of them.
+
 Start with the [quickstart guide](docs/guides/quickstart.md). For design
 boundaries and comparisons with other tools, see the
 [architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md)
 and [prior-art review](docs/prior-art.md).
-
-## Identity
-
-- Distribution and repository: `agentic-evalkit`
-- Python package: `agentic_evalkit`
-- CLI: `agentic-evalkit`
 
 ## Quickstart
 
@@ -96,4 +106,4 @@ extras policy.
 
 ## Repository boundary
 
-This project does not modify or import Agentic Runtime Platform or ExecutionKit internals. Those systems may be evaluated through stable callable, subprocess, or HTTP target adapters — see [ADR-0001](docs/adr/0001-standalone-boundary.md) and [ADR-0006](docs/adr/0006-execution-target-boundary.md).
+This project imports no host-repo internals — systems are reached only through the public `ExecutionTarget` protocol (callable, subprocess, or HTTP adapters); see [ADR-0001](docs/adr/0001-standalone-boundary.md) and [ADR-0006](docs/adr/0006-execution-target-boundary.md).

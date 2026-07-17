@@ -9,7 +9,7 @@ hide:
 <div class="hero-inner" markdown="1">
 
 <div class="hero-meta">
-  <span class="hero-eyebrow">portfolio tooling · evaluation</span>
+  <span class="hero-eyebrow">evaluation</span>
   <span class="status-tag">status: alpha</span>
 </div>
 
@@ -19,7 +19,7 @@ hide:
 
 <div class="hero-actions" markdown>
 [Get started](guides/quickstart.md){ .md-button .md-button--primary }
-[View source](https://github.com/agentic-evalkit/agentic-evalkit){ .md-button }
+[View source](https://github.com/tafreeman/agentic-evalkit){ .md-button }
 </div>
 
 <div class="term">

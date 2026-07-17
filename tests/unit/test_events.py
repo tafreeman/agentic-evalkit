@@ -3,26 +3,39 @@
 Source: ``_bmad-output/planning-artifacts/epics.md`` (Epic 5, Story 5.3) and
 ``agentic_evalkit.events``.
 
-``agentic_evalkit.events`` defines the frozen event types
-:class:`~agentic_evalkit.runner.EvalRunner` may hand to a caller-supplied
-``EventSink`` (a plain ``Callable[[RunEvent], None]``; see
-``agentic_evalkit.runner.EventSink`` / ``_noop_sink``). This module pins three
-things independent of the runner: every enumerated event type can be built and
-delivered intact through the sink contract, every event is frozen (mutation
-raises), and no event field can carry a raw secret or a large inlined payload
--- large/sensitive data is referenced by digest through the ``ArtifactStore``
-instead (per the module docstring's promise). The event set is iterated from
-:data:`~agentic_evalkit.events.ALL_EVENT_TYPES`, never hard-coded, so a newly
-added event type that is not given a factory here fails the coverage guard
-below rather than silently escaping it.
+``agentic_evalkit.events`` defines the "event" types that
+:class:`~agentic_evalkit.runner.EvalRunner` sends out while a run is in
+progress -- things like "a sample just started" or "the whole run just
+finished." The runner delivers these to an ``EventSink``: just a plain
+callback function the caller supplies, typed as ``Callable[[RunEvent],
+None]`` (see ``agentic_evalkit.runner.EventSink`` and ``_noop_sink``, the
+default do-nothing sink used when the caller doesn't supply their own).
+
+This module checks three guarantees about those events, independent of
+whether the runner itself behaves correctly:
+
+1. Every event type that exists can actually be built and delivered to a
+   sink unchanged.
+2. Every event is "frozen" (immutable): once created, trying to change one
+   of its fields raises an error instead of silently succeeding.
+3. No event field can ever hold a raw secret or a large chunk of data
+   inlined directly -- anything big or sensitive must instead be referenced
+   by its digest (hash) through the ``ArtifactStore``, exactly as promised
+   in the events module's own docstring.
+
+Rather than hard-coding the list of event types to check, every test below
+loops over :data:`~agentic_evalkit.events.ALL_EVENT_TYPES` -- the single
+source of truth for "every event type that currently exists." That way, if
+someone adds a new event type but forgets to give it a test fixture here,
+the coverage-guard test in this file fails loudly instead of the new event
+type quietly slipping through untested.
 """
 
 from __future__ import annotations
 
 import types
-from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Literal, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Literal, Union, get_args, get_origin
 
 import pytest
 
@@ -39,8 +52,12 @@ from agentic_evalkit.events import (
     SampleStarted,
 )
 from agentic_evalkit.models import ExecutionStatus, GradeStatus
-from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.runner import _noop_sink
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from agentic_evalkit.models.base import FrozenModel
 
 _NOW = datetime(2026, 7, 4, 12, 0, 0, tzinfo=UTC)
 
@@ -91,9 +108,11 @@ def _run_failed() -> RunFailed:
     return RunFailed(run_id="run-1", error_type="RuntimeError", message="boom", failed_at=_NOW)
 
 
-#: One factory per concrete event type. Keyed by the type so the coverage guard
-#: below can assert this registry matches ``ALL_EVENT_TYPES`` exactly -- a new
-#: event type with no factory here fails that test.
+#: A ready-made example instance for each event type, built by calling the
+#: matching factory function below. Keyed by the type itself, so the
+#: coverage-check test further down can compare this dict's keys against
+#: ``ALL_EVENT_TYPES`` and confirm they match exactly -- a new event type
+#: added without a factory here would fail that test.
 _EVENT_FACTORIES: dict[type[FrozenModel], Callable[[], RunEvent]] = {
     RunStarted: _run_started,
     DatasetResolved: _dataset_resolved,
@@ -105,18 +124,26 @@ _EVENT_FACTORIES: dict[type[FrozenModel], Callable[[], RunEvent]] = {
     RunFailed: _run_failed,
 }
 
-#: The wire-safe primitive types an event field may hold. No dict/list/bytes:
-#: an event must never inline a raw output payload, request headers, or a
-#: secret -- large/sensitive data is referenced by digest elsewhere.
+#: The types considered "wire-safe" -- simple and small enough that a value
+#: of this type can be logged, printed, or sent over a network with no risk.
+#: Deliberately excludes dict/list/bytes: an event must never directly
+#: inline a raw output payload, an HTTP request header, or a secret --
+#: anything large or sensitive has to be referenced by its digest (hash)
+#: elsewhere instead.
 _WIRE_SAFE_FIELD_TYPES = (str, int, float, datetime, ExecutionStatus, GradeStatus)
 
 
 def _annotation_member_types(annotation: object) -> tuple[object, ...]:
-    """Decompose a field annotation into its member types.
+    """Break a field's type annotation down into the individual types it allows.
 
-    A union (``X | None`` or ``Optional[X]``) yields its args; a bare type
-    yields just itself. ``None`` (``NoneType``) is stripped, so the caller
-    checks only the value-bearing members of an optional field.
+    Most fields are declared as one plain type (e.g. ``str``), which comes
+    back here as a single-item tuple. A field can also be declared as a
+    union of several types, written either ``X | None`` or ``Optional[X]``
+    -- meaning "this holds an X, or nothing at all" -- in which case every
+    type listed in that union comes back separately. Either way, ``None``
+    (Python's "no value" type, ``NoneType``) is left out of the result, so
+    callers only see the "real" types a field can hold, not the fact that
+    it's also allowed to be empty.
     """
     origin = get_origin(annotation)
     members = get_args(annotation) if origin in (Union, types.UnionType) else (annotation,)
@@ -124,17 +151,27 @@ def _annotation_member_types(annotation: object) -> tuple[object, ...]:
 
 
 def _assert_annotation_is_wire_safe(event_type: type[FrozenModel], field_name: str) -> None:
-    """Assert every value-bearing member of a field's annotation is wire-safe.
+    """Check that every type a field's annotation allows (aside from None) is wire-safe.
 
-    This is the annotation-level guarantee: an optional container-typed field
-    (e.g. ``dict[str, str] | None``) would be caught here even when its runtime
-    value is ``None`` -- exactly the case the old per-instance ``continue``
-    skipped silently.
+    This checks the field's *declared type*, not just whatever value it
+    happens to hold on one particular test instance. That distinction
+    matters: picture a field typed as ``dict[str, str] | None`` that just
+    happens to be set to ``None`` on the example event used in a test.
+    Checking only that runtime value would miss the problem completely,
+    since ``None`` doesn't look unsafe by itself -- and that's exactly what
+    an earlier version of this test did (it used a ``continue`` to skip any
+    field whose value was ``None``, which let an unsafe *type* slip through
+    silently as long as no test happened to fill that field in). Checking
+    the declared annotation instead catches the unsafe type regardless of
+    what value is actually set.
     """
     for member in _annotation_member_types(event_type.model_fields[field_name].annotation):
         if get_origin(member) is Literal:
-            # The schema_version discriminator every FrozenModel inherits is
-            # Literal["1"] -- a Literal of wire-safe scalars is wire-safe.
+            # Every FrozenModel inherits a `schema_version` field typed as
+            # `Literal["1"]` -- meaning "this field can only ever hold the
+            # one exact value '1'". A Literal like that is wire-safe as long
+            # as every value it's allowed to hold is itself a plain scalar
+            # (str/int/float/bool), which is what this checks.
             assert all(isinstance(arg, (str, int, float, bool)) for arg in get_args(member)), (
                 f"{event_type.__name__}.{field_name} is a Literal of non-scalar values"
             )
@@ -150,12 +187,14 @@ def _all_events() -> list[RunEvent]:
 
 
 def test_event_factories_cover_every_enumerated_event_type() -> None:
-    """The per-type factory registry matches ``ALL_EVENT_TYPES`` exactly, so a
-    newly added event type must be given a factory here to pass -- the rest of
-    this module then exercises it automatically.
+    """Check that the example-instance registry (`_EVENT_FACTORIES`) has an
+    entry for every event type in `ALL_EVENT_TYPES`, and nothing extra. This
+    is what forces a newly added event type to be given a factory here
+    before it can pass CI -- once it has one, every other test in this file
+    exercises it automatically.
     """
     assert set(_EVENT_FACTORIES) == set(ALL_EVENT_TYPES)
-    # No duplicates and no drift in the source enumeration itself.
+    # Also confirm ALL_EVENT_TYPES itself has no accidental duplicate entries.
     assert len(ALL_EVENT_TYPES) == len(set(ALL_EVENT_TYPES))
 
 
@@ -163,9 +202,12 @@ def test_event_factories_cover_every_enumerated_event_type() -> None:
 def test_every_event_type_delivers_intact_through_a_collecting_sink(
     event_type: type[FrozenModel],
 ) -> None:
-    """Each event type is delivered through a collecting ``EventSink`` (the
-    canonical ``list.append`` sink) and arrives as the same, unmodified
-    instance -- byte-for-byte equal on a model round-trip.
+    """Send one example of each event type through a simple sink that just
+    appends whatever it receives to a list, and check it comes out the other
+    end as the exact same object, completely unchanged. "Unchanged" is
+    verified by dumping the event to JSON both before and after -- if
+    anything about the event had been altered along the way, those two JSON
+    dumps would no longer match.
     """
     event = _EVENT_FACTORIES[event_type]()
     collected: list[RunEvent] = []
@@ -184,8 +226,10 @@ def test_every_event_type_delivers_intact_through_a_collecting_sink(
 
 @pytest.mark.parametrize("event_type", ALL_EVENT_TYPES, ids=lambda t: t.__name__)
 def test_noop_sink_accepts_every_event_type(event_type: type[FrozenModel]) -> None:
-    """The shipped default sink (``_noop_sink``) accepts every event type
-    without raising -- a run with no caller sink must never fail on delivery.
+    """The library's built-in do-nothing sink (``_noop_sink``, used
+    automatically when the caller doesn't supply their own) accepts every
+    event type without raising -- a run must never fail on event delivery
+    just because nobody was listening.
     """
     event = _EVENT_FACTORIES[event_type]()
     assert _noop_sink(event) is None
@@ -193,8 +237,10 @@ def test_noop_sink_accepts_every_event_type(event_type: type[FrozenModel]) -> No
 
 @pytest.mark.parametrize("event_type", ALL_EVENT_TYPES, ids=lambda t: t.__name__)
 def test_every_event_type_is_frozen(event_type: type[FrozenModel]) -> None:
-    """Every event is immutable: reassigning any field raises, so an event
-    handed to a sink can never be mutated in place after emission.
+    """Every event is immutable ("frozen"): trying to change any one of its
+    fields after it's been created raises an error instead of silently
+    succeeding. That guarantees an event handed to a sink can never
+    afterward be changed out from under it.
     """
     event = _EVENT_FACTORIES[event_type]()
     field_name = next(iter(event_type.model_fields))
@@ -204,37 +250,43 @@ def test_every_event_type_is_frozen(event_type: type[FrozenModel]) -> None:
 
 @pytest.mark.parametrize("event_type", ALL_EVENT_TYPES, ids=lambda t: t.__name__)
 def test_every_event_field_is_a_wire_safe_primitive(event_type: type[FrozenModel]) -> None:
-    """No event field may hold a container or raw bytes: every populated field
-    is a plain identifier, enum, count, or timestamp. This is the structural
-    guarantee that an event can never inline a raw output payload, request
-    header, or secret (large/sensitive data is referenced by digest instead).
+    """No event field may hold a container (like a dict or list) or raw bytes
+    -- every field that's actually set must be a plain string ID, an enum
+    value, a count, or a timestamp. This is what backs up the promise made
+    in the events module's own docstring: an event can never carry a raw
+    output payload, an HTTP header, or a secret directly. Anything large or
+    sensitive has to be referenced by its digest (hash) instead.
     """
     event = _EVENT_FACTORIES[event_type]()
     for field_name in event_type.model_fields:
-        # Annotation-level guarantee, checked for every field (not just the
-        # populated ones): the declared type admits only wire-safe members, so
-        # an optional container-typed field is rejected even when its runtime
-        # value is None. This is what the old `continue`-on-None loop skipped.
+        # Check the field's declared type for every field, not only the ones
+        # that happen to be filled in on this particular example event. That
+        # way, a field typed as an optional container (e.g. `dict[str, str]
+        # | None`) is still caught even if this test's example event leaves
+        # it as None -- see `_assert_annotation_is_wire_safe`'s own
+        # docstring for why checking just the runtime value isn't enough.
         _assert_annotation_is_wire_safe(event_type, field_name)
 
         value = getattr(event, field_name)
         if value is None:
-            # An unset optional field carries no value to type-check at
-            # runtime; the annotation assertion above already covered it.
+            # Nothing to check at runtime for a field that's unset here --
+            # its declared type was already checked just above.
             continue
         assert isinstance(value, _WIRE_SAFE_FIELD_TYPES), (
             f"{event_type.__name__}.{field_name} is {type(value).__name__}, "
             "which is not a wire-safe primitive"
         )
-        # Defense in depth: no field is a large inlined blob even as a string.
+        # Extra safety net on top of the type check: even a string-typed
+        # field shouldn't be able to smuggle in a huge blob of inlined data.
         if isinstance(value, str):
             assert len(value) < 2048
 
 
 def test_a_sink_can_receive_the_full_event_stream_in_order() -> None:
-    """A single collecting sink receives a heterogeneous stream of every event
-    type, in emission order, each instance intact -- the delivery contract a
-    live progress view / audit trail depends on.
+    """Simulate a real run's event stream: one sink receiving every kind of
+    event mixed together, in the order they'd actually be sent, each one
+    arriving unchanged. This is exactly the guarantee that something like a
+    live progress bar or an audit log would depend on.
     """
     stream = _all_events()
     collected: list[RunEvent] = []
@@ -250,9 +302,12 @@ def test_a_sink_can_receive_the_full_event_stream_in_order() -> None:
 
 
 def test_events_carry_no_field_named_like_a_raw_payload_or_secret() -> None:
-    """Guard the contract by field-name too: no event declares a field whose
-    name suggests it inlines raw output, headers, a token, or a credential.
-    Large/sensitive data must be referenced (by digest), never named-and-held.
+    """As a second line of defense on top of the type checks above, also
+    check field *names*: no event should have a field named anything like
+    "output", "token", or "credential", since a name like that would
+    suggest it's meant to hold sensitive data directly. Anything large or
+    sensitive must be referenced (by digest) rather than held directly in a
+    field.
     """
     forbidden_substrings = ("output", "payload", "token", "secret", "header", "credential", "body")
     for event_type in ALL_EVENT_TYPES:

@@ -1,9 +1,11 @@
-"""Public, immutable wire contracts for agentic-evalkit.
+"""The public data models different parts of agentic-evalkit use to pass information around.
 
 See design §5 (`docs/specs/2026-07-02-agentic-evalkit-design.md`) and
-ADR-0002 (`docs/adr/0002-immutable-versioned-contracts.md`). Every model
-here is frozen, forbids unknown fields, carries an explicit
-``schema_version``, and performs no I/O.
+ADR-0002 (`docs/adr/0002-immutable-versioned-contracts.md`) for the full
+reasoning. Every model in this package is immutable once built, rejects
+any field it doesn't recognize, carries an explicit ``schema_version`` so
+old saved data stays readable as the package evolves, and never performs
+file or network access itself.
 """
 
 from agentic_evalkit.models.base import FrozenModel

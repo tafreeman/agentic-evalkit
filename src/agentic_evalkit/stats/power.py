@@ -1,11 +1,30 @@
-"""Closed-form sample-size planning for a two-proportion comparison (ADR-0016).
+"""Figuring out, ahead of time, how many samples you'd need to reliably
+detect a real difference between two pass rates (ADR-0016).
 
-Design section 10 calls for "predeclared subgroup slices with adequate sample
-sizes"; C8 (statistical rigor) names a power calculation as the check that must
-precede trusting a rate delta. :func:`required_sample_size` answers "how many
-samples per arm do I need to detect an effect of at least this size?" using only
-the standard library (:class:`statistics.NormalDist`) -- the same
-no-numpy/scipy discipline the rest of :mod:`agentic_evalkit.stats` keeps.
+Design section 10 calls for "predeclared subgroup slices with adequate
+sample sizes" -- meaning: before you go looking at subgroups of your data,
+you should have already worked out whether you're even testing with
+enough samples to trust what you find. And C8 (this codebase's rule for
+statistical rigor) requires this kind of "power calculation" before anyone
+trusts a reported difference ("delta") between two pass rates.
+
+"Statistical power" is the probability that, if a real difference of a
+given size genuinely exists, your test will actually detect it rather than
+missing it by chance -- testing with too few samples means you might
+completely miss a real effect just because your sample was small and
+noisy, not because the effect isn't there. :func:`required_sample_size`
+answers the practical question this raises: "if I want to reliably detect
+a difference of at least this size between two pass rates (imagine
+running two variants -- 'arms' -- of an experiment side by side, each
+with its own group of samples), how many samples do I need in *each*
+group?"
+
+It computes this with a standard, direct formula (a "closed form," meaning
+an exact formula you can compute in one pass, rather than something you
+have to estimate through trial and error or simulation), using only
+Python's standard library (:class:`statistics.NormalDist`) -- the same
+"no numpy/scipy dependency" discipline the rest of
+:mod:`agentic_evalkit.stats` follows.
 """
 
 from __future__ import annotations
@@ -23,36 +42,57 @@ def required_sample_size(
     alpha: float = 0.05,
     power: float = 0.8,
 ) -> int:
-    """Return the per-arm sample size for a two-proportion z-test.
+    """Return how many samples you'd need, in each of two groups, to
+    reliably detect a real difference between their two success rates.
 
-    Implements the standard closed form
+    This implements the standard formula for planning a "two-proportion
+    z-test" -- the standard statistical test for "is this rate
+    meaningfully different from that rate":
 
         ``n = (z_{1-alpha/2} + z_{power})^2 * (p1(1-p1) + p2(1-p2)) / (p2-p1)^2``
 
-    where ``p1 = baseline_rate`` and ``p2 = baseline_rate +
-    minimum_detectable_effect``, with the two critical values taken from
-    :meth:`statistics.NormalDist.inv_cdf` at the ``1 - alpha/2`` and ``power``
-    quantiles -- the same ``NormalDist`` primitive the Wilson interval uses, at
-    planning-time quantiles. The result is rounded up, since a fractional sample
-    cannot be run.
+    where ``p1 = baseline_rate`` is the success rate you already have
+    (e.g. your current system), and ``p2 = baseline_rate +
+    minimum_detectable_effect`` is the success rate you're hoping to be
+    able to detect (e.g. a new system that's actually better by that
+    amount). The two ``z`` values are critical values from the normal
+    (bell-curve) distribution -- looked up with
+    :meth:`statistics.NormalDist.inv_cdf`, which answers "at what point on
+    the bell curve have we covered this fraction of the distribution?"
+    (that point is called a "quantile"). One lookup uses the ``1 -
+    alpha/2`` fraction, the other uses the ``power`` fraction -- the exact
+    same ``NormalDist`` building block :func:`agentic_evalkit.stats.wilson_interval`
+    uses, just applied here to plan an experiment in advance rather than
+    to summarize one that already happened. The formula's result is
+    rounded up to a whole number, since you can't actually run a
+    fractional sample.
 
     Args:
-        baseline_rate: The control-arm success probability ``p1``, strictly
-            between 0 and 1.
-        minimum_detectable_effect: The smallest absolute increase in rate worth
-            detecting; must be positive and small enough that ``baseline_rate +
-            minimum_detectable_effect`` stays below 1.
-        alpha: Two-sided significance level, strictly between 0 and 1
-            (default 0.05).
-        power: Desired power ``1 - beta``, strictly between 0 and 1
-            (default 0.8).
+        baseline_rate: The success probability of your existing/control
+            group (``p1`` in the formula above), strictly between 0 and 1.
+        minimum_detectable_effect: The smallest absolute improvement in
+            rate that you actually care about being able to detect -- e.g.
+            0.05 means "I want to be able to detect at least a
+            5-percentage-point improvement." Must be positive, and small
+            enough that ``baseline_rate + minimum_detectable_effect``
+            stays below 1.
+        alpha: The "significance level" -- the chance you're willing to
+            accept of concluding there's a real difference when actually
+            there isn't one (a "false positive"). Strictly between 0 and 1
+            (default 0.05, i.e. a 5% false-positive tolerance).
+        power: The desired "statistical power" -- the chance you actually
+            want of detecting the effect, given that it truly exists (i.e.
+            ``1 - beta``, where ``beta`` is the chance of missing a real
+            effect, a "false negative"). Strictly between 0 and 1 (default
+            0.8, i.e. an 80% chance of catching a real effect of this size
+            if it's really there).
 
     Returns:
-        The minimum number of samples per arm, an ``int >= 1``.
+        The minimum number of samples needed in each group, an ``int >= 1``.
 
     Raises:
-        ValueError: If any argument is outside its documented range, in the same
-            fail-fast style as :func:`agentic_evalkit.stats.wilson_interval`.
+        ValueError: If any argument is outside its documented range, in the
+            same fail-fast style as :func:`agentic_evalkit.stats.wilson_interval`.
     """
     if not 0.0 < baseline_rate < 1.0:
         raise ValueError(f"baseline_rate must satisfy 0 < baseline_rate < 1 (got {baseline_rate})")

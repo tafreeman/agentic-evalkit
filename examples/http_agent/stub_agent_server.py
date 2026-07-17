@@ -47,7 +47,7 @@ def _answer_for(question: str) -> str:
 class _StubAgentHandler(BaseHTTPRequestHandler):
     # Silence the default per-request stderr logging; this is a
     # demonstration fixture, not a production server.
-    def log_message(self, format: str, *args: Any) -> None:
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 -- overrides BaseHTTPRequestHandler's fixed signature
         del format, args
 
     def do_POST(self) -> None:

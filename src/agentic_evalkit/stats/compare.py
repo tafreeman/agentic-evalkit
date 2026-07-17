@@ -1,68 +1,96 @@
-"""Run compatibility checking and paired bootstrap comparison (design §10, ADR-0008, ADR-0015).
+"""Checking whether two runs are safe to compare, and comparing them with a
+paired bootstrap (design §10, ADR-0008, ADR-0015).
 
-Two runs are only comparable when their dataset revision, split, adapter,
-grader, target policy, target fingerprint, sampling policy, and recorded
-environment/code fingerprints are compatible; an incompatible comparison
-must fail with an explanation rather than silently producing a misleading
-delta (design §10). ``compare_runs`` checks every provenance field
-described in Task 12 Step 6 (dataset ID/revision/config/split, adapter,
-grader, target policy, target fingerprint, sampling temperature/seed
-policy, attempt count) plus the environment and code fingerprints
-:mod:`agentic_evalkit.provenance` computes (ADR-0015), and raises
-:class:`~agentic_evalkit.errors.IncompatibleRuns` listing every mismatch it
-finds, not just the first. A named target with an unpinned fingerprint
-(``None``) is never treated as equal to a pinned fingerprint on the other
-run: unknown provenance must not silently compare as equal to verified
-provenance.
+"Provenance" here means all the facts about exactly what was run and how:
+which dataset revision and split, which adapter, which grader, which
+target (system under test) and which exact build ("fingerprint") of it,
+what sampling settings were used, and so on. Two runs are only safe to
+compare if all of that matches -- otherwise you might be comparing, say, a
+harder dataset split against an easier one, and mistaking the difference
+in difficulty for a real improvement. So if any of that provenance
+doesn't line up, the comparison must fail loudly with an explanation,
+rather than silently reporting a difference ("delta") that's actually
+misleading (design §10).
 
-A caller who knowingly compares runs captured under different interpreters,
-platforms, or ``agentic-evalkit`` builds may pass
-``allow_cross_environment=True`` to waive *only* an
-``environment_fingerprint`` and/or ``code_fingerprint`` mismatch; the
-waived field name(s) are recorded on
+``compare_runs`` checks every provenance field listed in Task 12 Step 6
+(dataset ID/revision/config/split, adapter, grader, target policy, target
+fingerprint, sampling temperature/seed policy, attempt count), plus the
+environment and code fingerprints that :mod:`agentic_evalkit.provenance`
+computes (ADR-0015) -- a "fingerprint" here is just a hash or identifier
+that uniquely marks one exact version of something (e.g. one exact build
+of the code, or one exact version of the target system). If anything
+doesn't match, it raises :class:`~agentic_evalkit.errors.IncompatibleRuns`
+listing *every* mismatch it finds, not just the first one it happens to
+hit. A target identified by name but with no pinned/recorded fingerprint
+(``None``) is never treated as if it matches a pinned fingerprint on the
+other run -- "we don't know what exact version this was" must never
+silently pass as "these two match."
+
+A caller who knowingly compares runs captured under different Python
+interpreters, operating systems, or ``agentic-evalkit`` builds may pass
+``allow_cross_environment=True`` to waive *only* a mismatch in
+``environment_fingerprint`` and/or ``code_fingerprint`` -- and even then,
+which field(s) got waived is recorded on
 :attr:`ComparisonResult.waived_provenance_fields` rather than silently
-dropped (ADR-0015). No other provenance field is ever waivable through this
-flag.
+swept under the rug (ADR-0015). No other provenance field can ever be
+waived through this flag.
 
-For compatible runs, it pairs observations by ``(sample_id, attempt)`` so
-missing attempts on either side are simply excluded from the paired
-comparison rather than treated as a failure. Zero paired observations means
-there is nothing to estimate a delta from, so ``compare_runs`` raises
-:class:`~agentic_evalkit.errors.IncompatibleRuns` rather than returning a
-confident-looking zero delta. Otherwise it computes the observed paired
-success-rate delta and bootstraps a 95% interval for that delta using a
-local ``random.Random(seed)`` instance so the same seed always reproduces
-the same bootstrap draw sequence (ADR-0008: deterministic seeded
-bootstrap).
+Once two runs are confirmed compatible, this "pairs up" their individual
+results by matching ``(sample_id, attempt)`` -- i.e. it lines up each run's
+result for "question 5, attempt 2" with the other run's result for that
+same question and attempt, and compares only those matched pairs. If one
+side is missing an attempt the other has, that pair is simply left out of
+the comparison rather than counted as a failure. If there turn out to be
+*zero* matching pairs at all, there's nothing to compute a difference
+from, so ``compare_runs`` raises
+:class:`~agentic_evalkit.errors.IncompatibleRuns` rather than reporting a
+confident-looking "zero difference."
+
+Otherwise, it computes the observed difference in paired success rates
+(the "delta") and then estimates a 95% confidence interval around that
+delta using a technique called "bootstrapping": we repeatedly draw random
+samples, *with replacement*, from the paired results we already have, and
+recompute the delta each time. Doing this many times shows us how much the
+delta would plausibly wobble if we'd happened to run a slightly different
+-- but similarly sized -- set of paired comparisons, and that spread
+becomes our confidence interval. This uses a local ``random.Random(seed)``
+instance (not shared global randomness), so that using the same seed
+always reproduces the exact same sequence of random draws and therefore
+the exact same result (ADR-0008: the bootstrap is seeded and
+deterministic, i.e. reproducible).
 """
 
 from __future__ import annotations
 
 import random
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from agentic_evalkit.errors import IncompatibleRuns
 from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.models.grades import GradeStatus
-from agentic_evalkit.models.runs import EvalRunManifest
 
 if TYPE_CHECKING:
-    from agentic_evalkit.models.runs import EvalRunResult, SampleResult
+    from collections.abc import Callable
+
+    from agentic_evalkit.models.runs import EvalRunManifest, EvalRunResult, SampleResult
 
 __all__ = ["PROVENANCE_FIELDS_CHECKED", "ComparisonResult", "compare_runs"]
 
-#: The manifest provenance checks ``_describe_mismatches`` actually performs,
-#: as ``(declared field name, human label, value getter, waivable)`` rows.
-#: This table IS the enumeration the mismatch description iterates, so
-#: :data:`PROVENANCE_FIELDS_CHECKED` and
-#: :data:`_WAIVABLE_UNDER_CROSS_ENVIRONMENT` below are derived from the
-#: *checks themselves* -- not re-declared -- and the
-#: ``tests/contract/test_provenance_drift.py`` contracts comparing them
-#: against :meth:`EvalRunManifest.provenance_field_names` and against
-#: ADR-0015's ratified waiver set are falsifiable: a field declared as
-#: provenance but missing a row here (or vice versa), or a row marked
-#: waivable beyond what ADR-0015 authorizes, fails CI (R-004 P0).
+#: The manifest provenance checks that ``_describe_mismatches`` actually
+#: performs, one row per field, as ``(declared field name, human-readable
+#: label, function to read the value off a manifest, whether it's
+#: waivable)``.
+#:
+#: This table is the single source of truth: :data:`PROVENANCE_FIELDS_CHECKED`
+#: and :data:`_WAIVABLE_UNDER_CROSS_ENVIRONMENT` below are both computed
+#: from these rows, rather than being separately hand-maintained lists that
+#: could quietly drift out of sync with what the checks actually do. A test
+#: (``tests/contract/test_provenance_drift.py``) compares this table
+#: against :meth:`EvalRunManifest.provenance_field_names` and against the
+#: set of fields ADR-0015 actually approved as waivable -- so if a field
+#: gets added as provenance but someone forgets to add a row here (or the
+#: reverse), or a row here is marked waivable beyond what ADR-0015 allows,
+#: that test fails CI (tracked as R-004 P0).
 _PROVENANCE_CHECKS: tuple[tuple[str, str, Callable[[EvalRunManifest], object], bool], ...] = (
     ("adapter", "adapter", lambda m: m.adapter, False),
     ("grader", "grader", lambda m: m.grader, False),
@@ -89,13 +117,15 @@ _PROVENANCE_CHECKS: tuple[tuple[str, str, Callable[[EvalRunManifest], object], b
 #: Derived from :data:`_PROVENANCE_CHECKS` row names -- see the table's note.
 PROVENANCE_FIELDS_CHECKED: frozenset[str] = frozenset(name for name, _, _, _ in _PROVENANCE_CHECKS)
 
-#: The only provenance fields ``compare_runs(..., allow_cross_environment=True)``
-#: may waive on mismatch (ADR-0015): derived from the table's waivable column,
-#: so it is a subset of :data:`PROVENANCE_FIELDS_CHECKED` by construction.
-#: Declared field names, matching :data:`_PROVENANCE_CHECKS` rows -- never
-#: prose labels -- so :attr:`ComparisonResult.waived_provenance_fields` can
-#: echo them directly. ``tests/contract/test_provenance_drift.py`` pins this
-#: set to exactly the two fields ADR-0015 ratified.
+#: The only provenance fields that ``compare_runs(...,
+#: allow_cross_environment=True)`` is allowed to waive on a mismatch
+#: (ADR-0015). This is computed from the table's "waivable" column above,
+#: so it's automatically a subset of :data:`PROVENANCE_FIELDS_CHECKED`.
+#: These are the exact declared field names (matching
+#: :data:`_PROVENANCE_CHECKS` rows), never the human-readable labels, so
+#: that :attr:`ComparisonResult.waived_provenance_fields` can reuse them
+#: as-is. ``tests/contract/test_provenance_drift.py`` locks this set down
+#: to exactly the two fields ADR-0015 approved.
 _WAIVABLE_UNDER_CROSS_ENVIRONMENT: frozenset[str] = frozenset(
     name for name, _, _, waivable in _PROVENANCE_CHECKS if waivable
 )
@@ -108,61 +138,83 @@ _UPPER_PERCENTILE = 97.5
 
 
 class ComparisonResult(FrozenModel):
-    """The outcome of a paired bootstrap comparison between two compatible runs.
+    """The result of comparing two compatible runs: the observed difference
+    in their paired success rates, plus a bootstrap confidence interval
+    around it.
 
-    ``estimate`` is the observed paired success-rate delta
-    (``right_pass_rate - left_pass_rate`` over the paired subset).
-    ``lower_percentile``/``upper_percentile`` are the 2.5th/97.5th
-    percentiles of the bootstrap resample distribution of that delta.
+    ``estimate`` is the observed difference in success rate between the
+    two runs (``right_pass_rate - left_pass_rate``), computed only over
+    the paired subset of matching observations.
+    ``lower_percentile``/``upper_percentile`` are the 2.5th and 97.5th
+    percentiles of the bootstrap's resampled distribution of that
+    difference -- together they form the 95% confidence interval: the
+    range the true difference plausibly falls within, given the limited
+    data we have (see the module docstring above for what "bootstrap"
+    means here).
     """
 
     estimate: float
     lower_percentile: float
     upper_percentile: float
     paired_count: int
-    """Number of paired ``(sample_id, attempt)`` observations the delta and
-    bootstrap were computed over. With ``attempts > 1`` this can exceed
-    ``sample_count``, since each distinct sample may contribute up to one
+    """How many paired ``(sample_id, attempt)`` observations the difference
+    and the bootstrap were computed over. When ``attempts > 1`` (each
+    question attempted more than once), this can be larger than
+    ``sample_count``, since one distinct sample can contribute up to one
     paired observation per attempt."""
     sample_count: int
-    """Number of *distinct* ``sample_id`` values represented in
-    ``paired_count``, regardless of how many attempts each contributed.
-    Never multiplies with the attempt count the way ``paired_count`` does."""
+    """How many *distinct* ``sample_id`` values are represented in
+    ``paired_count``, regardless of how many attempts each one
+    contributed. Unlike ``paired_count``, this is never multiplied up by
+    the attempt count."""
     seed: int
     waived_provenance_fields: tuple[str, ...] = ()
-    """Declared provenance field names waived by
-    ``allow_cross_environment=True`` (e.g. ``("environment_fingerprint",)``),
-    in :data:`_PROVENANCE_CHECKS` order. Empty when nothing differed or the
-    flag was never set. Additive optional field under ``schema_version =
-    "1"`` (ADR-0002); see ADR-0015."""
+    """Which provenance field names, if any, were waived because the
+    caller passed ``allow_cross_environment=True`` (e.g.
+    ``("environment_fingerprint",)``), listed in :data:`_PROVENANCE_CHECKS`
+    order. Empty when nothing actually differed, or when the flag was
+    never set. This field is additive and optional, keeping the wire
+    format at ``schema_version = "1"`` (ADR-0002); see ADR-0015 for the
+    policy that allows waiving these two fields."""
 
 
 def _describe_mismatches(
     left: EvalRunResult, right: EvalRunResult, *, allow_cross_environment: bool = False
 ) -> tuple[list[str], list[str]]:
-    """Return (still-blocking mismatch descriptions, waived field names).
+    """Return a pair: (mismatch descriptions that still block the
+    comparison, names of fields that were waived instead).
 
-    Compares the *resolved* dataset identity (design §10: "dataset
+    This compares the *resolved* dataset identity -- i.e. the actual,
+    already-looked-up dataset each run drew from (design §10: "dataset
     revision, split, adapter, harness, grader, target policy, and sampling
-    policy") rather than the requested ``DatasetRef``, since the resolved
-    dataset is the actual immutable source each run drew from. ``adapter``
-    doubles as the harness/benchmark-binding identity per design §7, since
-    ``EvalRunManifest`` has no separate ``harness`` field. "Target policy"
-    covers both the declared ``target_fingerprint_policy`` and the actual
-    ``target_fingerprint`` each run recorded: two runs sharing a
-    ``target_name`` under the same policy can still have drawn from
-    provably different targets, so the fingerprints themselves must match
-    too. An unset (``None``) fingerprint on one side and a pinned
-    fingerprint on the other is a mismatch, not a pass-through -- unknown
-    provenance is never treated as equal to verified provenance.
+    policy") -- rather than the original request that asked for a dataset
+    (a ``DatasetRef``), since it's the resolved, actual dataset that's
+    immutable and comparable, not the request that produced it. ``adapter``
+    also stands in for what the design doc calls the "harness" (design
+    §7): there's no separate ``harness`` field on ``EvalRunManifest``, so
+    ``adapter`` is used for that identity too.
 
-    ``allow_cross_environment`` (ADR-0015) narrows which mismatches block
-    the comparison: a field in :data:`_WAIVABLE_UNDER_CROSS_ENVIRONMENT`
-    that differs is appended to the returned ``waived`` list -- by declared
-    field name, not prose label -- instead of ``mismatches`` when the flag
-    is set. Every other field, including both dataset identity and the
-    other eight :data:`_PROVENANCE_CHECKS` rows, always blocks regardless
-    of the flag.
+    "Target policy" covers two things together: the declared
+    ``target_fingerprint_policy`` (the *rule* for how the target's version
+    should be pinned down) and the actual ``target_fingerprint`` each run
+    recorded (the *specific version* that rule resolved to). Two runs can
+    share the same ``target_name`` and the same policy, and still have
+    provably run against different underlying targets -- so the
+    fingerprints themselves have to match too, not just the name and
+    policy. And if one run has no recorded fingerprint at all (``None``)
+    while the other has a specific one pinned down, that counts as a
+    mismatch, not something to silently let pass -- "we don't know what
+    version this was" must never be treated as equal to "we've verified
+    exactly what version this was."
+
+    ``allow_cross_environment`` (ADR-0015) narrows which mismatches are
+    allowed to block the comparison: when it's set, a field listed in
+    :data:`_WAIVABLE_UNDER_CROSS_ENVIRONMENT` that differs gets added to
+    the returned ``waived`` list instead of ``mismatches`` -- using its
+    declared field name, not the human-readable label. Every other field
+    -- both the dataset-identity checks above and the other eight rows in
+    :data:`_PROVENANCE_CHECKS` -- always blocks the comparison regardless
+    of this flag.
     """
     mismatches: list[str] = []
     waived: list[str] = []
@@ -185,9 +237,11 @@ def _describe_mismatches(
         mismatches.append(
             f"dataset split differs: {left_dataset.split!r} != {right_dataset.split!r}"
         )
-    # Manifest provenance is compared by iterating the checks table, so the
-    # set of checked fields is derived from the comparisons that actually run
-    # (see _PROVENANCE_CHECKS) -- the R-004 drift contract depends on this.
+    # The manifest-provenance fields are compared by looping over the
+    # checks table below, so the set of "fields we checked" is always
+    # derived from the comparisons that actually ran (see
+    # _PROVENANCE_CHECKS) -- the R-004 drift-detecting test depends on
+    # this being true.
     for name, label, get_value, waivable in _PROVENANCE_CHECKS:
         left_value, right_value = get_value(left_manifest), get_value(right_manifest)
         if left_value == right_value:
@@ -218,44 +272,52 @@ def compare_runs(
     seed: int,
     allow_cross_environment: bool = False,
 ) -> ComparisonResult:
-    """Compare two runs' paired success rates with a seeded bootstrap interval.
+    """Compare two runs' paired success rates, with a 95% confidence
+    interval built by seeded bootstrap resampling.
 
     Args:
         left: The baseline run.
         right: The candidate run being compared against ``left``.
-        bootstrap_samples: Number of bootstrap resamples to draw. Must be
-            in the inclusive range ``[100, 10000]``; defaults to 1000.
-        seed: Seed for a local ``random.Random`` instance so the same seed
-            always reproduces the same bootstrap draw sequence. Required
-            (keyword-only, no default) so a comparison is never silently
-            nondeterministic.
+        bootstrap_samples: Number of bootstrap resamples to draw (i.e. how
+            many times to redraw and recompute -- see the module
+            docstring for what this means). Must be in the inclusive
+            range ``[100, 10000]``; defaults to 1000.
+        seed: Seed for a local ``random.Random`` instance, so the same
+            seed always reproduces the exact same sequence of random
+            draws and therefore the exact same result. Required
+            (keyword-only, no default) precisely so that a comparison is
+            never silently different from one run of the code to the
+            next.
         allow_cross_environment: When ``True`` (ADR-0015), a mismatch on
             *only* ``environment_fingerprint`` and/or ``code_fingerprint``
-            is waived rather than raised, and the waived field name(s) are
-            recorded on the returned result's ``waived_provenance_fields``.
-            The other eight provenance fields are never waivable through
-            this flag. Defaults to ``False`` so comparisons are closed to
-            undisclosed cross-environment drift unless a caller explicitly
-            opts in.
+            is waived (allowed through) rather than raised as an error,
+            and whichever field(s) got waived are recorded on the
+            returned result's ``waived_provenance_fields``. The other
+            eight provenance fields can never be waived through this
+            flag. Defaults to ``False``, so comparisons reject any
+            undisclosed difference in environment or code build unless a
+            caller explicitly opts in to allowing it.
 
     Returns:
-        A :class:`ComparisonResult` with the observed paired delta
-        (``right`` pass rate minus ``left`` pass rate over the paired
-        subset), its bootstrap 2.5/97.5 percentiles, the paired
-        ``(sample_id, attempt)`` count and distinct sample count, the seed
-        used, and any fields waived under ``allow_cross_environment``.
+        A :class:`ComparisonResult` containing: the observed paired
+        difference in pass rate (``right``'s pass rate minus ``left``'s,
+        over the paired subset); its bootstrap-derived 2.5th/97.5th
+        percentile bounds (the 95% confidence interval); the paired
+        ``(sample_id, attempt)`` count and the distinct-sample count; the
+        seed that was used; and any fields waived under
+        ``allow_cross_environment``.
 
     Raises:
         ValueError: If ``bootstrap_samples`` is outside ``[100, 10000]``.
         IncompatibleRuns: If the two runs' resolved dataset identity,
             adapter, grader, target policy (including target fingerprint),
-            sampling policy, attempt count, or -- unless waived via
-            ``allow_cross_environment`` -- environment/code fingerprint
-            differ. Also raised if the two runs share zero paired
-            ``(sample_id, attempt)`` observations, since a delta computed
-            over nothing is not a comparison. The error message lists every
-            mismatched field, or names both run ids when the failure is
-            zero overlap.
+            sampling policy, or attempt count differ -- or if their
+            environment/code fingerprint differs and that wasn't waived
+            via ``allow_cross_environment``. Also raised if the two runs
+            share zero paired ``(sample_id, attempt)`` observations, since
+            you can't compute a meaningful difference from nothing to
+            compare. The error message lists every mismatched field, or
+            names both run IDs when the problem is zero overlap instead.
     """
     if not (_MIN_BOOTSTRAP_SAMPLES <= bootstrap_samples <= _MAX_BOOTSTRAP_SAMPLES):
         raise ValueError(
@@ -310,7 +372,16 @@ def compare_runs(
 
 
 def _percentile(sorted_values: list[float], percentile: float) -> float:
-    """Linear-interpolated percentile over an already-sorted, nonempty list."""
+    """Return the given percentile from an already-sorted, non-empty list,
+    using linear interpolation.
+
+    Unlike the "nearest rank" method used elsewhere in this codebase (see
+    :func:`agentic_evalkit.stats.aggregate._percentile`), which always
+    returns a value that was actually observed in the data, this version
+    can return a value in between two observed data points: it looks at
+    the two nearest sorted values and computes a proportional in-between
+    point for the exact percentile requested.
+    """
     if len(sorted_values) == 1:
         return sorted_values[0]
     rank = (percentile / 100.0) * (len(sorted_values) - 1)
@@ -325,25 +396,39 @@ def _percentile(sorted_values: list[float], percentile: float) -> float:
 def _bootstrap_percentiles(
     deltas: list[int], *, bootstrap_samples: int, seed: int
 ) -> tuple[float, float]:
-    """Bootstrap the 2.5/97.5 percentiles of the mean paired delta.
+    """Estimate the 2.5th/97.5th percentiles of the mean paired difference,
+    using bootstrap resampling.
 
-    Resamples ``deltas`` with replacement ``bootstrap_samples`` times using
-    a local ``random.Random(seed)`` instance (never the shared module-level
-    ``random`` state) so a comparison never has side effects on unrelated
-    code and is fully reproducible from its seed alone.
+    "Resampling with replacement" means: repeatedly build a new list the
+    same size as ``deltas`` by randomly picking values out of ``deltas``
+    (the same original value can be picked more than once, and some might
+    not get picked at all), and compute the mean of each such new list.
+    Doing this ``bootstrap_samples`` times gives us a whole distribution of
+    "what the mean might have been," which tells us how much it would
+    plausibly vary -- and the 2.5th/97.5th percentiles of that
+    distribution become our 95% confidence interval.
 
-    ``compare_runs`` never calls this with an empty ``deltas``: it raises
-    :class:`~agentic_evalkit.errors.IncompatibleRuns` before reaching here
-    when the two runs share zero paired observations, rather than let a
-    zero-observation "estimate" masquerade as a real result. The guard
-    below is defensive only -- it protects any other future caller from a
-    ``ZeroDivisionError`` in the resample-mean computation -- and must
-    never be read as this function's normal, expected return path.
+    This uses a local ``random.Random(seed)`` instance -- never the
+    shared, module-level ``random`` state -- so that running a comparison
+    never has side effects on unrelated code elsewhere, and the result is
+    fully reproducible from the seed alone (run it twice with the same
+    seed, get the exact same answer both times).
+
+    ``compare_runs`` never actually calls this function with an empty
+    ``deltas`` list: it raises
+    :class:`~agentic_evalkit.errors.IncompatibleRuns` earlier, before
+    reaching here, whenever the two runs share zero paired observations --
+    rather than let a meaningless "estimate from nothing" masquerade as a
+    real result. The empty-list guard below exists only as a defensive
+    fallback, in case some future caller invokes this function directly
+    and skips that check -- it avoids a ``ZeroDivisionError`` in the
+    resample-mean computation below, and should never be read as
+    something that normally happens in practice.
     """
     if not deltas:
         return (0.0, 0.0)
 
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 -- seeded so this gives the same result every run, not random
     n = len(deltas)
     resample_means: list[float] = []
     for _ in range(bootstrap_samples):

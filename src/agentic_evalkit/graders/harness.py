@@ -1,26 +1,46 @@
-"""Harness-backed grading: turn a HarnessResult into a GradeResult (ADR-0014).
+"""Turns the verdict from an external test harness into a GradeResult (ADR-0014).
 
-``HarnessGrader`` is the previously-missing bridge between the framework's
-grading boundary (``Grader.grade(sample, execution) -> GradeResult``) and an
-authoritative :class:`~agentic_evalkit.benchmarks.harness.HarnessExecutor`.
-Without it, an authoritative benchmark verdict (e.g. SWE-bench "resolved")
-had no path into a ``GradeResult`` at all.
+A "harness" here means an outside, official tool that actually runs code and
+tests to produce a real, authoritative pass/fail verdict -- as opposed to an
+AI's opinion about whether something looks correct. For example, SWE-bench
+(a benchmark built from real GitHub issues) has an official harness that
+applies the AI's proposed code patch, actually runs the project's test
+suite, and reports whether the issue was genuinely "resolved" or not.
 
-It follows ``ExactMatchGrader``'s injected-callable pattern: a benchmark-
-neutral ``predictor`` extracts the harness prediction from the executed
-sample, so this module owns grading policy only, not benchmark projection.
+Before ``HarnessGrader`` existed, there was no way to plug that kind of
+outside, authoritative verdict into this framework's grading boundary
+(every grader implements ``Grader.grade(sample, execution) -> GradeResult``
+-- see ``base.py``) and get a proper ``GradeResult`` back out of it. This
+class is that missing bridge, between the grading boundary and an
+authoritative :class:`~agentic_evalkit.benchmarks.harness.HarnessExecutor`
+(the object that actually knows how to talk to a specific harness).
 
-The outcome mapping is the load-bearing discipline (ADR-0005/0008): an
-authoritative ``resolved`` verdict is the ONLY thing that hard-gates, and an
-operational failure (capability unavailable, infrastructure error) can never
-become a task ``FAIL``:
+It follows the same pattern ``ExactMatchGrader`` uses: rather than
+importing benchmark-specific code directly, this module accepts an injected
+``predictor`` function from the caller that knows how to build the
+benchmark's expected input format (its "prediction") from what the AI
+produced. That keeps this module focused purely on grading policy -- how to
+turn a harness's verdict into a ``GradeResult`` -- without needing to know
+anything about any specific benchmark's format.
 
-- executor ``UNAVAILABLE`` -> ``GradeStatus.UNAVAILABLE``, ``hard_gate=False``
-- executor ``ERROR`` -> ``GradeStatus.ERROR``, ``hard_gate=False``
-- ``COMPLETED`` + ``resolved=True`` -> ``GradeStatus.PASS``, ``hard_gate=True``
-- ``COMPLETED`` + ``resolved=False`` -> ``GradeStatus.FAIL``, ``hard_gate=True``
-- an un-executed sample or a predictor failure -> ``UNAVAILABLE``/``ERROR``,
-  never a fabricated verdict.
+The mapping from the harness's outcome to a grading result below is one of
+the most important rules in this file (ADR-0005/0008): only a genuine,
+authoritative "resolved" verdict from the harness is allowed to hard-gate
+(force a failure that can't be averaged away by other good scores). An
+operational failure -- meaning the harness itself couldn't run, or hit an
+infrastructure problem, as opposed to the AI's actual work being judged
+wrong -- can never be turned into a task failure. Concretely:
+
+- harness reports ``UNAVAILABLE`` (it couldn't run at all) ->
+  ``GradeStatus.UNAVAILABLE``, ``hard_gate=False``
+- harness reports ``ERROR`` (it hit an infrastructure problem) ->
+  ``GradeStatus.ERROR``, ``hard_gate=False``
+- harness ``COMPLETED`` and found the issue ``resolved=True`` ->
+  ``GradeStatus.PASS``, ``hard_gate=True``
+- harness ``COMPLETED`` and found the issue ``resolved=False`` ->
+  ``GradeStatus.FAIL``, ``hard_gate=True``
+- the sample was never executed, or building the harness's expected input
+  failed -> ``UNAVAILABLE``/``ERROR``, never a made-up verdict.
 """
 
 from collections.abc import Callable
@@ -44,24 +64,35 @@ from agentic_evalkit.models import (
 
 __all__ = ["HarnessGrader", "HarnessPredictor"]
 
-#: Extracts the harness prediction payload from an executed sample. For
-#: SWE-bench, a thin closure over ``SweBenchVerifiedAdapter.export_prediction``.
+#: A function that builds the harness's expected input (its "prediction")
+#: from an executed sample. For SWE-bench specifically, this is a small
+#: wrapper function around ``SweBenchVerifiedAdapter.export_prediction``.
 HarnessPredictor = Callable[[EvalSample, NormalizedExecutionResult], dict[str, JsonValue]]
 
-#: Default authoritative-verification timeout (seconds). SWE-bench instances
-#: build an image and run a test suite; 30 minutes is a safe per-instance cap.
+#: The default timeout (in seconds) to wait for the harness to produce a
+#: real, authoritative verdict. SWE-bench's harness has to build a container
+#: image and then run a full test suite for each instance, so 30 minutes is
+#: a safe per-instance limit that gives it enough time to finish.
 _DEFAULT_TIMEOUT_SECONDS = 1800.0
 
 
 class HarnessGrader:
-    """Grades an executed sample by routing it through a ``HarnessExecutor``.
+    """Grades an executed sample by sending it to an external harness and trusting its verdict.
 
     Args:
-        executor: The authoritative-verification boundary to query.
-        predictor: Builds the harness prediction from ``(sample, execution)``.
-        benchmark: Benchmark identifier stamped on every ``HarnessRequest``.
-        name: Stable grader identifier reported on every ``GradeResult``.
-        timeout_seconds: Per-request authoritative-verification timeout.
+        executor: The object that actually knows how to talk to the
+            external, authoritative harness (build the request, wait for
+            the result).
+        predictor: The function that builds the harness's expected input
+            (its "prediction") from ``(sample, execution)`` -- see
+            ``HarnessPredictor`` above.
+        benchmark: The benchmark's name, attached to every
+            ``HarnessRequest`` so the harness knows which benchmark's rules
+            to apply.
+        name: A stable label for this grader, recorded on every
+            ``GradeResult`` so you can tell which grader produced it.
+        timeout_seconds: How long to wait for the harness to produce its
+            real, authoritative verdict before giving up.
     """
 
     def __init__(
@@ -91,23 +122,31 @@ class HarnessGrader:
                 evidence={"reason": "execution did not complete; nothing to verify"},
             )
         if execution.output is None:
-            # A None output carrying an ``output_ref`` artifact was SPILLED,
-            # not empty. That is a real, gradable output the harness grader
-            # cannot recover on its own, so surface an explicit ERROR rather
-            # than silently counting a valid large patch as "capability
-            # unavailable" (Codex review, P2). Genuinely-empty output stays
-            # UNAVAILABLE.
+            # A `None` output that still has an `output_ref` entry in
+            # `execution.artifacts` doesn't mean "there's no output" -- it
+            # means the real output was too large to keep inline and got
+            # "spilled": written out to separate storage, with only a
+            # reference left behind here. That's a real, gradable output
+            # (e.g. a large code patch) that this grader simply can't reach
+            # directly from here, so we report an explicit ERROR instead of
+            # silently treating a perfectly valid large answer as "nothing
+            # we're able to check" (a gap flagged in a code review by a tool
+            # named Codex, priority P2). A genuinely empty output (no patch
+            # was ever produced) still gets reported as UNAVAILABLE below.
             #
-            # The normal ``EvalRunner`` pipeline grades before it ever spills
-            # (ADR-0017), so this branch should never fire for an execution
-            # that came from ``EvalRunner.run`` -- grading always sees the
-            # inline output first, and spilling only happens afterwards, to
-            # the copy that gets persisted. This guard exists for callers
-            # that invoke ``grade()`` directly on an already-spilled,
-            # previously-persisted ``NormalizedExecutionResult`` outside that
-            # pipeline (for example, a re-grading tool reading a stored run
-            # back off disk): such a caller cannot get the inline patch back
-            # from here and must re-grade from the original execution instead.
+            # In the normal pipeline, ``EvalRunner`` always grades a sample
+            # using its full inline output *before* it ever spills that
+            # output to separate storage (ADR-0017) -- spilling only
+            # happens afterwards, to the copy that gets saved to disk. So
+            # this branch should never actually trigger for anything that
+            # went through ``EvalRunner.run`` normally. It exists to
+            # protect a different caller: something that calls ``grade()``
+            # directly on a ``NormalizedExecutionResult`` that was already
+            # spilled and loaded back from a previous, saved run (for
+            # example, a tool that re-grades old runs read off disk). That
+            # caller can't recover the original inline patch from here, and
+            # needs to re-grade using the original, unspilled execution
+            # data instead.
             if "output_ref" in execution.artifacts:
                 return self._result(
                     sample,
@@ -182,7 +221,10 @@ class HarnessGrader:
                 hard_gate=False,
                 evidence=evidence,
             )
-        # COMPLETED: a real, earned verdict -- the only branch that hard-gates.
+        # COMPLETED means the harness actually finished running and produced
+        # a genuine, earned verdict -- this is the only branch below that's
+        # allowed to hard-gate (force a failure that other good scores
+        # can't average away).
         if harness_result.resolved is None:
             evidence["reason"] = "harness completed without a resolution verdict"
             return self._result(

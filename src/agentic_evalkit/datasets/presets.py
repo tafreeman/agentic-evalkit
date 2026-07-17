@@ -1,15 +1,22 @@
-"""Verified built-in dataset presets (design §6.2, plan Task 7 Step 3).
+"""Built-in dataset presets, verified and ready to use (design §6.2, plan
+Task 7 Step 3).
 
-A ``DatasetPreset`` pins the exact provider, dataset ID, config, split,
-adapter, and grader a caller gets from a short preset name, plus a
-``readiness`` label distinguishing presets that are fully runnable today from
-presets that are discoverable/previewable/projectable but whose authoritative
-grading requires an optional capability (e.g. the ``swebench`` harness
-extra).
+A ``DatasetPreset`` bundles together everything needed to run a known
+benchmark under one short name: the exact provider, dataset ID, config,
+split, adapter, and grader a caller gets just by naming the preset. It also
+carries a ``readiness`` label that distinguishes presets that are fully
+usable today from presets where you can browse, preview, and reformat
+("project") the data out of the box, but where *authoritative* grading (the
+official, trustworthy scoring for that benchmark) needs an extra, optional
+piece of software installed (for example, the ``swebench`` preset needs the
+optional ``swebench`` harness package to grade results).
 
-``BUILTIN_PRESETS`` is built by :func:`_build_builtin_presets`, which raises
-``ValueError`` at *import time* if two presets ever share a name, so a
-duplicate preset name can never silently shadow another and reach a caller.
+``BUILTIN_PRESETS`` is built by calling :func:`_build_builtin_presets`,
+which raises ``ValueError`` immediately, at the moment this module is first
+imported, if it's ever given two presets with the same name. That way, a
+duplicate preset name breaks loudly the first time the module loads,
+instead of quietly letting one preset hide ("shadow") another and reach a
+caller unnoticed.
 """
 
 from __future__ import annotations
@@ -24,19 +31,32 @@ __all__ = ["BUILTIN_PRESETS", "DatasetPreset"]
 
 
 class DatasetPreset(FrozenModel):
-    """A named, pinned dataset/adapter/grader combination (design §6.2).
+    """One named preset that pins together an exact dataset, adapter, and
+    grader (design §6.2).
 
-    ``required_capabilities`` names optional-extra capabilities (e.g.
-    ``"swebench"``) that authoritative grading for this preset needs but
-    that discovery, preview, and projection do not; an empty tuple means no
-    optional capability is required for any readiness level this preset
-    reaches.
+    ``required_capabilities`` lists the names of optional, extra software
+    packages (for example, ``"swebench"``) that this preset's
+    *authoritative* grading needs -- but that browsing, previewing, or
+    reformatting ("projecting") the data do not need. An empty tuple means
+    no optional package is required for anything this preset can currently
+    do.
 
-    ``contamination`` is the preset's best-effort C9 provenance label
-    (ADR-0013): informative, never enforcing. Both built-in presets are
-    long-public, widely mirrored datasets and are honestly labeled
-    ``SUSPECT`` -- a score on either must not back a capability claim
-    without a train/test-overlap or decontamination check first.
+    ``contamination`` is this preset's best-effort label describing its
+    "data contamination" risk -- this is the C9 provenance label from
+    ADR-0013. Data contamination is the concern that a public benchmark's
+    test questions (and often their answers) may have leaked into a model's
+    training data, simply because the benchmark has been public and copied
+    ("mirrored") in many places online for a long time; if that has
+    happened, a model could score well by having memorized the answers
+    rather than by actually being capable of solving the task. This label
+    is informative only -- it does not block or gate anything by itself.
+    Both built-in presets here are long-public, widely mirrored datasets, so
+    they are honestly labeled ``SUSPECT``: before treating a score on
+    either of them as evidence of real capability, someone must first check
+    for train/test overlap (whether test examples show up in the model's
+    training data) or run a decontamination pass (a process that filters
+    out compromised examples) -- this label alone is not enough
+    justification on its own.
     """
 
     name: str
@@ -50,14 +70,17 @@ class DatasetPreset(FrozenModel):
 
 
 def _build_builtin_presets(*presets: DatasetPreset) -> MappingProxyType[str, DatasetPreset]:
-    """Freeze ``presets`` into an immutable, name-keyed mapping.
+    """Turn ``presets`` into a locked-down (immutable) mapping, keyed by
+    name.
 
     Raises:
-        ValueError: Two presets share the same ``name``. Raised eagerly at
-            import time (this function is called once, at module scope)
-            rather than deferred to lookup time, so a duplicate preset name
-            fails the very first import of this module instead of silently
-            shadowing an earlier preset.
+        ValueError: Two of the given presets share the same ``name``. This
+            check happens right away -- this function only ever runs once,
+            at the moment this module is first imported -- rather than
+            being delayed until someone actually looks a preset up by name.
+            That way, a duplicate preset name causes the very first import
+            of this module to fail loudly, instead of quietly letting one
+            preset hide an earlier one with the same name.
     """
     by_name: dict[str, DatasetPreset] = {}
     for preset in presets:

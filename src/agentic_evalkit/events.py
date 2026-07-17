@@ -1,13 +1,18 @@
-"""Frozen progress events emitted by :class:`agentic_evalkit.runner.EvalRunner`.
+"""The progress events :class:`agentic_evalkit.runner.EvalRunner` emits while a run is in progress.
 
-Each event names the run (and, where applicable, the sample) it belongs to
-and carries a timestamp, so a caller-supplied event sink can build a live
-progress view, structured log, or audit trail without polling run state.
-Events are wire-safe: every field is a plain identifier, enum value, count,
-or timestamp. No event carries raw target/harness secrets, request headers,
-or unredacted output payloads -- large or sensitive data is stored through
-:class:`agentic_evalkit.artifacts.ArtifactStore` and referenced by digest
-instead (plan Task 11, Step 4).
+Every event identifies which run (and, when relevant, which sample) it
+belongs to, and carries a timestamp. This lets whatever is watching the run
+-- a live progress bar, a structured log, an audit trail -- follow along as
+it happens, instead of having to repeatedly ask "are we done yet?" by
+checking run state.
+
+Events are safe to send anywhere -- print them, log them, ship them over a
+network -- because every field is a simple identifier, enum value, count, or
+timestamp. No event ever carries a raw secret, an HTTP request header, or an
+unredacted copy of a sample's output. If an output is large or might contain
+sensitive data, it's stored separately in
+:class:`agentic_evalkit.artifacts.ArtifactStore`, and the event only carries
+a reference (a digest) pointing at it (plan Task 11, Step 4).
 """
 
 from __future__ import annotations
@@ -84,11 +89,13 @@ class RunCompleted(FrozenModel):
 
 
 class RunFailed(FrozenModel):
-    """Emitted once, when the run stops due to an infrastructure-level failure.
+    """Emitted once, when the whole run has to stop because of a failure in our own infrastructure.
 
-    This is distinct from a sample-level ``error`` execution status: it marks
-    that the run itself could not continue (e.g. dataset resolution failed,
-    or the caller cancelled the run before it finished).
+    This is different from a single sample getting an ``error`` execution
+    status. This event means the *entire run* couldn't continue at all --
+    for example, the dataset failed to load, or someone cancelled the run
+    before it finished -- as opposed to the AI system under test failing on
+    one particular sample while the rest of the run keeps going.
     """
 
     run_id: str
@@ -109,12 +116,17 @@ RunEvent = (
     | RunFailed
 )
 
-#: Enumerable, reflection-friendly counterpart to the :data:`RunEvent` union:
-#: every concrete event type the runner may emit, in emission order. The
-#: redaction-enumeration contract asserts this tuple equals the union's
-#: members exactly, so adding an event type to one but not the other fails CI
-#: -- that binding is what makes structural contracts over events (e.g.
-#: "every field is wire-safe") impossible to bypass (Story 2.2).
+#: The same set of event types as the :data:`RunEvent` union above, but as a
+#: plain tuple instead of a type union -- listed in the order the runner
+#: emits them. A type union is great for static type-checking, but you can't
+#: loop over it at runtime to check something about "every event type"; this
+#: tuple exists so test code can do exactly that. A test (part of what we
+#: call the redaction-enumeration contract) checks that this tuple always
+#: contains exactly the same event types as the ``RunEvent`` union above --
+#: so if someone adds a new event type to one but forgets the other, that
+#: test fails in CI. That's what guarantees automated checks like "every
+#: event field is safe to log or send over the wire" can never silently skip
+#: a newly added event type (Story 2.2).
 ALL_EVENT_TYPES: tuple[type[FrozenModel], ...] = (
     RunStarted,
     DatasetResolved,

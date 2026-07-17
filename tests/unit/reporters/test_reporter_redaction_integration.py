@@ -1,8 +1,10 @@
-"""Integration tests proving redaction happens before any reporter renders.
+"""Integration tests proving redaction happens before any reporter runs.
 
-Per design §12, redaction is applied once, immutably, before a run reaches
-any reporter — every format (JSON, JSONL, Markdown, HTML) must observe the
-same redacted evidence, never the original.
+Per the design doc (§12), a run is redacted (secrets scrubbed out) exactly
+once, producing a new copy rather than editing the run in place, before it
+reaches any reporter. Every output format (JSON, JSONL, Markdown, HTML) must
+see and write out that same already-redacted copy -- never the original,
+unredacted evidence.
 """
 
 import json

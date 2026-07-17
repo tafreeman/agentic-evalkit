@@ -1,3 +1,10 @@
+"""Fixture script: a well-behaved target that just echoes back whatever
+input it was given, unchanged, as its output. Used as the simple "happy
+path" baseline in tests -- for example, to check that a valid response
+gets parsed correctly, or that the target's fingerprint (an ID for its
+exact configuration) stays the same across calls.
+"""
+
 import json
 import sys
 

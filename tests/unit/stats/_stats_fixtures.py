@@ -1,17 +1,24 @@
-"""Shared fixtures for stats tests (aggregate + compare).
+"""Shared building blocks for the ``test_aggregate.py`` and ``test_compare.py`` tests.
 
-``test_aggregate.py`` and ``test_compare.py`` both build the same per-sample
-building blocks -- an :class:`~agentic_evalkit.models.EvalSample`, a
-:class:`~agentic_evalkit.models.NormalizedExecutionResult`, and a
-:class:`~agentic_evalkit.models.GradeResult` -- from the same field set
-(``sample_id``, ``input``, ``reference='42'``, ``source_digest``,
-``adapter='gsm8k@1'`` for the sample; ``sample_id``/``attempt``/``status``/
-``started_at``/``finished_at`` for the execution; ``sample_id``/``grader``/
-``status``/``score``/``hard_gate``/``created_at`` for the grade). Each test
-file's ``_run()`` (or manifest-equivalent) stays file-local because they
-genuinely differ: ``test_aggregate.py`` needs one simple, fixed-provenance
-run, while ``test_compare.py`` parameterizes every provenance field to test
-compatibility mismatches.
+Both test files need to build the same three per-sample objects for every
+test case: an :class:`~agentic_evalkit.models.EvalSample` (the question
+being asked), a :class:`~agentic_evalkit.models.NormalizedExecutionResult`
+(what happened when the system under test tried to answer it), and a
+:class:`~agentic_evalkit.models.GradeResult` (whether that answer was
+judged correct). Rather than have each test file construct these three
+objects from scratch with every required field spelled out, the three
+helper functions below (``_sample``, ``_execution``, ``_grade``) do that
+once, here, so both test files only need to fill in the handful of fields
+each specific test actually cares about.
+
+Each test file still keeps its own ``_run()`` helper (the function that
+assembles a full run out of these samples) rather than sharing one,
+because the two files genuinely need different things from it:
+``test_aggregate.py`` just needs one simple run with fixed values
+everywhere, while ``test_compare.py`` needs to independently vary every
+single "provenance" field -- every fact about exactly what was run and how
+(see ``compare.py``'s module docstring for the full explanation of that
+term) -- so it can test that a mismatch in each one gets caught.
 """
 
 from datetime import UTC, datetime

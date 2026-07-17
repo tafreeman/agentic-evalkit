@@ -1,11 +1,14 @@
-"""Shared fixtures for reporter tests.
+"""Shared test fixtures for the reporter tests.
 
-All reporter tests (JSON, JSONL, Markdown, HTML) exercise the same frozen
-three-sample :class:`~agentic_evalkit.models.EvalRunResult` so that every
-reporter is proven against one identical, provenance-carrying run.
-``repeated_attempts_run`` adds a second, repeated-attempt run so the
-Markdown/HTML aggregates rendering is also proven against the
-cluster-robust (``attempts > 1``) regime (ADR-0016).
+Every reporter test (JSON, JSONL, Markdown, HTML) runs against the same
+fixed, three-sample example run (an
+:class:`~agentic_evalkit.models.EvalRunResult`) so that all the reporters
+are proven against identical input, including the same "provenance" data
+(facts about where the run's data came from). ``repeated_attempts_run``
+adds a second example run where each sample was attempted more than once,
+so the Markdown/HTML rendering of aggregate statistics is also tested
+against the "cluster-robust" calculation used when samples have more than
+one attempt (``attempts > 1``) (ADR-0016).
 """
 
 from datetime import UTC, datetime
@@ -78,10 +81,11 @@ def _grade(
 
 @pytest.fixture
 def pass_error_timeout_and_provenance_run() -> EvalRunResult:
-    """A frozen three-sample run: one pass, one error, one timeout.
+    """A fixed three-sample run: one sample passes, one errors, one times out.
 
-    ``resolved_dataset.revision`` is pinned to ``"abc"`` so every reporter
-    test can assert on a stable, known provenance value.
+    ``resolved_dataset.revision`` is always set to ``"abc"`` here, so every
+    reporter test can check against one stable, known value for exactly
+    which version of the dataset was used.
     """
     passed = SampleResult(
         sample=_sample("gsm8k:main:test:0"),
@@ -137,14 +141,16 @@ def pass_error_timeout_and_provenance_run() -> EvalRunResult:
 
 @pytest.fixture
 def repeated_attempts_run() -> EvalRunResult:
-    """A two-sample_id, ``attempts=2`` run whose aggregates are cluster-robust.
+    """A run with two distinct sample IDs, each attempted twice, whose summary
+    statistics use the "cluster-robust" calculation.
 
-    Sample ``gsm8k:main:test:0`` passes both attempts (pass proportion 1.0)
-    and ``gsm8k:main:test:1`` passes one of two (0.5), so
-    ``build_report_aggregates`` produces a ``cluster_robust``-labeled
-    ``pass_rate`` with defined bounds and a populated ``score_estimate`` --
-    the repeated-attempt rendering path the single-attempt fixture above can
-    never reach (ADR-0016).
+    Sample ``gsm8k:main:test:0`` passes both of its two attempts (100% of the
+    time) and ``gsm8k:main:test:1`` passes only one of its two attempts (50%
+    of the time). Because samples here have more than one attempt each,
+    ``build_report_aggregates`` labels the resulting ``pass_rate`` as
+    ``cluster_robust`` and also fills in a ``score_estimate`` -- exercising a
+    rendering path the single-attempt fixture above can never reach
+    (ADR-0016).
     """
 
     def _attempt(sample_id: str, attempt: int, status: GradeStatus) -> SampleResult:

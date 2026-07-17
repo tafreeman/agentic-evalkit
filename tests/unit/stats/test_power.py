@@ -1,10 +1,17 @@
-"""Tests for the two-proportion sample-size / power helper (ADR-0016).
+"""Tests for ``required_sample_size``: the "how many samples do I need"
+helper for comparing two pass rates (ADR-0016).
 
-``required_sample_size`` is a pure, stdlib-only closed form. Every expected
-value here is recomputed inline from ``statistics.NormalDist`` at the same
-quantiles the implementation uses -- never a hardcoded decimal an LLM
-precomputed -- mirroring the live-NormalDist cross-check style of
-``test_wilson_interval_uses_normaldist_975_quantile``.
+``required_sample_size`` computes its answer using a standard, exact
+formula (a "closed form" -- see its own docstring in power.py) built only
+from Python's standard library, with no external statistics packages.
+Every expected value in these tests is recomputed right here, inline, from
+``statistics.NormalDist`` at the same points on the bell curve
+("quantiles") that the real implementation uses -- never a plain decimal
+number that was pre-computed once and pasted in, which could just as
+easily be wrong. This follows the same "recompute it live, do not trust a
+hardcoded number" approach already used for
+``test_wilson_interval_uses_normaldist_975_quantile`` in
+``test_aggregate.py``.
 """
 
 from __future__ import annotations
@@ -44,7 +51,9 @@ def test_required_sample_size_returns_positive_int() -> None:
 
 
 def test_required_sample_size_grows_as_effect_shrinks() -> None:
-    # A smaller minimum detectable effect requires a larger sample.
+    # Asking to reliably detect a smaller improvement (a smaller "minimum
+    # detectable effect") requires more samples than asking to detect a
+    # bigger, more obvious one.
     smaller_effect = required_sample_size(baseline_rate=0.5, minimum_detectable_effect=0.05)
     larger_effect = required_sample_size(baseline_rate=0.5, minimum_detectable_effect=0.1)
     assert smaller_effect > larger_effect
@@ -70,7 +79,10 @@ def test_required_sample_size_rejects_out_of_range_baseline(baseline: float) -> 
 
 @pytest.mark.parametrize("mde", [0.0, -0.1, 0.6])
 def test_required_sample_size_rejects_invalid_minimum_detectable_effect(mde: float) -> None:
-    # 0.0/-0.1 are non-positive; 0.6 pushes baseline+mde = 1.1 out of range.
+    # 0.0 and -0.1 are rejected for being zero or negative (you cannot
+    # target an "improvement" of zero or less); 0.6 is rejected because
+    # baseline_rate (0.5) + mde (0.6) = 1.1, which is above the maximum
+    # possible rate of 1.0.
     with pytest.raises(ValueError, match="minimum_detectable_effect"):
         required_sample_size(baseline_rate=0.5, minimum_detectable_effect=mde)
 

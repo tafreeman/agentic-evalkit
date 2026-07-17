@@ -1,32 +1,39 @@
-"""End-to-end CLI proof that ``run``/``report`` carry real statistics and
-provenance instead of leaving them ``null``/absent (items T2-A(b) and (d)).
+"""End-to-end CLI test proving that ``run`` and ``report`` actually fill in
+real statistics and provenance information (proof of exactly what ran),
+instead of leaving those fields empty (``null``) or missing entirely
+(tracked as items T2-A(b) and (d)).
 
-Before this module's coverage existed:
+Before the code this test file covers was written:
 
-- ``run``'s canonical JSON report never carried an ``"aggregates"`` key at
-  all -- ``agentic_evalkit.stats.aggregate_run``/``pass_at_k`` existed and
-  were unit-tested, but nothing in the CLI ever called them, even though
-  every reporter (``agentic_evalkit.reporters.base.Reporter.write``) already
-  accepted an ``aggregates`` parameter for exactly this purpose.
-- ``EvalRunManifest.environment_fingerprint``/``code_fingerprint``/
-  ``target_fingerprint`` were declared, versioned wire fields with their own
-  pure computation helpers (``agentic_evalkit.provenance``), but no
-  production code path ever called those helpers -- every real run's
-  manifest carried ``None`` in all three, contradicting the README's
-  reproducibility claims.
+- The JSON report that ``run`` writes never had an ``"aggregates"`` section
+  at all. The code that computes those aggregate statistics
+  (``agentic_evalkit.stats.aggregate_run``/``pass_at_k``) already existed and
+  had its own unit tests, but nothing in the CLI actually called it -- even
+  though the reporter that writes the file
+  (``agentic_evalkit.reporters.base.Reporter.write``) already had a spot (an
+  ``aggregates`` parameter) ready and waiting to receive that data.
+- ``EvalRunManifest`` has three fields --
+  ``environment_fingerprint``/``code_fingerprint``/``target_fingerprint`` --
+  meant to record proof of exactly what code, environment, and target were
+  used for a run (see ``agentic_evalkit.provenance`` for how each one gets
+  computed). Those fields existed in the schema, and the functions to
+  compute their values existed too, but no real code path ever called those
+  functions. So every real run's saved manifest just had ``None`` in all
+  three fields, which contradicted what the project's README promised about
+  being able to reproduce a run.
 
-Deliberately its own module (not an addition to ``test_cli.py``), matching
-this suite's "each offline/wiring-focused module is self-sufficient"
-convention -- it duplicates the local-provider manifest-building helper
-rather than importing it from ``test_cli.py``.
+This lives in its own file rather than being added to ``test_cli.py``,
+matching this test suite's convention that each file focused on proving
+"the wiring between two pieces actually works" is self-contained -- so the
+helper that builds a manifest using a local dataset provider is copied here
+rather than imported from ``test_cli.py``.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pytest
 from typer.testing import CliRunner
 
 from agentic_evalkit.cli import app
@@ -48,6 +55,11 @@ from agentic_evalkit.provenance import (
     compute_environment_fingerprint,
     compute_target_fingerprint,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 runner = CliRunner()
 
@@ -99,7 +111,8 @@ def _run_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, attempts: int =
     return report_files[0]
 
 
-# --- (b) aggregates wired into the canonical report and `report` command ----
+# --- (b) aggregate stats now show up in the canonical report and the --------
+# --- `report` command --------------------------------------------------------
 
 
 def test_run_writes_canonical_report_with_aggregates_key(
@@ -114,7 +127,9 @@ def test_run_writes_canonical_report_with_aggregates_key(
     assert aggregates["passed"] == envelope["summary"]["passed"]
     assert "pass_rate" in aggregates
     assert aggregates["pass_rate"]["denominator"] == envelope["summary"]["total"]
-    # A single-attempt run has no repeated-attempt pass@k to report.
+    # "pass@k" measures the chance that at least one of k repeated attempts
+    # at the same question succeeds. This run only makes one attempt per
+    # question (not repeated attempts), so there's nothing to compute here.
     assert "pass_at_k" not in aggregates
 
 
@@ -149,10 +164,13 @@ def test_report_command_regenerates_markdown_with_aggregates_section(
 def test_report_command_regenerates_from_a_pre_aggregates_run_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``report`` recomputes aggregates from the reconstructed run rather than
-    only echoing a pre-existing ``"aggregates"`` key -- proven here by
-    stripping that key from an already-written canonical JSON file (as an
-    older tool, or a hand-edited file, would lack it) before regenerating."""
+    """Checks that ``report`` actually recalculates aggregate stats from the
+    run data, instead of just copying forward whatever ``"aggregates"``
+    value already happened to be sitting in the file. This is proven here by
+    deleting the ``"aggregates"`` key from an already-written report file
+    (simulating a file written by an older version of this tool, or edited
+    by hand, that wouldn't have this key) and then checking that ``report``
+    fills it back in correctly anyway."""
     report_path = _run_cli(tmp_path, monkeypatch)
     envelope = json.loads(report_path.read_text(encoding="utf-8"))
     assert "aggregates" in envelope  # sanity: run really did write one
@@ -165,16 +183,21 @@ def test_report_command_regenerates_from_a_pre_aggregates_run_file(
     assert "## Aggregates" in content
 
 
-# --- (d) provenance fingerprints wired into the run manifest -----------------
+# --- (d) provenance fingerprints (proof of what code/env/target ran) now ----
+# --- get saved onto the run manifest -----------------------------------------
 
 
 def test_run_persists_environment_and_code_fingerprints_matching_pure_recomputation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Exact equality against independently, freshly recomputed values from
-    the same pure functions (not a hardcoded digest literal) -- these
-    fingerprints are deterministic per interpreter/package install, so a
-    fresh call in the test process must match what the CLI persisted."""
+    """Checks the saved fingerprint values by comparing them against a fresh,
+    independent computation -- not against some fixed expected string typed
+    into the test. This works because these fingerprint functions are "pure"
+    (calling one twice with the same inputs always gives the same output,
+    with no randomness or hidden state involved) and give the same result
+    every time for a given Python interpreter and set of installed packages.
+    So calling the same functions again right here, in the test itself, must
+    produce the exact same value that the CLI saved earlier."""
     report_path = _run_cli(tmp_path, monkeypatch)
     envelope = json.loads(report_path.read_text(encoding="utf-8"))
     manifest_payload = envelope["manifest"]
@@ -202,8 +225,9 @@ def test_run_persists_target_fingerprint_matching_the_resolved_target_config(
 def test_run_fingerprints_are_non_none_and_never_the_pre_wiring_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Before T2-A(d), every real run's manifest carried ``None`` in all
-    three fingerprint fields; this pins that regression directly."""
+    """Before the fix tracked as T2-A(d), every real run's saved manifest had
+    ``None`` in all three fingerprint fields. This test locks in that fix by
+    directly checking those fields are no longer empty."""
     report_path = _run_cli(tmp_path, monkeypatch)
     manifest_payload = json.loads(report_path.read_text(encoding="utf-8"))["manifest"]
 
@@ -213,7 +237,10 @@ def test_run_fingerprints_are_non_none_and_never_the_pre_wiring_default(
         assert manifest_payload[field_name] != ""
 
 
-# --- contamination label propagates into the run report (ADR-0013) ----------
+# --- dataset "contamination" label carries through into the run report -----
+# --- (ADR-0013). "Contamination" here means: the model being tested may -----
+# --- have already seen this benchmark's questions/answers during its own ---
+# --- training, which would make a high score on it untrustworthy. -----------
 
 
 def _write_local_manifest_with_contamination(tmp_path: Path) -> Path:
@@ -242,9 +269,10 @@ def _write_local_manifest_with_contamination(tmp_path: Path) -> Path:
 def test_run_stamps_manifest_contamination_onto_the_report_resolved_dataset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Codex-review gap: a SUSPECT label on the manifest must reach the
-    report's ``resolved_dataset`` so the score carries the prompt, not stay
-    stranded on the preset."""
+    """Regression test for a gap a Codex code review caught: if the manifest
+    marks this dataset as a contamination SUSPECT, that label must actually
+    reach the report's ``resolved_dataset`` field -- not just stay on the
+    input preset config and never appear next to the actual score."""
     monkeypatch.setattr(cli_runs, "build_catalog", lambda *, offline: _local_catalog(tmp_path))
     manifest_path = _write_local_manifest_with_contamination(tmp_path)
     output_dir = tmp_path / "results"
@@ -260,16 +288,19 @@ def test_run_stamps_manifest_contamination_onto_the_report_resolved_dataset(
 def test_run_without_manifest_contamination_leaves_resolved_dataset_unlabeled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No manifest label -> no fabricated label on the report (the stamp only
-    fills a genuine gap; it never invents a status)."""
+    """If the manifest has no contamination label at all, the report must
+    not invent one either -- this fix only carries forward a label that's
+    actually there; it never makes one up."""
     report_path = _run_cli(tmp_path, monkeypatch)
     envelope = json.loads(report_path.read_text(encoding="utf-8"))
     assert envelope["resolved_dataset"]["contamination"] is None
 
 
 def test_preset_generated_manifest_carries_the_preset_contamination_label() -> None:
-    """``init --preset`` must not drop the label between the preset and the
-    manifest it writes -- the first link in the propagation chain."""
+    """Checks the first step in the chain: when ``init --preset`` builds a
+    manifest from a preset that already has a contamination label, that
+    label must make it into the generated manifest, not get dropped along
+    the way."""
     document = cli_runs._manifest_document_for_preset(BUILTIN_PRESETS["gsm8k"])
     assert document.manifest.contamination is not None
     assert document.manifest.contamination.status is ContaminationStatus.SUSPECT

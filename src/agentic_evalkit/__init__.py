@@ -1,14 +1,15 @@
 """agentic-evalkit: reproducible, evidence-first grading for agentic systems.
 
-Curated top-level re-exports: the smallest set of objects a Python
-integration needs to wrap a system under test (``CallableTarget`` /
-``ExecutionTarget``) and describe a run (``DatasetRef`` /
-``EvalRunManifest``) before handing it to ``EvalRunner``. Everything else
--- additional targets, graders, reporters, dataset providers, benchmark
-adapters, statistics -- stays one import away under its own subpackage
+This top-level module re-exports only a small, hand-picked set of names --
+the minimum you need to wrap an AI system you want to test (``CallableTarget``
+/ ``ExecutionTarget``), describe what a run should do (``DatasetRef`` /
+``EvalRunManifest``), and hand it off to ``EvalRunner`` to actually execute
+it. Everything else this package offers -- other kinds of targets, graders,
+report renderers, dataset providers, benchmark adapters, statistics helpers
+-- is still just one import away, but lives in its own subpackage instead
 (for example ``agentic_evalkit.graders``, ``agentic_evalkit.reporters``),
-each with its own curated ``__all__``. See README.md's "Python API"
-section for a short example.
+each with its own curated list of exported names. See the "Python API"
+section of README.md for a short usage example.
 """
 
 from importlib.metadata import version

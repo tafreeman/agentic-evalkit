@@ -1,4 +1,11 @@
-"""Objective, composite, rubric, judge, and grounded-citation graders."""
+"""This package's graders: the checks that decide whether an AI's answer passes.
+
+Includes deterministic ("objective") checks like exact-match, a rubric
+system for scoring named criteria, AI-judge-based grading, a "composite"
+grader that combines several of these into one verdict, and the
+grounded-citation grader that checks an answer's citations are real and
+faithful to their source.
+"""
 
 from agentic_evalkit.graders.base import Grader
 from agentic_evalkit.graders.composite import CompositeGrader, SchemaGrader, WeightedGrader

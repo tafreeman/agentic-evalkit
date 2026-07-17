@@ -1,29 +1,41 @@
-"""Self-contained HTML reporter (design §11.3, plan Task 13).
+"""Self-contained HTML reporter (design doc section 11.3, plan Task 13).
 
-Renders one HTML file with embedded CSS, embedded JSON, and embedded
-JavaScript for outcome filtering. The file loads no remote scripts, fonts,
-analytics, or stylesheets, and degrades to a readable static summary when
-JavaScript is disabled (``<noscript>``).
+Renders the entire report as a single HTML file with the CSS, the run data
+(as JSON), and the JavaScript that powers outcome filtering all embedded
+directly in the page. The file never reaches out to the internet for
+scripts, fonts, analytics, or stylesheets, so it works the same whether
+opened online or offline. If JavaScript is turned off in the browser, the
+page still shows a readable static summary via a ``<noscript>`` block (the
+standard HTML tag for "show this instead if JavaScript is disabled").
 
-Jinja2 autoescaping is on for the packaged ``report.html.j2`` template, so
-any sample output containing HTML-significant characters (for example
-``<script>``) is escaped in the rendered page rather than executed.
+The HTML is built with the Jinja2 templating library, and its autoescaping
+feature is turned on for the packaged ``report.html.j2`` template. That
+means if a sample's output happens to contain text that looks like HTML
+(for example, a literal ``<script>`` tag), Jinja2 converts the special
+characters so the browser displays them as plain text instead of running
+them as code -- otherwise a tested system's output could accidentally (or
+deliberately) execute as a script when someone opens the report.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from jinja2 import Environment, PackageLoader, select_autoescape
-from pydantic import JsonValue
 
-from agentic_evalkit.models import EvalRunResult, SampleResult
 from agentic_evalkit.reporters.json import (
     _atomic_write_text,
     _default_generated_at,
     build_envelope,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pydantic import JsonValue
+
+    from agentic_evalkit.models import EvalRunResult, SampleResult
 
 _TEMPLATE_NAME = "report.html.j2"
 
@@ -64,8 +76,12 @@ def _embedded_run_json(
     generated_at: str,
 ) -> str:
     envelope = build_envelope(run, aggregates=aggregates, generated_at=generated_at)
-    # Escape "</" so the embedded JSON can never terminate the surrounding
-    # <script> element early, without altering the JSON's semantic content.
+    # If any string value in the JSON contains "</" (for example, part of a
+    # "</script>" tag that shows up inside a sample's output), a browser
+    # reading the raw HTML would see it as the end of this <script> block
+    # and cut the page off early. Escaping it to "<\/" prevents that, and is
+    # safe: once JavaScript parses this text, "\/" reads back as an ordinary
+    # "/", so the actual data is unchanged.
     raw = json.dumps(envelope, sort_keys=True, ensure_ascii=False)
     return raw.replace("</", "<\\/")
 

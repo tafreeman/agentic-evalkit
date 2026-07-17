@@ -1,25 +1,37 @@
 """Grounded-citation benchmark adapter (ADR-0012, design §7).
 
-Projects one grounded-QA task record -- question, trusted corpus documents,
-required-evidence document IDs, and verbatim gold spans -- into a typed
-:class:`~agentic_evalkit.models.EvalSample`. The projection enforces the
-oracle/input separation the probe depends on:
+This benchmark tests whether a system properly bases ("grounds") its answers
+on the documents it's given, instead of making things up or citing the wrong
+source. Each task record has: a question, a set of trusted source documents,
+a list of which document IDs should be cited as evidence, and exact quotes
+("gold spans") that count as correct supporting evidence. This module turns
+one such record into a typed :class:`~agentic_evalkit.models.EvalSample`,
+carefully keeping two things separate:
 
-- ``EvalSample.input`` carries only what the system under test may see: the
-  question and the corpus documents **with the labeled canary field
-  stripped** (the canary token itself stays embedded in each document's
-  text, where a careful system should treat it as the do-not-cite
-  distractor it is).
-- ``EvalSample.metadata`` carries the grading-only oracle data: required
-  evidence IDs, the canary token registry, and the gold spans. None of it
-  is part of the execution request.
+- ``EvalSample.input`` holds only what the system under test is actually
+  allowed to see: the question and the source documents, but **with the
+  labeled "canary" field removed**. A canary is a unique marker planted
+  inside one document's text as bait -- the marker's raw text is still there
+  as part of the document's prose (a well-behaved system will just read past
+  it), but its explicit label is stripped out so the system can't tell it's
+  a planted marker. If the system's answer ends up quoting that marker, that
+  is evidence it wrongly cited a document it should have ignored.
+- ``EvalSample.metadata`` holds the answer key -- data used only for
+  grading and never shown to the system under test: which document IDs
+  count as required evidence, the list of canary markers (so the grader can
+  check whether any got cited), and the gold quote spans. None of this is
+  part of what the system under test receives.
 
-Record validation is fail-closed via
-:class:`~agentic_evalkit.models.grounding.GroundedCitationTask`: a record
-whose gold spans are not verbatim substrings of their documents, whose
-required evidence names unknown documents, or whose canaries are missing or
-duplicated raises :class:`~agentic_evalkit.errors.DatasetSchemaMismatch`
-before any execution or grading can happen.
+Keeping the answer key completely separate from what the system sees is
+what makes this test meaningful -- if the answer key leaked into the input,
+the test would no longer prove anything. Record validation "fails closed"
+via :class:`~agentic_evalkit.models.grounding.GroundedCitationTask`: meaning
+that if anything is inconsistent -- a gold quote that isn't an exact match
+for text in its document, required evidence that points at a document ID
+that doesn't exist, or canary markers that are missing or duplicated --
+this raises :class:`~agentic_evalkit.errors.DatasetSchemaMismatch`
+immediately and refuses to continue, rather than silently proceeding with
+bad data.
 """
 
 from pydantic import JsonValue, ValidationError
@@ -36,19 +48,23 @@ __all__ = ["GroundedCitationAdapter"]
 
 
 class GroundedCitationAdapter:
-    """Projects grounded-QA task records into objectively gradable samples."""
+    """Turns grounded-QA task records into samples that can be graded
+    objectively (by checking citations and quotes, not by subjective
+    judgment)."""
 
     api_version = _API_VERSION
     name = _ADAPTER_NAME
 
     def prepare(self, record: SourceRecord) -> EvalSample:
-        """Project one task record into an :class:`EvalSample`.
+        """Turn one task record into an :class:`EvalSample`.
 
         Raises:
             DatasetSchemaMismatch: the record fails
-                :class:`GroundedCitationTask` validation (missing fields,
-                non-verbatim gold spans, unknown required evidence, or
-                missing/duplicate canaries).
+                :class:`GroundedCitationTask` validation -- for example, a
+                missing field, a gold quote that isn't an exact match for
+                text in its document, required evidence pointing at a
+                document ID that doesn't exist, or a canary marker that is
+                missing or duplicated.
         """
         try:
             task = GroundedCitationTask.model_validate(record.data)
@@ -85,13 +101,15 @@ class GroundedCitationAdapter:
         )
 
     def validate_oracle(self, sample: EvalSample) -> bool:
-        """Oracle-valid iff the sample kept its required evidence and reference span."""
+        """This sample is ready to grade exactly when it still has its
+        required-evidence list and its reference quote."""
         required = sample.metadata.get("required_evidence")
         has_required = isinstance(required, list) and len(required) > 0
         return has_required and bool(sample.reference)
 
     def aggregate_metadata(self) -> dict[str, JsonValue]:
-        """Benchmark-specific metadata recorded on run aggregation (design §7)."""
+        """Extra, benchmark-specific details recorded when summarizing a run
+        (design §7)."""
         return {
             "benchmark": "grounded-citation",
             "adapter": _ADAPTER_NAME,

@@ -1,30 +1,43 @@
-"""``agentic-evalkit init``/``validate``/``run``: manifest lifecycle and execution.
+"""``agentic-evalkit init``/``validate``/``run``: create, check, and run an evaluation manifest.
 
-``init`` writes a starting manifest from a curated preset (or an explicit
-dataset/adapter/grader triple); when the developer supplies no target of
-their own, ``init --preset gsm8k`` wires in the packaged
-:mod:`agentic_evalkit.examples.zero_target` smoke target so the pipeline is
-runnable immediately (plan Task 14 Step 7). ``validate`` round-trips a
-manifest file through :func:`~agentic_evalkit.manifest.load_manifest`
-without running anything. ``run`` loads a manifest, resolves its CLI target
-block into a concrete :class:`~agentic_evalkit.targets.base.ExecutionTarget`,
-prints a preflight summary, streams Rich progress from
-:class:`~agentic_evalkit.runner.EvalRunner` events, and writes the canonical
-run JSON report with the default redaction policy applied (design §12).
+A "manifest" is the config file that describes one evaluation run: which
+dataset, which adapter, which grader, and which target (the system being
+tested) to use.
 
-``_KNOWN_GRADERS`` (below) additionally registers two opt-in, non-default
-graders backed by the packaged
-:class:`~agentic_evalkit.examples.reference_judge.ReferenceJudgeClient`: a
-manifest naming ``"judge-reference@1"`` or ``"composite-reference@1"``
-exercises the calibrated-judge pipeline end to end without needing a real
-LLM provider configured. Both stay permanently uncalibrated
-(``JudgeGrader(calibration=None, ...)``), so neither can ever hard-gate a
-release (design §9) -- they exist to make the judge/composite code paths
-runnable from a manifest, the same way the ``gsm8k`` preset's ``zero_target``
-makes the execution path runnable, not to grade anything authoritatively.
-Selecting either is always an explicit choice a manifest author makes by
-naming it; the default preset-generated manifests (``init --preset ...``)
-never do.
+``init`` writes a starting manifest from a curated preset (a ready-made
+template) -- or from an explicit dataset/adapter/grader combination if one is
+named directly. If the developer doesn't point it at their own system to
+test, ``init --preset gsm8k`` wires in the packaged
+:mod:`agentic_evalkit.examples.zero_target` "smoke target" -- a trivial
+stand-in system under test, not a real one -- purely so the whole pipeline
+can be run immediately, end to end, with no setup (plan Task 14 Step 7).
+``validate`` loads a manifest file through
+:func:`~agentic_evalkit.manifest.load_manifest` and confirms it's
+well-formed, without actually running anything. ``run`` loads a manifest,
+turns its target section into a concrete, callable
+:class:`~agentic_evalkit.targets.base.ExecutionTarget` (the actual system
+being evaluated), prints a summary of what it's about to do before doing it,
+streams live progress (via the Rich library) from
+:class:`~agentic_evalkit.runner.EvalRunner` as samples finish, and writes the
+standard run report as JSON with secrets stripped out per the default
+redaction policy (design §12).
+
+``_KNOWN_GRADERS`` (below) also registers two graders that a manifest has to
+opt into by name -- they are never used unless a manifest explicitly asks for
+them -- built on the packaged
+:class:`~agentic_evalkit.examples.reference_judge.ReferenceJudgeClient`.
+Naming ``"judge-reference@1"`` or ``"composite-reference@1"`` in a manifest
+lets you exercise the full "judge" grading pipeline (an LLM grading another
+system's output) end to end, without needing a real LLM provider configured.
+Both are permanently *uncalibrated* -- meaning nobody has proven, using
+held-out test cases, that this judge is accurate enough to trust -- so
+neither one can ever "hard-gate" a release (i.e. neither can single-handedly
+fail a build; design §9). They exist only to prove the judge/composite code
+paths actually run, the same way the ``gsm8k`` preset's ``zero_target``
+proves the execution path runs -- not to produce a grade anyone should act
+on. Using either is always a deliberate, explicit choice a manifest author
+makes by naming it; the default preset-generated manifests
+(``init --preset ...``) never do.
 """
 
 from __future__ import annotations
@@ -32,10 +45,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import httpx
 import typer
@@ -43,7 +55,6 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
 from agentic_evalkit.artifacts import ArtifactStore
-from agentic_evalkit.benchmarks.base import BenchmarkAdapter
 from agentic_evalkit.benchmarks.grounding import GroundedCitationAdapter
 from agentic_evalkit.benchmarks.gsm8k import Gsm8kAdapter
 from agentic_evalkit.benchmarks.swebench import SweBenchVerifiedAdapter
@@ -53,12 +64,10 @@ from agentic_evalkit.benchmarks.swebench_docker import (
 )
 from agentic_evalkit.cli.app import ExitCode, app, console, run_cli_command, safe_text
 from agentic_evalkit.cli.datasets import build_catalog
-from agentic_evalkit.datasets.catalog import DatasetCatalog
 from agentic_evalkit.datasets.presets import BUILTIN_PRESETS, DatasetPreset
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.events import ExecutionCompleted, RunEvent, SampleCompleted, SampleStarted
 from agentic_evalkit.examples.reference_judge import ReferenceJudgeClient
-from agentic_evalkit.graders.base import Grader
 from agentic_evalkit.graders.composite import CompositeGrader, WeightedGrader
 from agentic_evalkit.graders.exact import ExactMatchGrader
 from agentic_evalkit.graders.grounding import build_grounded_citation_grader
@@ -90,30 +99,42 @@ from agentic_evalkit.reporters import REPORTER_FORMATS
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, apply_redaction
 from agentic_evalkit.runner import EvalRunner
 from agentic_evalkit.stats import build_report_aggregates
-from agentic_evalkit.targets.base import ExecutionTarget
 from agentic_evalkit.targets.callable import CallableTarget
 from agentic_evalkit.targets.http import HttpTarget
 from agentic_evalkit.targets.subprocess import SubprocessTarget
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from agentic_evalkit.benchmarks.base import BenchmarkAdapter
+    from agentic_evalkit.datasets.catalog import DatasetCatalog
+    from agentic_evalkit.graders.base import Grader
+    from agentic_evalkit.targets.base import ExecutionTarget
 
 __all__ = ["build_target_for_document", "init", "run", "validate", "write_canonical_report"]
 
 
 class _RunnerCatalogAdapter:
-    """Adapts a real :class:`DatasetCatalog` to ``EvalRunner``'s narrower catalog shape.
+    """Bridges a real :class:`DatasetCatalog` to the smaller interface ``EvalRunner`` expects.
 
-    ``EvalRunner`` depends only on a local, minimal protocol: ``resolve(ref)
-    -> ResolvedDataset`` plus ``iter_records(dataset, *, offset, limit) ->
-    AsyncIterator[SourceRecord]`` (see ``agentic_evalkit.runner._CatalogProtocol``).
-    ``DatasetCatalog.iter_records`` additionally requires the original
-    ``DatasetRef`` for provider routing (a page/record-iteration call has no
-    other way to know which provider a ``ResolvedDataset`` came from), and
-    both ``DatasetCatalog.resolve``/``iter_records`` take a per-call
-    ``offline`` flag that ``_CatalogProtocol`` has no slot for at all. This
-    adapter closes over both the one ``ref`` and the one ``offline`` value a
-    CLI run always has fixed for its whole duration (ADR-0010) and forwards
-    them to the real catalog, so neither ``DatasetCatalog`` nor
-    ``EvalRunner``/``_CatalogProtocol`` needs to change shape to satisfy the
-    other.
+    ``EvalRunner`` only knows about a minimal, local interface: something
+    with a ``resolve(ref) -> ResolvedDataset`` method and an
+    ``iter_records(dataset, *, offset, limit) -> AsyncIterator[SourceRecord]``
+    method (see ``agentic_evalkit.runner._CatalogProtocol`` for that exact
+    shape). The real ``DatasetCatalog.iter_records`` needs more than that: it
+    also needs the original ``DatasetRef`` on every call, because that's the
+    only way it can tell which provider (e.g. Hugging Face vs. local files) a
+    given ``ResolvedDataset`` came from. It also takes an ``offline`` flag on
+    every call, and ``EvalRunner``'s minimal interface has no place to pass
+    one.
+
+    This class exists to close that gap without changing either side. A CLI
+    run picks one ``ref`` and one ``offline`` setting at the start and keeps
+    them fixed for the whole run (ADR-0010), so this adapter just remembers
+    those two values once (in its constructor) and supplies them itself on
+    every call into the real catalog. That way neither ``DatasetCatalog`` nor
+    ``EvalRunner``/``_CatalogProtocol`` has to change its method signatures
+    to match the other -- this class quietly absorbs the difference.
     """
 
     def __init__(self, catalog: DatasetCatalog, ref: DatasetRef, *, offline: bool = False) -> None:
@@ -134,12 +155,14 @@ class _RunnerCatalogAdapter:
 
 _DEMO_TARGET_IMPORT_STRING = "agentic_evalkit.examples.zero_target:zero_target"
 
-#: Adapters/graders the runnable CLI knows how to construct by name. This
-#: module intentionally hardcodes this small, fully-tested table rather than
-#: doing dynamic plugin discovery for adapters/graders. Every preset-referenced
-#: name now resolves here (both ``gsm8k`` and ``swe-bench-verified``);
-#: ``grounded-citation-tasks@1`` has no curated preset yet and is reachable
-#: from hand-authored manifests only (ADR-0012).
+#: Adapters/graders the CLI knows how to build, indexed by name. This module
+#: deliberately hardcodes this small, fully-tested lookup table instead of
+#: scanning for and auto-loading plugins at runtime (more flexible, but
+#: harder to test and reason about). Every name a curated preset can
+#: reference already resolves here (both ``gsm8k`` and ``swe-bench-verified``
+#: do); ``grounded-citation-tasks@1`` has no curated preset yet, so it's only
+#: reachable if someone hand-writes a manifest that names it directly
+#: (ADR-0012).
 _KNOWN_ADAPTERS: dict[str, BenchmarkAdapter] = {
     "gsm8k@1": Gsm8kAdapter(),
     "grounded-citation-tasks@1": GroundedCitationAdapter(),
@@ -164,19 +187,26 @@ def _build_known_graders() -> dict[str, Grader]:
     unchanged, still evaluated once at import time.
     """
     exact_match = ExactMatchGrader(name="normalized-exact@1", extractor=_extract_answer)
-    # calibration=None -> JudgeGrader.grade always returns hard_gate=False,
-    # regardless of gate=True here (design §9): selecting this grader can
-    # never make a run's outcome gate on an uncalibrated verdict.
+    # calibration=None means nobody has verified this judge is accurate
+    # enough to trust (there's no track record proving it against
+    # known-correct/incorrect examples). Because of that, JudgeGrader.grade
+    # always forces hard_gate=False -- "never let this result block a
+    # release" -- no matter what gate=True below might otherwise suggest
+    # (design §9). So choosing this grader can never make a run's pass/fail
+    # outcome depend on an unproven judge's opinion.
     judge_reference = JudgeGrader(
         ReferenceJudgeClient(), calibration=None, gate=True, name="judge-reference@1"
     )
     composite_reference = CompositeGrader(
         name="composite-reference@1",
         graders=(
-            # The objective check hard-gates the composite (design §9: "a
-            # model judge is never the first check for anything an
-            # objective grader can decide"); the judge only ever contributes
-            # an advisory sub-score alongside it.
+            # The exact-match check (a deterministic, rule-based grader) is
+            # the one allowed to hard-gate this composite -- i.e. it alone
+            # can fail the run (design §9's rule: "a model judge is never the
+            # first check for anything an objective, rule-based grader can
+            # decide"). The judge grader alongside it only ever contributes
+            # an advisory score: it adds to the overall number but can never
+            # by itself fail the run.
             WeightedGrader(exact_match, weight=0.7, hard_gate=True),
             WeightedGrader(
                 JudgeGrader(
@@ -187,15 +217,26 @@ def _build_known_graders() -> dict[str, Grader]:
             ),
         ),
     )
-    # Deterministic-primary grounded-citation probe (ADR-0012). Its judge
-    # tier is the packaged reference client -- permanently uncalibrated
-    # here, so it is score-inert (weight 0.0) and can never hard-gate; the
-    # deterministic grounding-hygiene tier is the only gate.
+    # A composite check for the "grounded citation" task, where the
+    # rule-based (deterministic) part does almost all the work (ADR-0012).
+    # It has two components: a deterministic grader that checks the basic
+    # mechanics of citation grounding, and an LLM-judge component (here, the
+    # packaged reference client) that would separately judge citation
+    # "sufficiency." The judge component is permanently uncalibrated here --
+    # nobody has proven it's accurate -- so it is wired at weight 0.0: it
+    # still runs and its verdict gets recorded, but it can never move the
+    # score or block a run. The deterministic component is the only one
+    # allowed to hard-gate (i.e. actually fail the run).
     grounded_citation = build_grounded_citation_grader(judge_client=ReferenceJudgeClient())
-    # Authoritative SWE-bench grading (ADR-0014). The executor is importable
-    # with zero extras and reports UNAVAILABLE at run time until
-    # ``agentic-evalkit[swebench]`` + a Docker daemon are present, so
-    # registering it never forces a docker/swebench import on the base install.
+    # Real (not a placeholder/reference) grader for the SWE-bench benchmark
+    # (ADR-0014) -- it actually checks whether a code patch fixes the issue,
+    # using a Docker-based test harness. The module that defines the executor
+    # can be imported even on a plain install (no extra packages needed), but
+    # at run time it reports status UNAVAILABLE unless both the optional
+    # ``agentic-evalkit[swebench]`` extra packages and a running Docker
+    # daemon are actually present. So just registering this grader here
+    # never forces someone who installed the base package (without the
+    # SWE-bench extras) to have docker/swebench importable.
     swebench_harness = HarnessGrader(
         executor=SweBenchDockerHarnessExecutor(),
         predictor=swebench_prediction,
@@ -268,8 +309,13 @@ def _manifest_document_for_preset(preset: DatasetPreset) -> ManifestDocument:
         attempts=1,
         timeout_seconds=30.0,
         concurrency=1,
-        # Carry the preset's contamination label so it reaches the run
-        # report's resolved_dataset (ADR-0013), not just the preset catalog.
+        # Copy the preset's data-contamination warning label onto the
+        # manifest too, so it later reaches the run report's
+        # resolved_dataset field (ADR-0013) instead of sitting unused on the
+        # preset object alone. ("Contamination" = the risk that the system
+        # under test already saw this dataset during its own training,
+        # which would make a high score misleading -- see
+        # _with_contamination's docstring below for the full explanation.)
         contamination=preset.contamination,
     )
     return ManifestDocument(
@@ -328,9 +374,11 @@ def _load_subprocess_target(config: SubprocessTargetConfig) -> ExecutionTarget:
 
 
 def _load_http_target(config: HttpTargetConfig) -> ExecutionTarget:
-    # The manifest never carries a literal credential (design §12); a named
-    # credential_hook resolves to an environment variable read here, at run
-    # time, not stored in or dumped back into the manifest file.
+    # The manifest file itself never contains an actual secret/API key
+    # (design §12). Instead it can name a credential_hook -- a string this
+    # code looks up as an environment-variable name, right here, at run
+    # time. The resulting token is never written into or saved back to the
+    # manifest file.
     headers = None
     if config.credential_hook:
         import os
@@ -371,26 +419,37 @@ def _with_provenance_fingerprints(
     manifest: EvalRunManifest,
     target_config: CallableTargetConfig | SubprocessTargetConfig | HttpTargetConfig,
 ) -> EvalRunManifest:
-    """Return a copy of ``manifest`` with all three provenance fingerprints populated.
+    """Return a copy of ``manifest`` with all three "provenance" fingerprints filled in.
 
-    Design §5.6 documents ``environment_fingerprint``/``code_fingerprint``/
-    ``target_fingerprint`` as pinning "environment and code fingerprints"
-    and "execution target and target fingerprint" -- but until this
-    function existed, nothing in the CLI ever called
-    :mod:`agentic_evalkit.provenance`'s generators, so every real ``run``
-    persisted ``None`` in all three regardless of what a hand-authored
-    manifest file set. Live-computed values always take precedence over
-    whatever a manifest file happened to carry: a fingerprint is a claim
-    about *this* execution's actual interpreter/package/target identity, not
-    something a caller can honestly assert ahead of time by hand. Called
-    once, here, before the preflight summary and the run itself -- every
-    consumer downstream (the preflight print, ``EvalRunner``, the canonical
-    JSON report, and its ``provenance`` summary) sees the same resolved
-    manifest with no separate fingerprinting step to keep in sync.
+    A "fingerprint" here is a hash that captures exactly what ran: which
+    Python interpreter/package versions, which code, and which target.
+    Recording these is what lets us later prove two runs are truly
+    comparable (or catch it when they aren't) -- that proof is what
+    "provenance" means throughout this codebase.
 
-    ``manifest`` is never mutated (ADR-0002): this returns a new
-    ``EvalRunManifest`` via ``model_copy``, matching the ``--limit``
-    override immediately above this function's one call site.
+    Design §5.6 describes ``environment_fingerprint``/``code_fingerprint``/
+    ``target_fingerprint`` as the fields that pin down "environment and code
+    fingerprints" and "execution target and target fingerprint" for a run.
+    But before this function was added, nothing in the CLI actually called
+    the generator functions in :mod:`agentic_evalkit.provenance` -- so every
+    real ``run`` wrote ``None`` into all three fields, no matter what a
+    hand-written manifest file put there. Whatever this function computes
+    always overrides anything already in the manifest: a fingerprint is a
+    claim about what *this specific run* actually used, and that isn't
+    something a person can honestly fill in by hand in advance -- it has to
+    be measured at run time.
+
+    This function is called exactly once, right before the preflight summary
+    and the run itself, so that everything downstream -- the preflight
+    message printed to the console, ``EvalRunner``, the JSON report, and
+    that report's provenance section -- all see the exact same fingerprinted
+    manifest. There's no second, separate fingerprinting step anywhere else
+    that could drift out of sync with this one.
+
+    This function does not modify ``manifest`` in place (we never mutate
+    data in this codebase -- see ADR-0002): it returns a brand-new
+    ``EvalRunManifest`` via ``model_copy``, the same pattern used one line
+    above, at this function's only call site, for the ``--limit`` override.
     """
     return manifest.model_copy(
         update={
@@ -417,15 +476,25 @@ def _default_output_dir() -> Path:
 
 
 def _with_contamination(result: EvalRunResult, manifest: EvalRunManifest) -> EvalRunResult:
-    """Stamp the manifest's contamination label onto the report's resolved dataset.
+    """Copy the manifest's "contamination" warning label onto the run report's resolved dataset.
 
-    A preset's ``SUSPECT`` label (ADR-0013) lives on ``DatasetPreset`` and is
-    carried through the manifest by ``_manifest_document_for_preset``, but the
-    provider's ``resolve`` never sees the preset, so without this the run
-    report's ``resolved_dataset.contamination`` stays ``None`` and the score
-    loses the prompt the label exists to add. A value the provider itself
-    resolved always wins; the manifest value only fills a gap. Never mutates
-    (ADR-0002): returns a new ``EvalRunResult`` via ``model_copy``.
+    "Contamination" here means: has this dataset been public, and mirrored
+    elsewhere, for long enough that the system under test might have already
+    seen these exact questions and answers during its own training? If so, a
+    high score doesn't prove real capability -- it might just mean the
+    answers were memorized. ADR-0013 lets a preset carry a best-effort
+    ``SUSPECT`` label flagging that risk.
+
+    That label lives on ``DatasetPreset`` and gets copied onto the manifest
+    by ``_manifest_document_for_preset``, but the dataset provider's
+    ``resolve`` method has no way to see the original preset. So without
+    this function, the run report's ``resolved_dataset.contamination`` field
+    would always end up ``None`` -- silently dropping the warning the label
+    exists to surface. A value the provider resolved on its own always wins
+    over the manifest's value; the manifest's label only fills in when the
+    provider didn't already set one. As always in this codebase, nothing is
+    modified in place (ADR-0002): this returns a new ``EvalRunResult`` via
+    ``model_copy``.
     """
     if manifest.contamination is None or result.resolved_dataset.contamination is not None:
         return result
@@ -501,13 +570,18 @@ def run(
     task_id = progress.add_task("running", total=manifest.selection.limit or None)
 
     def _sink(event: RunEvent) -> None:
-        # Progress.update's `description` is typed as plain `str` (Rich does
-        # not accept a Text/RenderableType here), so it cannot use safe_text
-        # the way table cells and console.print calls above do. This is an
-        # accepted, narrower risk than the rest of the module: sample_id
-        # here is always adapter-generated (e.g. "gsm8k:0" from
-        # Gsm8kAdapter.prepare's f-string over a row index), never raw
-        # provider/dataset-card text, so it cannot contain "[...]".
+        # Rich's Progress.update() expects `description` to be a plain `str`
+        # (it won't accept the Text/RenderableType wrapper that safe_text()
+        # produces), so this can't be routed through safe_text() the way the
+        # table cells and console.print() calls elsewhere in this file are.
+        # safe_text() exists to stop a string like "[bold]" from being
+        # misread as Rich markup instead of literal text -- normally a
+        # concern for text sourced from an external provider or dataset
+        # card. Skipping it here is safe because sample_id is always
+        # generated by our own adapter code (e.g. "gsm8k:0", built from an
+        # f-string over a row index in Gsm8kAdapter.prepare), never raw text
+        # from a provider or dataset card, so it can never contain a
+        # "[...]"-style sequence that Rich would misinterpret.
         if isinstance(event, SampleStarted):
             progress.update(
                 task_id, description=f"sample {event.sample_id} (attempt {event.attempt})"
@@ -544,9 +618,11 @@ def run(
         f"timeouts={summary.timeouts} cancelled={summary.cancelled} "
         f"abstained={summary.abstained} unavailable={summary.unavailable}"
     )
-    # soft_wrap=True: a report path must appear on stdout as one unbroken
-    # substring (scripts and tests grep for the exact path), never wrapped
-    # mid-string at the console width the way default word-wrapping would.
+    # soft_wrap=True because the report path must appear on stdout as one
+    # single, unbroken piece of text (both scripts and our own tests search
+    # the output for the exact path string) -- it must never get broken
+    # across multiple lines the way Rich's normal word-wrapping would do
+    # once it hits the console's width.
     console.print(safe_text(f"report: {report_path}"), soft_wrap=True)
 
     if summary.errors > 0 or summary.timeouts > 0:
@@ -558,29 +634,41 @@ def _run_stamp() -> str:
 
 
 def write_canonical_report(result: EvalRunResult, destination_dir: Path) -> Path:
-    """Write ``result`` as canonical run JSON with the default redaction applied.
+    """Write ``result`` to disk as the standard run-report JSON, with secrets stripped out first.
 
-    Redaction happens exactly once, here, before the canonical JSON reaches
-    disk (design §12): ``report``/``compare`` and every other consumer then
-    derive from evidence that never contained an unredacted credential.
-    Exposed (like :func:`build_target_for_document`) so tests can verify the
-    redaction boundary without executing a full run.
+    The secret-stripping step ("redaction" -- see design §12) happens
+    exactly once, right here, before anything is written to disk. That
+    guarantees every downstream reader of this file -- the
+    ``report``/``compare`` commands and anything else that opens it later --
+    only ever sees data that never contained an un-redacted API key or
+    token. This function is exposed publicly (like
+    :func:`build_target_for_document`) specifically so tests can check that
+    redaction actually happens, without needing to run a whole evaluation
+    first.
 
-    ``aggregates`` (Wilson-bounded pass rate, resource distributions, and
-    ``pass@k`` when the manifest ran repeated attempts) is computed via
-    :func:`agentic_evalkit.stats.build_report_aggregates` from the
-    *unredacted* ``result`` -- aggregation only ever touches counts, scores,
-    and resource numbers, never the evidence/output text redaction targets,
-    so computing it before or after redaction is numerically identical; doing
-    it first keeps this function's one redaction call the single, obvious
-    place secrets are ever stripped.
+    ``aggregates`` is computed via
+    :func:`agentic_evalkit.stats.build_report_aggregates`, from the result
+    *before* redaction. It includes things like a "Wilson-bounded" pass rate
+    (a statistically conservative version of the raw pass rate that accounts
+    for how small the sample was), how resources like time/tokens were
+    distributed across samples, and "pass@k" (the fraction of samples where
+    at least one of several repeated attempts succeeded, when the manifest
+    configured more than one attempt per sample). None of that touches the
+    actual evidence/output text that redaction is scrubbing -- aggregation
+    only ever looks at counts, scores, and resource numbers -- so computing
+    it before or after redaction gives the exact same numbers either way.
+    It's done before redaction here simply so that this function's one call
+    to the redaction step stays the single, obvious place in the code where
+    secrets are ever removed.
     """
     destination_dir.mkdir(parents=True, exist_ok=True)
     report_path = destination_dir / f"{result.run_id}.json"
     aggregates = build_report_aggregates(result)
-    # Select the reporter through the canonical registry so only a registered
-    # (and therefore redaction-routed) format can be written here; redaction is
-    # still applied exactly once, immediately before the write (design §12).
+    # Look up the reporter through the central REPORTER_FORMATS registry
+    # rather than constructing one directly, so that only formats we've
+    # actually registered here -- and therefore verified go through
+    # redaction -- can be written. Redaction itself is still applied exactly
+    # once, immediately before the write (design §12).
     reporter = REPORTER_FORMATS["json"]()
     reporter.write(
         apply_redaction(result, DEFAULT_REDACTION_POLICY), report_path, aggregates=aggregates

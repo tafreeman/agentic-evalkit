@@ -1,27 +1,30 @@
 """End-to-end tests for :class:`agentic_evalkit.runner.EvalRunner` (plan Task 11).
 
-The first test below is copied verbatim from
-``docs/plans/2026-07-02-agentic-evalkit-initial-release.md`` (Task 11, Step 2).
-Every fake is deterministic and in-process; none of these tests touch the
-network or a real model.
+The first test below is copied exactly, word for word, from
+``docs/plans/2026-07-02-agentic-evalkit-initial-release.md`` (Task 11, Step
+2) -- it was part of the original spec for this feature. Every fake object
+used in this file behaves the same way every time it's called (no real
+randomness, no network, no real AI model) -- these tests only exercise
+in-process, hand-written stand-ins.
 
-``EvalRunner`` is typed against a local ``_CatalogProtocol`` (defined in
-``agentic_evalkit.runner``, not imported from ``agentic_evalkit.datasets``):
-the runner depends on the catalog's *shape* (``resolve`` + ``iter_records``),
-not on ``DatasetCatalog``'s concrete class, so the fakes below satisfy the
-protocol structurally without inheriting anything.
+``EvalRunner`` doesn't depend on the real dataset catalog class. Instead,
+its type hints reference a small local ``_CatalogProtocol`` (defined in
+``agentic_evalkit.runner``, not imported from ``agentic_evalkit.datasets``)
+-- a description of the two methods (``resolve`` and ``iter_records``) that
+any catalog-like object must have. Because of this, the fake catalog
+classes below can satisfy the runner just by having those two methods,
+without needing to inherit from ``DatasetCatalog`` or any other real class.
 """
 
 from __future__ import annotations
 
 import asyncio
 import tempfile
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from pydantic import JsonValue
 
 from agentic_evalkit.artifacts import ArtifactRef, ArtifactStore
 from agentic_evalkit.benchmarks.harness import FakeHarnessExecutor, HarnessResult, HarnessStatus
@@ -45,11 +48,19 @@ from agentic_evalkit.models import (
 from agentic_evalkit.reporters.base import RedactionPolicy
 from agentic_evalkit.runner import EvalRunner
 
-# --- Deterministic fakes ----------------------------------------------------
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from pydantic import JsonValue
+
+# --- Fakes: hand-written stand-ins that always behave the same way ----------
 
 
 class _FakeCatalog:
-    """Structurally satisfies the runner's local catalog protocol."""
+    """A fake dataset catalog: it has the same ``resolve``/``iter_records``
+    methods the runner's ``_CatalogProtocol`` expects, so the runner accepts
+    it in place of a real catalog, without this class needing to inherit
+    from anything."""
 
     def __init__(self, records: tuple[SourceRecord, ...]) -> None:
         self._records = records
@@ -162,22 +173,28 @@ class _ExactFixtureGrader:
         )
 
 
-#: Keeps each no-arg ``_artifact_store`` ``TemporaryDirectory`` alive for the
-#: whole session; its exit finalizer then removes it, unlike a bare
-#: ``mkdtemp()``, which left one orphaned OS temp directory per session.
+#: Holds onto every ``TemporaryDirectory`` created by calling
+#: ``_artifact_store()`` with no arguments, so Python doesn't garbage-collect
+#: (and thereby delete) the directory before the test finishes using it.
+#: When the test process exits, each ``TemporaryDirectory`` cleans itself up
+#: automatically. Before this list existed, using the lower-level
+#: ``mkdtemp()`` function instead left one leftover, never-deleted temp
+#: directory on disk behind every time the test suite ran.
 _NO_ARG_STORE_DIRS: list[tempfile.TemporaryDirectory[str]] = []
 
 
 def _artifact_store(root: Path | None = None) -> ArtifactStore:
-    """Build an isolated ``ArtifactStore``.
+    """Build a fresh, isolated ``ArtifactStore`` for a test to use.
 
-    The plan's verbatim test calls this with no arguments, so ``root``
-    defaults to a fresh OS temp directory (never the repo's working
-    directory or a shared path) rather than requiring a pytest fixture; the
-    directory is registered in ``_NO_ARG_STORE_DIRS`` so it outlives the
-    test but is still deleted at interpreter exit. Other tests in this
-    module pass pytest's ``tmp_path`` explicitly to get a directory that is
-    cleaned up by pytest itself.
+    The test copied word-for-word from the plan document calls this
+    function with no arguments at all, so ``root`` needs a sensible default
+    -- it falls back to a brand-new OS-level temp directory (never this
+    repo's working directory or any shared path) instead of requiring every
+    caller to pass in a pytest ``tmp_path`` fixture. That fallback directory
+    is tracked in ``_NO_ARG_STORE_DIRS`` so it survives for the whole test,
+    and only gets deleted when the test process exits. Other tests in this
+    file instead pass pytest's own ``tmp_path`` fixture directly, which
+    pytest already cleans up on its own.
     """
     if root is None:
         temp_dir = tempfile.TemporaryDirectory(prefix="evalkit-artifact-store-")
@@ -211,7 +228,7 @@ def _manifest(**overrides: object) -> EvalRunManifest:
     return EvalRunManifest(**defaults)  # type: ignore[arg-type]
 
 
-# --- Verbatim plan test -------------------------------------------------
+# --- Test copied exactly from the original plan document --------------------
 
 
 @pytest.mark.integration
@@ -240,12 +257,15 @@ _VOLATILE_KEYS = frozenset({"run_id", "started_at", "finished_at", "created_at"}
 
 
 def _strip_volatile(value: object) -> object:
-    """Recursively drop run IDs and timestamps from a ``model_dump`` tree.
+    """Walk a dict/list tree (as produced by Pydantic's ``model_dump``) and
+    remove every run ID and timestamp field from it, at every level -- not
+    just the top level.
 
-    Every attempt's ``NormalizedExecutionResult``/``GradeResult`` carries its
-    own ``started_at``/``finished_at``/``created_at``, not just the top-level
-    run, so this walks the whole structure rather than popping a fixed set
-    of top-level keys.
+    Every individual attempt has its own ``NormalizedExecutionResult`` and
+    ``GradeResult``, each carrying its own ``started_at``/``finished_at``/
+    ``created_at`` fields -- not only the top-level run has these fields. So
+    this function recurses into the whole structure instead of only
+    removing a fixed set of keys from the top.
     """
     if isinstance(value, dict):
         return {
@@ -385,10 +405,14 @@ async def test_run_never_mutates_the_supplied_manifest(tmp_path: Path) -> None:
 async def test_execution_failed_status_counts_as_operational_not_a_task_failure(
     tmp_path: Path,
 ) -> None:
-    """An ``ExecutionStatus.FAILED`` result never reaches grading; it is an
-    operational outcome (like ``error``/``timeout``), not a graded "the
-    system answered wrong" outcome, so it must not land in
-    ``RunSummary.failed``.
+    """When the system being tested reports ``ExecutionStatus.FAILED`` (it
+    broke while running), that result never even reaches the grading step.
+    ``FAILED`` -- just like ``error`` or ``timeout`` -- means something went
+    wrong with running the system itself, which is a completely different
+    situation from a grader looking at a real answer and deciding it's
+    wrong. So a ``FAILED`` result must never be counted in
+    ``RunSummary.failed``, which is reserved specifically for "the system
+    ran fine, but its answer was wrong."
     """
 
     class _AlwaysFailedTarget:
@@ -438,15 +462,20 @@ async def test_run_rejects_unknown_component_names(tmp_path: Path) -> None:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_run_emits_ordered_progress_events(tmp_path: Path) -> None:
-    """Asserts the EXACT full event-type sequence, not just counts and endpoints.
+    """Checks the exact, full list of event types emitted, in order -- not
+    just how many events fired or which ones fired first and last.
 
-    ``concurrency=1`` makes the two samples' sub-sequences run strictly one
-    after another rather than interleaved, so the full sequence -- not just
-    each sample's internal sub-sequence -- is deterministic. The fixture
-    target (``success_then_error``) grades sample 0 (``COMPLETED`` ->
-    ``GradeCompleted`` fires) and does not grade sample 1 (``ERROR`` ->
-    requirement 6 skips grading), which is why ``GradeCompleted`` appears
-    only once even though there are two samples.
+    Setting ``concurrency=1`` forces the two samples to run one completely
+    after the other instead of overlapping, so their events can't get
+    interleaved -- which means the entire event sequence is predictable, not
+    just the handful of events belonging to any one sample. The fake target
+    used here (``success_then_error``) makes sample 0 succeed (status
+    ``COMPLETED``, so a ``GradeCompleted`` event fires for it) and makes
+    sample 1 come back as ``ERROR``. Since an ``ERROR`` execution skips
+    grading entirely (see requirement 6 in the runner), sample 1 never
+    produces its own ``GradeCompleted`` event -- which is exactly why the
+    list below has only one ``GradeCompleted``, even though there are two
+    samples total.
     """
     events: list[RunEvent] = []
 
@@ -480,15 +509,20 @@ async def test_run_emits_ordered_progress_events(tmp_path: Path) -> None:
     assert all(event.run_id == run_id for event in events)
 
 
-# --- RunFailed emission (defect 1) ------------------------------------------
+# --- the RunFailed event fires correctly (defect 1) --------------------------
 
 
 class _ResolveRaisesCatalog:
-    """Structurally satisfies the runner's catalog protocol; ``resolve`` always fails.
+    """A fake catalog that has the two methods the runner needs, but whose
+    ``resolve`` method always raises an error instead of returning data.
 
-    ``iter_records`` is never expected to be called -- the runner must abort
-    before reaching sample preparation -- so it raises if it ever is, making
-    a wrongly-ordered runner change fail loudly rather than silently pass.
+    This test expects the runner to give up immediately when ``resolve``
+    fails, before it ever gets to preparing samples -- so ``iter_records``
+    should never be called at all. To make sure of that, ``iter_records``
+    itself raises an error if it's ever called. That way, if a future change
+    to the runner accidentally called it anyway (running things in the
+    wrong order), this test would fail loudly and obviously, instead of
+    quietly passing when it shouldn't.
     """
 
     async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
@@ -504,11 +538,14 @@ class _ResolveRaisesCatalog:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_dataset_resolution_failure_emits_exactly_one_run_failed(tmp_path: Path) -> None:
-    """A catalog whose ``resolve`` raises is an infrastructure-level abort.
+    """If the dataset catalog's ``resolve`` method raises an error, that
+    counts as our own infrastructure breaking, not the AI system under test
+    giving a wrong answer.
 
-    Exactly one ``RunFailed`` is emitted (naming the original exception's
-    type), no ``RunCompleted`` follows it, and the original exception -- not
-    a wrapped or replaced one -- is what the caller observes.
+    This test checks that exactly one ``RunFailed`` event fires (recording
+    the original exception's type by name), that no ``RunCompleted`` event
+    ever follows it, and that the exception the caller actually sees is the
+    original one -- not some wrapped or replaced substitute.
     """
     events: list[RunEvent] = []
 
@@ -539,12 +576,14 @@ async def test_dataset_resolution_failure_emits_exactly_one_run_failed(tmp_path:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_cancellation_during_the_run_emits_exactly_one_run_failed(tmp_path: Path) -> None:
-    """``asyncio.CancelledError`` is itself an infrastructure-level abort.
+    """Being cancelled (``asyncio.CancelledError``) counts as our own
+    infrastructure aborting the run, the same as any other unexpected error.
 
-    Mirrors ``test_cancelling_the_run_marks_pending_samples_cancelled``'s
-    hanging-target fixture, but additionally asserts the ``RunFailed`` event
-    this defect fix adds: cancellation must not end the run with no
-    terminal event at all.
+    This test uses the same "hanging target" trick as
+    ``test_cancelling_the_run_marks_pending_samples_cancelled`` above, but
+    additionally checks the ``RunFailed`` event that this bug fix added:
+    cancelling a run must never leave it with no final event at all --
+    there must always be some event recording how the run ended.
     """
     started_first = asyncio.Event()
     events: list[RunEvent] = []
@@ -580,13 +619,16 @@ async def test_cancellation_during_the_run_emits_exactly_one_run_failed(tmp_path
     assert run_failed.error_type == "CancelledError"
 
 
-# --- Redacted spill (defect 2) -----------------------------------------------
+# --- secrets get blanked out ("redacted") before a big output gets spilled --
+# --- to disk (defect 2) -------------------------------------------------------
 
 
 class _PlantedTokenTarget:
-    """Returns one execution whose output is large enough to spill and
-    contains a planted fake Hugging Face token, so a redaction policy that
-    matches ``hf_...`` tokens has something real to catch.
+    """A fake target whose output is deliberately both (1) large enough that
+    the runner will "spill" it out to a separate file instead of keeping it
+    inline, and (2) contains a fake Hugging Face access token planted inside
+    it -- giving a redaction policy that looks for ``hf_...``-shaped tokens
+    something real to actually find and blank out.
     """
 
     def __init__(self, *, token: str, padding_chars: int) -> None:
@@ -609,8 +651,10 @@ class _PlantedTokenTarget:
 
 
 _PLANTED_TOKEN = "hf_AbCdEfGh0123456789"
-#: Enough filler so the serialized output clears ``_LARGE_OUTPUT_THRESHOLD_BYTES``
-#: (8192 bytes) and is guaranteed to spill regardless of the token's own length.
+#: The number of filler characters to add so the output, once serialized, is
+#: bigger than ``_LARGE_OUTPUT_THRESHOLD_BYTES`` (8192 bytes) -- the size
+#: limit that triggers a spill to disk. This guarantees the output spills no
+#: matter how long the planted token itself happens to be.
 _SPILL_PADDING_CHARS = 8300
 
 
@@ -648,10 +692,13 @@ async def test_spill_redacts_a_planted_secret_when_a_policy_is_supplied(tmp_path
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_spill_redacts_a_planted_secret_by_default(tmp_path: Path) -> None:
-    """With no explicit ``redaction_policy``, the runner now defaults to
-    ``DEFAULT_REDACTION_POLICY`` (Story 2.1 / R-002): the planted ``hf_``
-    token is stripped from the spilled artifact and the artifact is recorded
-    as redacted, so a real run never spills raw secrets to disk.
+    """If the caller doesn't explicitly pass a ``redaction_policy``, the
+    runner now falls back to ``DEFAULT_REDACTION_POLICY`` automatically
+    (tracked as Story 2.1 / R-002). This test checks that, even with no
+    policy explicitly given, the planted ``hf_`` token still gets stripped
+    out of the spilled file, and the file gets marked as redacted -- so a
+    real run can never accidentally spill a raw secret to disk just because
+    nobody remembered to configure a redaction policy.
     """
     artifact_store = _artifact_store(tmp_path)
     runner = EvalRunner(
@@ -679,22 +726,26 @@ async def test_spill_redacts_a_planted_secret_by_default(tmp_path: Path) -> None
     assert metadata.redacted is True
 
 
-# --- Grade before spill (defect 3) -------------------------------------------
+# --- grading happens before spilling now (defect 3) --------------------------
 #
-# ``_execute_and_grade`` used to spill *before* grading, so any grader
-# handling an execution large enough to spill was handed ``output=None``
-# instead of the real content (ADR-0017). These tests prove the fix through
-# the real ``EvalRunner.run`` path: a grader must see the full, intact
-# output at grade time, and the runner must still spill that same execution
-# for storage afterwards -- spilling moved, it did not disappear.
+# ``_execute_and_grade`` used to spill the output to disk *before* grading
+# ran. That meant any output big enough to spill would be replaced with
+# ``output=None`` before the grader ever got to look at it -- so the grader
+# ended up judging an empty placeholder instead of the AI system's real
+# answer (fixed per ADR-0017). The tests below prove the fix by running the
+# real ``EvalRunner.run`` path end to end: a grader must see the full, real
+# output at the moment it grades, and the runner must still spill that same
+# output afterwards for storage. In other words, spilling still happens --
+# it just moved to occur after grading instead of before.
 
 
 class _OutputCapturingGrader:
-    """Records the exact ``execution.output`` it was handed at grade time.
+    """A fake grader that just records the exact ``execution.output`` value
+    it was given each time it's asked to grade something.
 
-    The captured value is asserted on directly (not just the grade status),
-    so this proves the grader saw real content rather than merely that it
-    didn't error.
+    The test checks this recorded value directly (not just whether grading
+    succeeded without an error), which is what actually proves the grader
+    saw the AI system's real answer -- not just that nothing crashed.
     """
 
     def __init__(self) -> None:
@@ -718,10 +769,12 @@ class _OutputCapturingGrader:
 async def test_grader_sees_the_full_output_before_it_is_spilled_for_storage(
     tmp_path: Path,
 ) -> None:
-    """A large execution (the planted-token/padding technique from the spill
-    tests above) must still be graded against its real, intact output -- not
-    an ``output=None`` spill placeholder -- and must still end up spilled in
-    the persisted result, exactly as before the fix.
+    """Even for an output large enough to spill (using the same
+    planted-token-plus-padding trick as the spill tests above), grading must
+    still see the real, complete output -- not the ``output=None``
+    placeholder that a spilled result gets. And the final saved result must
+    still end up spilled, exactly as it did before this fix -- only the
+    order relative to grading changed.
     """
     artifact_store = _artifact_store(tmp_path)
     grader = _OutputCapturingGrader()
@@ -749,9 +802,9 @@ async def test_grader_sees_the_full_output_before_it_is_spilled_for_storage(
     assert grade.status == GradeStatus.PASS
     assert grade.evidence["observed_output_was_none"] is False
 
-    # Spilling still happens for storage, just after grading: the FINAL
-    # persisted execution is spilled, same assertion shape as the redaction
-    # tests above.
+    # Spilling still happens for storage, just after grading now: the FINAL
+    # saved execution result is spilled, checked the same way as in the
+    # redaction tests above.
     execution = result.samples[0].execution
     assert execution.output is None
     digest = execution.artifacts["output_ref"]
@@ -759,12 +812,14 @@ async def test_grader_sees_the_full_output_before_it_is_spilled_for_storage(
 
 
 class _CapturingHarnessPredictor:
-    """A ``HarnessPredictor`` that records the ``execution.output`` it saw.
+    """A fake ``HarnessPredictor`` that just records the ``execution.output``
+    value it was given.
 
-    ``HarnessGrader`` itself has no seam to observe from outside, so the
-    injected predictor callable -- which ``HarnessGrader.grade`` always
-    invokes with the same ``(sample, execution)`` it received -- is what
-    proves what the grader actually saw.
+    There's no direct way to peek inside ``HarnessGrader`` from a test to
+    see what it received. But ``HarnessGrader.grade`` always calls its
+    injected predictor callable with the exact same ``(sample, execution)``
+    values it was itself given -- so recording what this fake predictor
+    sees is how the test proves what the grader actually saw.
     """
 
     def __init__(self) -> None:
@@ -783,9 +838,11 @@ class _CapturingHarnessPredictor:
 
 
 class _LargePatchTarget:
-    """Returns one execution whose output is a SWE-bench-shaped patch large
-    enough to spill -- ``_PlantedTokenTarget``'s padding technique, under the
-    ``model_patch`` key ``HarnessGrader``'s predictor actually reads.
+    """A fake target whose output looks like a real SWE-bench submission: a
+    code patch (a diff describing a code change) big enough to trigger a
+    spill to disk, using the same padding trick as ``_PlantedTokenTarget``
+    above. The patch is stored under the ``model_patch`` key, which is the
+    specific key that ``HarnessGrader``'s predictor actually reads from.
     """
 
     def __init__(self, *, marker: str, padding_chars: int) -> None:
@@ -814,10 +871,13 @@ _PATCH_MARKER = "planted-fix-marker"
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_harness_grader_sees_the_full_patch_before_it_is_spilled(tmp_path: Path) -> None:
-    """The grader that actually motivated ADR-0017: a SWE-bench patch large
-    enough to spill must still reach ``HarnessGrader`` (via its predictor)
-    intact, and must grade to a real, hard-gated verdict -- not the
-    defensive spilled-output ERROR path.
+    """``HarnessGrader`` is the actual grader that motivated ADR-0017's fix
+    in the first place. This test checks that a SWE-bench code patch large
+    enough to spill still reaches ``HarnessGrader`` (through its predictor)
+    completely intact, and still earns a real, hard-gated (able to block a
+    release) verdict -- not the fallback ``ERROR`` verdict that would
+    result if the grader had only seen an already-spilled, emptied-out
+    placeholder.
     """
     artifact_store = _artifact_store(tmp_path)
     predictor = _CapturingHarnessPredictor()
@@ -849,7 +909,8 @@ async def test_harness_grader_sees_the_full_patch_before_it_is_spilled(tmp_path:
     assert seen_output is not None
     assert _PATCH_MARKER in str(seen_output)
 
-    # A real, earned, hard-gated verdict -- not the spilled-output ERROR path.
+    # A real, earned, hard-gated verdict here -- not the fallback ERROR that
+    # would happen if the output had been spilled before grading.
     grade = result.samples[0].grade
     assert grade is not None
     assert grade.status == GradeStatus.PASS
@@ -863,16 +924,18 @@ async def test_harness_grader_sees_the_full_patch_before_it_is_spilled(tmp_path:
     assert isinstance(digest, str)
 
 
-# --- Judge transport isolation (ADR-0020) ------------------------------------
+# --- one judge-model failure must not take down the whole run (ADR-0020) ----
 
 
 class _AlwaysCompletedTarget:
-    """Returns a COMPLETED execution for every sample, so grading always runs.
+    """A fake target that always reports ``COMPLETED``, for every sample --
+    so every sample always makes it to grading.
 
-    Unlike ``_SequencedTarget.success_then_error``, both samples reach the
-    grader here -- exactly what the judge-transport-isolation test below needs,
-    since a non-completed execution would skip grading (requirement 6) and mask
-    whether the judge itself was reached.
+    Unlike ``_SequencedTarget.success_then_error`` (which deliberately fails
+    one sample), both samples here reach the grader. That's exactly what the
+    test below needs: if an execution weren't ``COMPLETED``, grading would
+    be skipped entirely (per requirement 6), which would hide whether the
+    judge model itself was ever actually reached.
     """
 
     async def execute(
@@ -890,12 +953,17 @@ class _AlwaysCompletedTarget:
 
 
 class _RaisingOnOneSampleJudge:
-    """A ``JudgeClient`` whose transport raises for exactly one ``sample_id``.
+    """A fake judge-model client that raises an error -- as if the network
+    call to the judge model had failed -- for exactly one specific
+    ``sample_id``, and behaves normally for every other sample.
 
-    Proves ADR-0020's transport isolation end to end through ``EvalRunner``:
-    one raising judge yields one graded ERROR sample, and the run finishes
-    normally rather than aborting with a ``RunFailed``. Every other sample gets
-    a clean, parseable (advisory) verdict.
+    This proves, end to end through the real ``EvalRunner``, that
+    ADR-0020's fix actually works: when the judge model fails for one
+    sample, only that one sample gets graded as ``ERROR`` -- the run as a
+    whole still finishes normally instead of aborting with a ``RunFailed``
+    event. Every other sample still gets a normal, successfully-parsed
+    verdict (advisory only, meaning it's purely informational and can't
+    block a release).
     """
 
     fingerprint = "judge:model:prompt"
@@ -918,10 +986,12 @@ class _RaisingOnOneSampleJudge:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_run_completes_when_the_judge_raises_on_one_sample(tmp_path: Path) -> None:
-    """A ``JudgeClient`` that raises on one sample must not abort the whole run
-    (ADR-0020): the run finishes, the affected sample is graded ERROR carrying
-    ``judge_transport_error`` evidence, the other sample grades normally, and no
-    ``RunFailed`` is emitted.
+    """When the judge-model client raises an error for just one sample, that
+    must not abort the entire run (ADR-0020). Instead: the run still
+    finishes, the one affected sample is graded ``ERROR`` and records
+    evidence showing it was a ``judge_transport_error`` (a failure in
+    calling the judge, not a real verdict), the other sample is graded
+    normally, and no ``RunFailed`` event ever fires.
     """
     events: list[RunEvent] = []
 
@@ -953,7 +1023,7 @@ async def test_run_completes_when_the_judge_raises_on_one_sample(tmp_path: Path)
 
     other = graded_by_id["identity:0"]
     assert other is not None
-    assert other.status is GradeStatus.PASS  # advisory verdict, never gating
+    assert other.status is GradeStatus.PASS  # informational only, can't gate a release
     assert other.hard_gate is False
 
     event_names = [type(event).__name__ for event in events]

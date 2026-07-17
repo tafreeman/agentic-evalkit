@@ -1,20 +1,30 @@
-"""JSONL reporter: one header, one record per sample, one trailer.
+"""JSONL reporter: one header line, one line per sample, one trailer line.
 
-The streaming-friendly counterpart to :class:`~agentic_evalkit.reporters.json.JsonReporter`.
-Each line is independently parseable, so large runs can be processed without
-loading the whole file, while the header and trailer still carry the same
-provenance and summary fields as the canonical JSON envelope.
+"JSONL" (JSON Lines) means the file is made of separate, complete JSON
+objects, one per line, rather than one big JSON document. This is the
+streaming-friendly counterpart to
+:class:`~agentic_evalkit.reporters.json.JsonReporter`: because each line
+parses on its own, a tool can read and process one sample at a time as it
+goes, without ever having to load the entire (potentially huge) file into
+memory. The first line (the "header") and the last line (the "trailer")
+still carry the same provenance and summary fields as the canonical JSON
+envelope from :mod:`agentic_evalkit.reporters.json`, just split across the
+edges of the file instead of nested inside one structure.
 """
 
 from __future__ import annotations
 
 import json as jsonlib
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from pydantic import JsonValue
-
-from agentic_evalkit.models import EvalRunResult
 from agentic_evalkit.reporters.json import _atomic_write_text, _default_generated_at, _provenance
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pydantic import JsonValue
+
+    from agentic_evalkit.models import EvalRunResult
 
 
 def _header_record(run: EvalRunResult) -> dict[str, JsonValue]:

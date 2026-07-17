@@ -1,7 +1,13 @@
-"""Fixture: emits a CRLF-terminated JSON line whose bytes are split across
-several separate writes/flushes, to prove SubprocessTarget reassembles
-complete lines via StreamReader.readline() rather than assuming one write
-equals one line. Must parse identically on Windows and Linux.
+"""Fixture script: simulates a target that sends its response in several
+separate chunks (not all at once), ending the line with Windows-style
+"\\r\\n" (CRLF) instead of just "\\n" (LF).
+
+This exists to prove that SubprocessTarget correctly reassembles a full
+response line no matter how many separate writes it arrived in, using
+`StreamReader.readline()` -- rather than wrongly assuming that "one write
+from the subprocess" always means "one complete line." The test using this
+fixture must get the same, correctly-parsed result on both Windows and
+Linux.
 """
 
 import json
@@ -17,8 +23,11 @@ for line in sys.stdin:
         "metadata": {"fixture": "crlf-split"},
     }
     payload = json.dumps(response, separators=(",", ":"))
-    # Write the body in fragments, then a separate CRLF terminator write, so
-    # the transport-level bytes never coincide with the JSON line boundary.
+    # Write the JSON text in two separate pieces, and the line-ending bytes
+    # as a third, separate write -- so the data never arrives as one single
+    # write that happens to line up neatly with a full line. This is what
+    # actually forces SubprocessTarget to reassemble the pieces itself,
+    # instead of getting lucky with one complete write.
     buffer = sys.stdout.buffer
     midpoint = len(payload) // 2
     buffer.write(payload[:midpoint].encode("utf-8"))

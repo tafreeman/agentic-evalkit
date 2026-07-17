@@ -1,22 +1,28 @@
-"""Clean-wheel verification: the built wheel is self-contained (plan Task 15 Step 4).
+"""Clean-wheel verification: proves the built package is truly self-contained
+(plan Task 15 Step 4).
 
-Builds the wheel with ``python -m build --wheel``, creates a temporary
-virtual environment *outside* this repository, installs *only* the wheel
-into it (no editable install, no dev dependencies, no access to this
-checkout's ``src/`` on ``sys.path``), sets the working directory to that
-temporary directory, and runs the verification commands the plan
-specifies. This is the automated, repeatable form of the manual
-clean-wheel verification already recorded in
+A "wheel" is Python's standard built-package format (a ``.whl`` file) --
+the thing users actually ``pip install``. This test builds one with
+``python -m build --wheel``, then creates a temporary virtual environment
+*outside* this repository and installs *only* that wheel into it: no
+"editable install" (the dev-mode install that just points back at this
+source tree instead of copying code into the environment), no dev
+dependencies, and no way for this checkout's ``src/`` directory to sneak
+onto Python's import search path (``sys.path``) and paper over a packaging
+mistake. It then changes into that temporary directory and runs the
+verification commands the release plan specifies. This is the automated,
+repeatable version of the manual clean-wheel check already recorded in
 ``docs/release/v0.1-checkpoint.md``.
 
-Marked ``@pytest.mark.integration`` per the plan: it is slow (a real wheel
-build plus a real venv creation and package install). The project's default
-pytest filter only excludes ``live``-marked tests (``-m 'not live'``, see
-``pyproject.toml`` ``addopts`` and ``.github/workflows/ci.yml``), so this
-test *does* run in a plain local ``pytest`` invocation and in CI today --
-it is not excluded from the default suite. It does not require network
-access (the wheel build, venv creation, and install all resolve from the
-local checkout and uv's package cache), so running it by default is safe.
+Marked ``@pytest.mark.integration`` per the plan because it's slow (it does
+a real wheel build plus a real virtual-environment creation and package
+install). The project's default pytest filter only excludes tests marked
+``live`` (``-m 'not live'`` -- see ``pyproject.toml``'s ``addopts`` and
+``.github/workflows/ci.yml``), so this test *does* run in a plain local
+``pytest`` invocation and in CI today -- it is not skipped by default. It
+never needs network access (the wheel build, venv creation, and install
+all come from the local checkout and uv's local package cache), so leaving
+it in the default suite is safe.
 """
 
 from __future__ import annotations
@@ -33,30 +39,41 @@ pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: Import roots that must be completely absent from the installed wheel's
-#: dependency closure -- the same set the dependency-boundary AST scan
-#: forbids inside src/agentic_evalkit, verified here from the *installed
-#: package's* perspective instead of by reading source.
+#: Import roots (top-level package names) that must be completely missing
+#: from everything the installed wheel could possibly import, directly or
+#: indirectly. This is the same list a different contract test enforces by
+#: statically scanning the source code (parsing it into an AST, an
+#: "abstract syntax tree", to check import statements without running
+#: them) inside ``src/agentic_evalkit``. Here we check the same rule from
+#: the opposite direction: not by reading source, but by asking the
+#: actually-installed package at runtime whether these modules exist.
 _FORBIDDEN_IMPORT_ROOTS = ("agentic_v2", "tools.agents", "executionkit")
 
-#: The isolated-verification Python script run inside the temp venv.
-#: Written as a standalone string (not imported from this test module)
-#: because it must execute with *only* the wheel's dependencies on
-#: sys.path -- it cannot import pytest, this test file, or anything else
-#: from the outer environment.
+#: The verification script that actually runs inside the temporary,
+#: wheel-only virtual environment. It's written out here as a plain string
+#: (rather than living in its own file and being imported normally) because
+#: it has to run using *only* the wheel's own dependencies on Python's
+#: import path -- it must not be able to import pytest, this test file, or
+#: anything else from the outer test environment that wouldn't actually
+#: ship with the package.
 _VERIFICATION_SCRIPT = '''
 import importlib.util
 import sys
 
 
 def _find_spec_or_none(module_name: str):
-    """importlib.util.find_spec(), tolerating a missing parent package.
+    """Look up a module like importlib.util.find_spec() does, but never let
+    a missing parent package raise an error.
 
-    find_spec() raises ModuleNotFoundError (not just returning None) when
-    an intermediate parent package in a dotted name does not exist at all
-    (e.g. "tools.agents" when "tools" itself is not installed) rather than
-    when only the leaf submodule is missing. This helper normalizes both
-    cases to a plain None so every forbidden root is checked the same way.
+    Normally, find_spec() just returns None when a module doesn't exist.
+    But for a dotted name like "tools.agents", it instead *raises*
+    ModuleNotFoundError if the parent package ("tools") doesn't exist at
+    all -- unlike the plain None you get back when only the last part
+    ("agents") is missing while the parent is present. That inconsistency
+    would force callers to handle two different "not found" cases
+    differently. This helper flattens both cases down to a plain None, so
+    every forbidden import root can be checked the exact same way no
+    matter which part of the dotted name is missing.
     """
     try:
         return importlib.util.find_spec(module_name)
@@ -83,7 +100,12 @@ if __name__ == "__main__":
 def _run(
     command: list[str], *, cwd: Path, timeout: float = 300.0
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    # This silences a linter warning (S603) about subprocess calls that might
+    # run untrusted input. That risk doesn't apply here: `command` is always
+    # a plain list of arguments (never a shell string), and it's always one
+    # of this test's own hardcoded build/check commands -- never anything
+    # derived from user input.
+    return subprocess.run(  # noqa: S603
         command,
         cwd=cwd,
         capture_output=True,
@@ -96,10 +118,12 @@ def _run(
 def _build_wheel(dist_dir: Path) -> Path:
     """Build the wheel with ``python -m build --wheel`` into ``dist_dir``.
 
-    Uses the currently-running interpreter (this project's own venv, which
-    has the ``build`` dev dependency installed) purely as the *builder*;
-    the resulting wheel is what gets installed into the isolated verification
-    venv below, not this interpreter's own site-packages.
+    This uses the interpreter currently running this test (this project's
+    own dev environment, which has the ``build`` package installed) purely
+    as the *builder* -- a tool that produces the ``.whl`` file, nothing
+    more. The resulting wheel is what actually gets installed into the
+    separate, isolated verification environment created below; the code
+    under test never runs from this interpreter's own installed packages.
     """
     result = _run(
         [sys.executable, "-m", "build", "--wheel", "--outdir", str(dist_dir)],
@@ -127,12 +151,13 @@ def _create_isolated_venv(venv_dir: Path) -> Path:
 
 
 def _install_only_the_wheel(venv_python: Path, wheel_path: Path, *, cwd: Path) -> None:
-    """Install *only* ``wheel_path`` into the venv -- no dev/test dependencies.
+    """Install *only* ``wheel_path`` into the venv -- no dev or test dependencies.
 
-    Uses ``uv pip install`` with the venv's own interpreter targeted
-    explicitly (``--python``), so the install is pinned to the isolated
-    venv regardless of ``VIRTUAL_ENV``/activation state in the test
-    process itself.
+    This runs ``uv pip install`` and explicitly points it at the target
+    venv's own Python interpreter (via ``--python``), rather than relying on
+    activation. That guarantees the install goes into the isolated venv no
+    matter what ``VIRTUAL_ENV`` is set to, or whether any venv is
+    "activated," in the process actually running this test.
     """
     result = _run(
         ["uv", "pip", "install", "--python", str(venv_python), str(wheel_path)],
@@ -148,18 +173,19 @@ def test_clean_wheel_installs_and_runs_outside_the_repository() -> None:
     """Build the wheel, install it alone in an isolated venv, and verify it works.
 
     Per plan Task 15 Step 4, from a working directory *outside* the
-    repository with *only* the wheel installed:
+    repository, with *only* the wheel installed, each of these commands
+    must exit 0:
 
     - ``python -c "import agentic_evalkit; print(agentic_evalkit.__version__)"``
     - ``agentic-evalkit --help``
     - ``agentic-evalkit datasets curated --format json``
 
-    all exit 0, and the curated-presets output contains both ``gsm8k`` and
-    ``swe-bench-verified``. A helper built on
-    ``importlib.util.find_spec()`` (catching ``ModuleNotFoundError`` for
-    missing parent packages) confirms ``agentic_v2``, ``tools.agents``, and
-    ``executionkit`` all resolve to no spec inside the installed
-    environment.
+    and the curated-presets output must contain both ``gsm8k`` and
+    ``swe-bench-verified``. A helper built on ``importlib.util.find_spec()``
+    (which treats a ``ModuleNotFoundError`` from a missing parent package the
+    same as an ordinary "not found") confirms that ``agentic_v2``,
+    ``tools.agents``, and ``executionkit`` are all completely absent from the
+    installed environment -- ``find_spec()`` finds nothing for any of them.
     """
     with tempfile.TemporaryDirectory(prefix="agentic-evalkit-wheel-build-") as build_tmp:
         dist_dir = Path(build_tmp) / "dist"
@@ -167,8 +193,10 @@ def test_clean_wheel_installs_and_runs_outside_the_repository() -> None:
         wheel_path = _build_wheel(dist_dir)
 
         with tempfile.TemporaryDirectory(prefix="agentic-evalkit-clean-venv-") as venv_parent:
-            # tempfile.mkdtemp()-equivalent directories, guaranteed outside
-            # REPO_ROOT (system temp is never inside the repo checkout).
+            # These directories live under the system's temp folder (created
+            # via tempfile.TemporaryDirectory() above), so they're
+            # guaranteed to be outside REPO_ROOT -- the OS's temp location
+            # is never inside this repo checkout.
             venv_dir = Path(venv_parent) / "venv"
             work_dir = Path(venv_parent) / "work"
             work_dir.mkdir()
@@ -193,10 +221,14 @@ def test_clean_wheel_installs_and_runs_outside_the_repository() -> None:
                     f"environment; script output:\n{import_result.stdout}"
                 )
 
-            # The console-script entry point (agentic-evalkit) is the
-            # documented way to invoke the CLI; running it directly (rather
-            # than importing agentic_evalkit.cli) also proves the entry
-            # point itself was installed correctly by the wheel.
+            # "agentic-evalkit" is a console-script entry point: a small
+            # standalone executable that pip/uv generates during install so
+            # users can just type `agentic-evalkit` in a shell, instead of
+            # `python -m ...`. That's the documented way to invoke the CLI.
+            # Running this executable directly (rather than importing
+            # agentic_evalkit.cli from Python) also proves the entry point
+            # itself was installed correctly by the wheel, not just that the
+            # underlying package imports.
             cli_executable = venv_python.parent / (
                 "agentic-evalkit.exe" if sys.platform == "win32" else "agentic-evalkit"
             )

@@ -14,6 +14,7 @@ __pycache__/
 !.env.example
 .vscode/
 .sonar/
+.codex/
 external_analysis/
 # BMAD framework install + its generated output (local tooling, not repo content)
 _bmad/

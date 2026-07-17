@@ -1,74 +1,112 @@
-"""Dataset catalog: provider routing, presets, and cache decoration.
+"""Dataset catalog: picks which provider handles a request, exposes presets,
+and adds caching around ``preview`` (design doc §6.1-§6.3, plan Task 7
+Steps 3-4).
 
-Design §6.1-§6.3, plan Task 7 Steps 3-4. ``DatasetCatalog`` is the single
-entry point callers use instead of talking to a ``DatasetProvider`` directly:
-it dispatches ``search``/``resolve``/``preview``/``iter_records`` to the
-provider named by ``DatasetRef.provider`` (never by config, split, or any
-other field), exposes the built-in verified presets from
-:mod:`agentic_evalkit.datasets.presets`, and decorates ``preview`` with the
-content-addressed cache from :mod:`agentic_evalkit.datasets.cache` so a
-repeated request for the exact same page never re-hits the provider.
+``DatasetCatalog`` is the single front door callers use instead of talking
+to a specific ``DatasetProvider`` (e.g. the Hugging Face or local-file
+backend) directly. It does three things:
 
-Providers are supplied by the caller as a name-to-provider mapping,
-constructed and injected at ``DatasetCatalog.__init__`` time -- see
-:func:`agentic_evalkit.cli.datasets.build_catalog` for the reference
-construction, which builds the built-in ``local`` and ``huggingface``
-providers directly and passes them in. This module performs no plugin or
-entry-point discovery of its own (ADR-0019 retracted the entry-point
-discovery routine that once populated a mapping like this one); it only
-enforces that a caller-supplied provider can never silently replace a name
-reserved for a built-in provider (``builtin_provider_names``), raising
-:class:`~agentic_evalkit.errors.PluginCompatibilityError` instead.
+1. Routes each ``search``/``resolve``/``preview``/``iter_records`` call to
+   the provider named by ``DatasetRef.provider`` -- and only by that field;
+   config, split, and everything else about the request are irrelevant to
+   *which provider* handles it.
+2. Exposes the built-in, verified preset datasets from
+   :mod:`agentic_evalkit.datasets.presets`.
+3. Wraps ``preview`` with the "content-addressed" cache from
+   :mod:`agentic_evalkit.datasets.cache` -- a cache whose lookup key is
+   built from the exact details of the request (which dataset, which
+   revision, which page), so asking for the exact same page of the exact
+   same dataset twice is served from the cache the second time instead of
+   asking the provider again.
 
-``offline`` is a per-call argument on every method, never construction-time
-state on ``DatasetCatalog`` itself — the same per-call shape ``preview`` has
-always had. Per ADR-0010, whether ``offline=True`` is honored now turns on
-the *provider's* declared :attr:`~agentic_evalkit.datasets.base.DatasetProvider.requires_network`,
-not the operation alone. Per ADR-0011, ``resolve`` and ``iter_records`` each
-gain one narrow, additive exception to ADR-0010's rejection below: when an
-optional ``resolution_cache``/``cache`` has already been warmed by a prior
-online call (typically ``datasets pull``) for the *exact same* request, the
-warmed value is served instead of raising -- see each method's own
-docstring for the precise condition.
+Providers themselves are supplied by the caller as a plain ``{name:
+provider}`` mapping, built and handed to ``DatasetCatalog.__init__`` --
+see :func:`agentic_evalkit.cli.datasets.build_catalog` for the reference
+example, which constructs the built-in ``local`` and ``huggingface``
+providers directly and passes them in. This module does not go looking for
+providers on its own: an earlier version used Python's plugin/entry-point
+mechanism (a way for separately-installed packages to register themselves
+automatically, without this code needing to import them by name) to
+auto-populate a mapping like this one, but ADR-0019 (an architecture
+decision recorded in this project's docs) retracted that in favor of the
+caller always supplying providers explicitly. The one thing this module
+*does* still enforce on its own is that a caller-supplied provider can
+never silently take over a name reserved for a built-in one
+(``builtin_provider_names``) -- doing so raises
+:class:`~agentic_evalkit.errors.PluginCompatibilityError` instead of
+quietly letting the built-in provider be shadowed.
+
+``offline`` is an argument passed on every individual call, never something
+remembered on the ``DatasetCatalog`` object itself between calls -- the same
+per-call shape ``preview`` has always had. "Offline" means "answer this
+call without touching the network, using only what's already cached."
+Per ADR-0010, whether ``offline=True`` actually works for a given call now
+depends on the *provider's* own declaration of whether it needs the network
+at all (:attr:`~agentic_evalkit.datasets.base.DatasetProvider.requires_network`),
+not on which operation (search/resolve/etc.) is being called. Per ADR-0011,
+``resolve`` and ``iter_records`` each get one narrow addition on top of
+ADR-0010's rule: if an optional ``resolution_cache`` or page ``cache`` has
+already been "warmed" -- i.e. already has a stored result -- by an earlier
+*online* call (typically running ``datasets pull``) for that *exact same*
+request, the stored (warmed) value is served instead of raising an error.
+See each method's own docstring for the exact condition that has to hold.
+
+Putting that together, here is what ``offline=True`` actually does for each
+kind of provider and each method:
 
 - A provider that declares ``requires_network = False`` (the built-in
-  ``local`` provider; any future provider with the same property) is safe to
-  call under ``offline=True`` on every method, because "offline" means "do
-  not use the network" and such a provider never touches the network in the
-  first place. ``search``/``resolve``/``iter_records`` route straight
-  through to it exactly as they would with ``offline=False``.
-- A provider that declares ``requires_network = True`` (or omits the
-  attribute entirely -- treated as ``True``, the conservative default so an
-  older/third-party provider's behavior never silently changes) still cannot
-  honor ``offline=True`` on ``search``: a free-text query has no stable cache
-  key, so ``offline=True`` search always raises
-  :class:`~agentic_evalkit.errors.OfflineCacheMiss` with ``retryable=False``
-  (the "categorically uncacheable" case). ``resolve`` and ``iter_records``
-  are *usually* the same -- a resolution is what produces the revision a page
-  cache key would need, and iteration is not cache-decorated by default --
-  **unless** ADR-0011's ``resolution_cache``/``cache`` has already been
-  warmed for this exact request (see each method's docstring), in which case
-  the warmed value is served and no provider call or raise happens at all.
-  Absent that warm entry, both still raise exactly as before.
-- ``preview`` is unaffected by ``requires_network`` and keeps its existing
-  behavior regardless of provider: it is the one operation backed by an
-  exact-match cache key (design §6.3), so it always serves from the cache
-  when possible and only raises when no cache is configured or no exact
-  entry exists.
+  ``local`` provider, or any future provider with the same declaration) can
+  always be called under ``offline=True`` for every method, because
+  "offline" just means "don't use the network," and this kind of provider
+  never uses the network regardless of the flag. ``search``, ``resolve``,
+  and ``iter_records`` all route straight through to it exactly as they
+  would if ``offline=False`` had been passed instead.
+- A provider that declares ``requires_network = True`` (or simply doesn't
+  declare the attribute at all -- which is treated as ``True``, the safe
+  default that keeps an older or third-party provider's behavior from
+  silently changing underneath it) still can never honor ``offline=True``
+  on ``search``: a free-text search query has no stable, reusable cache key
+  the way a specific dataset page does, so there's nothing to have cached
+  in the first place. ``offline=True`` search against such a provider
+  therefore always raises
+  :class:`~agentic_evalkit.errors.OfflineCacheMiss` with
+  ``retryable=False`` -- meaning this isn't a "try again once something
+  warms the cache" situation, it is "categorically uncacheable": no amount
+  of waiting or retrying will ever make it work. ``resolve`` and
+  ``iter_records`` are *usually* in the same boat (a resolution is exactly
+  what produces the revision a page-cache key would need in the first
+  place, and iteration isn't cached by default) -- **except** when
+  ADR-0011's ``resolution_cache``/``cache`` has already been warmed for
+  this exact request (see each method's own docstring for details), in
+  which case the warmed value is served with no provider call and no error
+  at all. Without that warmed entry, both still raise exactly as they did
+  before ADR-0011.
+- ``preview`` ignores ``requires_network`` entirely and behaves the same
+  way regardless of which provider is involved: it is the one operation
+  backed by an exact-match cache key from the start (design doc §6.3) --
+  every ``preview`` call always serves from the cache when the exact page
+  is already stored there, and only raises when either no cache was
+  configured at all, or the cache exists but doesn't have this exact page
+  yet.
 
-The catalog does not remember or propagate the flag across calls.
+The catalog itself never remembers or carries the ``offline`` flag forward
+from one call to the next -- it is re-decided fresh on every single call.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from typing import TYPE_CHECKING
 
-from agentic_evalkit.datasets.base import DatasetProvider
 from agentic_evalkit.datasets.cache import CacheKey, DatasetCache
 from agentic_evalkit.datasets.presets import BUILTIN_PRESETS, DatasetPreset
 from agentic_evalkit.datasets.resolution_cache import ResolutionCache, ResolutionKey
 from agentic_evalkit.errors import OfflineCacheMiss, PluginCompatibilityError
 from agentic_evalkit.models import DatasetRef, ResolvedDataset, SamplePage, SearchPage, SourceRecord
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping
+
+    from agentic_evalkit.datasets.base import DatasetProvider
 
 __all__ = ["DatasetCatalog"]
 
@@ -85,13 +123,14 @@ _MAX_QUERY_CONTEXT_CHARS = 200
 
 
 def _truncate_query(query: str) -> str:
-    """Bound ``query`` for safe inclusion in error context (ADR-0010).
+    """Cap the length of ``query`` so it's safe to include in error context (ADR-0010).
 
-    Returns ``query`` unchanged when it already fits within
-    :data:`_MAX_QUERY_CONTEXT_CHARS`; otherwise returns the first
-    ``_MAX_QUERY_CONTEXT_CHARS`` characters plus a suffix recording the
-    original total length, so a truncated context value is always
-    self-describing rather than silently lossy.
+    Returns ``query`` unchanged if it already fits within
+    :data:`_MAX_QUERY_CONTEXT_CHARS` characters. Otherwise, returns just the
+    first ``_MAX_QUERY_CONTEXT_CHARS`` characters, with a suffix recording
+    how long the original query really was -- so a truncated value always
+    makes clear that it's been cut short (and by how much), instead of
+    silently looking like the whole, unmodified query.
     """
     if len(query) <= _MAX_QUERY_CONTEXT_CHARS:
         return query
@@ -99,42 +138,51 @@ def _truncate_query(query: str) -> str:
 
 
 class DatasetCatalog:
-    """Routes dataset operations by provider name and decorates ``preview`` with a cache.
+    """Picks which provider handles each dataset operation, and adds caching around ``preview``.
 
     Args:
         providers: Every available provider, keyed by the name that
-            ``DatasetRef.provider`` must match to route to it. This mapping
-            is the caller's responsibility to assemble and construct (see
-            :func:`agentic_evalkit.cli.datasets.build_catalog`); the catalog
-            only validates it for built-in-name collisions.
-        presets: The named preset catalog exposed via :meth:`list_presets`.
-            Defaults to :data:`agentic_evalkit.datasets.presets.BUILTIN_PRESETS`.
-        cache: The content-addressed cache :meth:`preview` reads from and
-            writes to. If ``None``, :meth:`preview` always calls the
-            provider directly and ``offline=True`` is rejected (there is
-            nothing to serve offline). Per ADR-0011, when set, this same
-            cache is also consulted by :meth:`iter_records` under
-            ``offline=True`` for a network-requiring provider, using the
-            identical page key :meth:`preview` would use.
-        resolution_cache: Persists the most recent successful resolution per
-            ``(provider, dataset_id, config, split, revision)`` request
-            identity (ADR-0011), where ``revision`` is the caller's
-            *requested* pin -- so two distinct pinned revisions of the same
-            dataset never collide. If
-            ``None`` (the default), :meth:`resolve` behaves exactly as
-            before ADR-0011: an ``offline=True`` resolve against a
-            network-requiring provider always raises. If set, every
-            successful :meth:`resolve` call writes the resolved identity
-            here, and an ``offline=True`` resolve against a network-requiring
-            provider first consults it before raising -- so a dataset
-            resolved online once (e.g. via ``datasets pull``) can be
-            resolved again offline without contacting the provider.
-        builtin_provider_names: Provider names reserved for built-in
-            providers. A name in both this tuple and ``providers`` raises
-            :class:`PluginCompatibilityError` at construction time rather
-            than letting a plugin silently replace a built-in. Defaults to
-            ``("local", "huggingface")`` (design §6.1's initial built-in
-            providers).
+            ``DatasetRef.provider`` must match for a request to be routed to
+            it. Assembling and constructing this mapping is the caller's
+            job (see :func:`agentic_evalkit.cli.datasets.build_catalog` for
+            the reference example) -- the catalog itself only checks it for
+            name collisions with the built-in providers.
+        presets: The named collection of preset datasets exposed through
+            :meth:`list_presets`. Defaults to
+            :data:`agentic_evalkit.datasets.presets.BUILTIN_PRESETS`.
+        cache: The "content-addressed" cache (one keyed by the exact
+            details of the request, so identical requests always find the
+            same entry) that :meth:`preview` reads from and writes to. If
+            ``None``, :meth:`preview` always calls the provider directly,
+            and passing ``offline=True`` is rejected -- there's no cache to
+            serve a result from. Per ADR-0011, when a cache *is* set, it is
+            also checked by :meth:`iter_records` when ``offline=True`` is
+            passed for a provider that needs the network, using the exact
+            same page-lookup key :meth:`preview` would use for that page.
+        resolution_cache: Stores the most recent successful ``resolve()``
+            result for each distinct ``(provider, dataset_id, config,
+            split, revision)`` combination (ADR-0011). Here ``revision`` is
+            whatever revision the *caller* originally asked for (their
+            "pin") -- so two different pinned revisions of the same
+            dataset are stored separately and never overwrite each other.
+            If this is ``None`` (the default), :meth:`resolve` behaves
+            exactly as it did before ADR-0011 introduced this cache: an
+            ``offline=True`` resolve against a provider that needs the
+            network always fails. If it is set, every successful
+            :meth:`resolve` call saves its result here, and a later
+            ``offline=True`` resolve against a network-requiring provider
+            checks here first before giving up -- so a dataset that was
+            already resolved once online (e.g. via running ``datasets
+            pull``) can be resolved again offline, without contacting the
+            provider a second time.
+        builtin_provider_names: Provider names reserved for the built-in
+            providers. If a name appears in both this tuple and in
+            ``providers``, construction fails immediately with
+            :class:`PluginCompatibilityError` rather than silently letting
+            a caller-supplied provider (e.g. a third-party plugin) replace a
+            trusted built-in one under the same name. Defaults to
+            ``("local", "huggingface")`` -- the design doc's §6.1 initial
+            set of built-in providers.
 
     Raises:
         PluginCompatibilityError: A key in ``providers`` collides with a
@@ -172,15 +220,19 @@ class DatasetCatalog:
 
     @staticmethod
     def _provider_requires_network(provider_impl: DatasetProvider) -> bool:
-        """Read a provider's network-independence declaration (ADR-0010).
+        """Read whether a provider says it needs the network to function (ADR-0010).
 
-        Defaults to ``True`` (network-required) when the attribute is
-        absent, so a provider implementation written before ADR-0010 --
-        including every pre-existing test fake in this codebase's own suite
-        -- keeps today's behavior (``offline=True`` is rejected for it)
-        rather than silently becoming exempt. Only a provider that
-        explicitly declares ``requires_network = False`` is ever routed
-        through under ``offline=True``.
+        If the provider doesn't declare a ``requires_network`` attribute at
+        all, this defaults to ``True`` (assume it needs the network). That
+        default matters for backward compatibility: a provider written
+        before ADR-0010 introduced this attribute -- including every
+        pre-existing test double ("fake") already in this codebase's test
+        suite -- keeps today's behavior (``offline=True`` calls against it
+        are rejected) instead of silently and unexpectedly starting to work
+        offline just because it was never updated to declare the
+        attribute. Only a provider that explicitly sets
+        ``requires_network = False`` is ever allowed to run under
+        ``offline=True``.
         """
         return bool(getattr(provider_impl, "requires_network", True))
 
@@ -198,25 +250,29 @@ class DatasetCatalog:
         cursor: str | None = None,
         offline: bool = False,
     ) -> SearchPage:
-        """Route a search to the named provider (design §6.1).
+        """Send a search to the named provider (design doc §6.1).
 
-        Search results are never cached (there is no stable, exact key for a
-        free-text query the way there is for a resolved page — design
-        §6.3's cache identity model is page/dataset-keyed, not query-keyed).
-        A provider that declares ``requires_network = False`` (ADR-0010) is
-        still called normally under ``offline=True`` -- it never touches the
-        network regardless -- but a network-requiring provider can never
-        honor ``offline=True`` honestly here: it always raises rather than
-        either silently contacting ``provider`` or silently returning a
-        stale/empty result.
+        Search results are never cached at all: there's no stable, exact
+        key for a free-text query the way there is for one specific,
+        already-resolved page of a dataset -- the cache's whole identity
+        scheme (design doc §6.3) is built around "this dataset, this
+        page," not "this query string." A provider that declares
+        ``requires_network = False`` (ADR-0010) is still called normally
+        even when ``offline=True``, since it never touches the network
+        regardless of that flag. But a provider that needs the network can
+        never honestly honor ``offline=True`` here: rather than either
+        silently making a real network call anyway, or silently handing
+        back a stale or empty result, this always raises instead.
 
         Raises:
             KeyError: ``provider`` is not registered with this catalog.
             OfflineCacheMiss: ``offline=True`` was passed and ``provider``
-                requires network access; search results are never cached,
-                so a search can never be served offline for such a
-                provider. Raised with ``retryable=False`` (ADR-0010): no
-                amount of warming makes a query-keyed search cacheable.
+                needs network access. Because search results are never
+                cached, a search can never be served offline for such a
+                provider, no matter what. Raised with ``retryable=False``
+                (ADR-0010) to signal that this isn't a "try again later"
+                situation -- no amount of caching or warming will ever make
+                a free-text search satisfiable offline.
         """
         provider_impl = self._provider_for(provider)
         if offline and self._provider_requires_network(provider_impl):
@@ -231,34 +287,42 @@ class DatasetCatalog:
         return await provider_impl.search(query, filters=filters, limit=limit, cursor=cursor)
 
     async def resolve(self, ref: DatasetRef, *, offline: bool = False) -> ResolvedDataset:
-        """Route resolution to ``ref.provider`` — the only field used for routing.
+        """Send resolution to ``ref.provider`` -- the only field this uses to pick a provider.
 
-        Resolution pins a revision (and often config/split/row-count/license
-        metadata) by asking the provider, and the existing content-addressed
-        page cache (:mod:`agentic_evalkit.datasets.cache`) has no key for
-        "the most recent resolution of this ref" — ``CacheKey.revision`` is
-        required precisely because a resolution is what produces it, so
-        design §6.3's page cache cannot itself serve a resolution. Per
-        ADR-0011, a *separate* :class:`~agentic_evalkit.datasets.resolution_cache.ResolutionCache`
+        "Resolving" a dataset means asking the provider to pin down an
+        exact revision (and usually config, split, row count, license, and
+        other metadata too) for a loose reference. The existing
+        "content-addressed" page cache (:mod:`agentic_evalkit.datasets.cache`,
+        keyed by the exact details of a request) has no way to represent
+        "the most recent resolution of this reference": its cache key
+        requires a revision to already be known (``CacheKey.revision``),
+        but producing that revision is exactly what resolving does in the
+        first place -- so design doc §6.3's page cache can never itself be
+        used to answer a resolve call. Per ADR-0011, a *separate* cache,
+        :class:`~agentic_evalkit.datasets.resolution_cache.ResolutionCache`,
         closes that gap when one is configured: every successful resolve
-        (online, or from a network-free provider) writes the resolved
-        identity there, and an ``offline=True`` resolve against a
-        network-requiring provider consults it before raising. A provider
-        that declares ``requires_network = False`` (ADR-0010, e.g. the
-        built-in ``local`` provider) is always resolved normally under
-        ``offline=True`` regardless — its "resolution" is reading a local
-        file, not a network round trip.
+        (whether it happened online, or came from a provider that doesn't
+        need the network at all) writes its result there, and a later
+        ``offline=True`` resolve against a network-requiring provider
+        checks there first before giving up and raising an error. A
+        provider that declares ``requires_network = False`` (ADR-0010 --
+        e.g. the built-in ``local`` provider) is always resolved normally
+        under ``offline=True`` regardless of any of this, because its
+        "resolution" just means reading a local file, never an actual
+        round trip over the network.
 
         Raises:
             KeyError: ``ref.provider`` is not registered with this catalog.
             OfflineCacheMiss: ``offline=True`` was passed, ``ref.provider``
-                requires network access, and no cached resolution exists for
-                this exact ``(provider, dataset_id, config, split)``.
-                ``retryable`` is ``True`` when a ``resolution_cache`` is
-                configured (an online resolve, or ``datasets pull``, for
-                this exact request would populate it) and ``False`` when no
-                ``resolution_cache`` is configured at all (ADR-0010's
-                original, unconditional behavior).
+                needs network access, and no cached resolution exists yet
+                for this exact ``(provider, dataset_id, config, split)``
+                combination. ``retryable`` is ``True`` when a
+                ``resolution_cache`` is configured at all (because an
+                online resolve, or running ``datasets pull``, for this
+                exact request would then populate it and let a later
+                offline call succeed) and ``False`` when no
+                ``resolution_cache`` is configured (ADR-0010's original,
+                unconditional "this can never work offline" behavior).
         """
         provider_impl = self._provider_for(ref.provider)
         if offline and self._provider_requires_network(provider_impl):
@@ -272,14 +336,20 @@ class DatasetCatalog:
         return resolved
 
     def _cached_resolution(self, ref: DatasetRef) -> ResolvedDataset | None:
-        """Return a warmed :class:`ResolutionCache` entry for ``ref``, or ``None``.
+        """Return an already-cached (:class:`ResolutionCache`) resolution for ``ref``, or ``None``.
 
-        ``None`` covers both "no resolution cache is configured" and "one is
-        configured but has no exact entry for this request yet" -- both mean
-        the caller must fall back to raising. A corrupt entry
-        (:class:`~agentic_evalkit.errors.DatasetIntegrityError`) is
-        deliberately NOT caught here: corruption must never be silently
-        treated as a miss (ADR-0004's distinction, reused by ADR-0011).
+        A ``None`` return covers two different situations: "no resolution
+        cache was configured on this catalog at all" and "one is
+        configured, but doesn't have an entry for this exact request yet."
+        Either way, the caller's only option is to fall back to raising an
+        error. Note that a *corrupted* cache entry
+        (:class:`~agentic_evalkit.errors.DatasetIntegrityError` -- meaning
+        the cached data is damaged or doesn't match what it should) is
+        deliberately **not** caught and hidden here: corruption is a real,
+        serious problem and must never be quietly treated as if the cache
+        simply had nothing stored (a "miss"). That distinction between
+        "miss" and "corrupt" comes from ADR-0004, and ADR-0011 reuses the
+        same rule here.
         """
         if self._resolution_cache is None:
             return None
@@ -309,15 +379,21 @@ class DatasetCatalog:
 
     @staticmethod
     def _resolution_key(ref: DatasetRef) -> ResolutionKey:
-        # ``ref.revision`` is the caller's *requested* pin (``None`` = "latest
-        # at resolution time"), included so two distinct pinned revisions of
-        # the same dataset never share a cache slot: without it, resolving
-        # ``ref@revB`` online would overwrite ``ref@revA``'s entry and an
-        # offline ``resolve(ref@revA)`` would be silently served ``revB``'s
-        # resolution (ADR-0011, 2026-07-09 fix). ``DatasetRef.revision`` is
-        # provider-honored (e.g. the Hugging Face provider forwards it to
-        # ``dataset_info(..., revision=...)``), so different pins genuinely
-        # resolve to different immutable revisions.
+        # ``ref.revision`` is whatever exact revision the caller asked for
+        # up front -- their "pin" (``None`` means "whatever is latest at
+        # resolution time," rather than one specific fixed version). It's
+        # included in the cache key so that two different pinned revisions
+        # of the same dataset never share one cache slot. Without this: for
+        # a dataset requested as both "revision A" and "revision B",
+        # resolving "revision B" online would overwrite "revision A"'s
+        # stored entry, and a later offline resolve asking for "revision A"
+        # would silently be handed "revision B"'s resolution instead -- a
+        # real bug that was fixed as ADR-0011 (2026-07-09). This only works
+        # because ``DatasetRef.revision`` is actually honored by providers
+        # (e.g. the Hugging Face provider passes it straight through to
+        # ``dataset_info(..., revision=...)``), so two different requested
+        # pins really do resolve to two different, unchanging revisions --
+        # they're not just labels.
         return ResolutionKey(
             provider=ref.provider,
             dataset_id=ref.dataset_id,
@@ -335,35 +411,45 @@ class DatasetCatalog:
         limit: int = 10,
         offline: bool = False,
     ) -> SamplePage:
-        """Return one page of ``dataset``, serving from cache when possible.
+        """Return one page of ``dataset``, serving it from the cache when possible.
 
         Builds an exact :class:`~agentic_evalkit.datasets.cache.CacheKey`
-        from ``ref.provider``, ``dataset``, ``offset``, and ``limit`` (a
-        page-record-type key, per design §6.3). A verified cache hit returns
-        the decoded page without calling the provider. A miss calls
-        ``ref.provider``'s ``preview`` and writes the exact returned page
-        back to the cache before returning it.
+        -- a lookup key built from ``ref.provider``, ``dataset``,
+        ``offset``, and ``limit`` together (a key specifically for "one
+        page of records," per design doc §6.3). If that exact key is
+        already in the cache and passes its integrity check, the decoded
+        page is returned straight away with no provider call at all. If
+        it's not there, this calls ``ref.provider``'s own ``preview``
+        method instead, and writes the exact page it returns back into the
+        cache before handing it back to the caller -- so the *next*
+        identical request will find it cached.
 
         Args:
-            offline: When ``True``, this method never calls the provider —
-                it only ever returns an exact cached page, or propagates
+            offline: When ``True``, this method will never call the
+                provider under any circumstances -- it only ever returns an
+                exact page already sitting in the cache, or lets
                 :class:`~agentic_evalkit.errors.OfflineCacheMiss` /
                 :class:`~agentic_evalkit.errors.DatasetIntegrityError` from
-                the cache. Requires ``cache`` to have been supplied at
-                construction time. Unlike ``search``/``resolve``/
-                ``iter_records``, this behavior does not depend on the
-                provider's ``requires_network`` declaration (ADR-0010):
-                ``preview`` is always cache-backed when a cache exists, for
-                every provider.
+                the cache propagate up. This requires a ``cache`` to have
+                been supplied when this catalog was constructed. Unlike
+                ``search``/``resolve``/``iter_records``, this behavior does
+                not depend at all on the provider's ``requires_network``
+                declaration (ADR-0010): ``preview`` is always backed by the
+                cache whenever one exists, no matter which provider is
+                involved.
 
         Raises:
-            OfflineCacheMiss: ``offline=True`` and either no cache is
-                configured on this catalog (``retryable=False`` -- no cache
-                exists to ever warm) or no exact cached page exists yet for
-                this ``(provider, dataset, offset, limit)`` (propagated from
-                :meth:`agentic_evalkit.datasets.cache.DatasetCache.read`
-                with its default ``retryable=True`` -- an online preview of
-                this exact page would populate it).
+            OfflineCacheMiss: ``offline=True`` was passed, and either (a)
+                no cache was configured on this catalog at all
+                (``retryable=False`` -- there is no cache that could ever
+                warm up and start working) or (b) a cache exists but
+                doesn't have an exact cached page yet for this particular
+                ``(provider, dataset, offset, limit)`` combination
+                (propagated from
+                :meth:`agentic_evalkit.datasets.cache.DatasetCache.read`,
+                whose default is ``retryable=True`` -- meaning an online
+                preview of this exact page later would populate the cache
+                and let a retry succeed).
         """
         if self._cache is None:
             if offline:
@@ -399,41 +485,48 @@ class DatasetCatalog:
         limit: int | None = None,
         offline: bool = False,
     ) -> AsyncIterator[SourceRecord]:
-        """Route bounded iteration to ``ref.provider``, or serve it from the page cache.
+        """Send bounded iteration to ``ref.provider``, or serve it from the existing page cache.
 
-        Unlike :meth:`preview`, iteration is not itself paginated by a
-        single exact-match cache key call -- a caller may request any
-        ``offset``/``limit`` shape. But per ADR-0011, when this exact call's
-        ``offset``/``limit`` (with ``limit`` not ``None``) already has a
-        warmed :meth:`preview`-compatible page entry in ``cache`` (e.g. from
-        an earlier ``datasets pull`` or ``preview`` of this identical page),
-        that entry is exactly what ``EvalRunner`` needs (it calls this
-        method with one fixed ``offset``/``limit`` per run), so it is served
-        from there under ``offline=True`` instead of raising. Any other
-        shape -- an unbounded (``limit=None``) iteration, or no matching
-        cache entry -- still delegates directly to the provider when
-        allowed, or raises when not; callers wanting guaranteed cached,
-        resumable pagination should still prefer repeated :meth:`preview`
-        calls. A provider that declares ``requires_network = False``
-        (ADR-0010) is always iterated normally under ``offline=True``
-        regardless -- it never touches the network in the first place.
+        Unlike :meth:`preview`, iteration doesn't go through a single
+        exact-match cache lookup by itself -- a caller can ask for any
+        ``offset``/``limit`` shape, not just one page at a time. But per
+        ADR-0011, if this exact call's ``offset``/``limit`` (as long as
+        ``limit`` isn't ``None``) happens to already match a page that's
+        already stored ("warmed") in ``cache`` in the same format
+        :meth:`preview` would use -- for example because an earlier
+        ``datasets pull`` or an earlier :meth:`preview` call already
+        fetched this identical page -- then that cached entry is exactly
+        what ``EvalRunner`` needs (it always calls this method with one
+        fixed ``offset``/``limit`` per run), so it's served straight from
+        there under ``offline=True`` instead of raising an error. Any
+        other shape -- an iteration with no upper bound (``limit=None``),
+        or one where no matching cache entry exists -- still goes directly
+        to the provider when that's allowed, or raises when it isn't. A
+        caller that wants guaranteed, resumable, cache-backed pagination
+        should still prefer making repeated :meth:`preview` calls instead
+        of relying on this method's caching. A provider that declares
+        ``requires_network = False`` (ADR-0010) is always iterated
+        normally under ``offline=True`` regardless of any of the above,
+        since it never touches the network to begin with.
 
         Args:
-            offline: When ``True`` and ``ref.provider`` requires network
-                access, this raises immediately (or returns a cache-backed
-                iterator, per ADR-0011 above) rather than returning an
-                iterator that would touch the provider on first iteration.
+            offline: When ``True`` and ``ref.provider`` needs network
+                access, this either raises right away, or (per ADR-0011
+                above) returns an iterator backed entirely by the cache --
+                it never returns an iterator that would end up quietly
+                calling the provider once you start consuming it.
 
         Raises:
             KeyError: ``ref.provider`` is not registered with this catalog.
             OfflineCacheMiss: ``offline=True`` was passed, ``ref.provider``
-                requires network access, and no cached page covers this
-                exact call. ``retryable`` is ``True`` when ``limit`` is not
-                ``None`` and a page ``cache`` is configured (an online
-                ``preview``/``pull`` of this exact page would populate it)
-                and ``False`` otherwise (unbounded iteration, or no cache
-                configured at all -- ADR-0010's original, unconditional
-                behavior).
+                needs network access, and no cached page covers this exact
+                call. ``retryable`` is ``True`` when ``limit`` is not
+                ``None`` and a page ``cache`` is configured at all (because
+                an online ``preview``/``pull`` of this exact page would
+                populate it and let a retry succeed) and ``False``
+                otherwise -- i.e. for an unbounded iteration, or when no
+                cache is configured at all (ADR-0010's original,
+                unconditional "this can never work offline" behavior).
         """
         provider_impl = self._provider_for(ref.provider)
         if offline and self._provider_requires_network(provider_impl):
@@ -455,15 +548,19 @@ class DatasetCatalog:
     def _cached_page_records(
         self, ref: DatasetRef, dataset: ResolvedDataset, *, offset: int, limit: int | None
     ) -> AsyncIterator[SourceRecord] | None:
-        """Return a warmed page's records as an async iterator, or ``None``.
+        """Return an already-cached page's records as an async iterator, or ``None``.
 
-        ``None`` covers "unbounded iteration" (``limit is None``, which has
-        no single-page cache key), "no page cache configured", and "cache
-        configured but no exact entry for this ``(offset, limit)`` yet" --
-        every one of those means the caller must fall back to raising or
-        delegating to the provider. A corrupt entry
+        A ``None`` return covers three different situations: iteration
+        with no upper bound (``limit is None``, which has no single
+        well-defined page to look up in the cache), no page cache
+        configured on this catalog at all, and a page cache that exists
+        but doesn't have an exact entry yet for this particular ``(offset,
+        limit)``. In every one of those cases, the caller has to fall back
+        to either raising an error or delegating to the provider directly.
+        As in :meth:`_cached_resolution`, a corrupted cache entry
         (:class:`~agentic_evalkit.errors.DatasetIntegrityError`) is
-        deliberately NOT caught here, matching :meth:`_cached_resolution`.
+        deliberately **not** caught here -- it's allowed to propagate
+        rather than being silently treated as if nothing were cached.
         """
         if limit is None or self._cache is None:
             return None

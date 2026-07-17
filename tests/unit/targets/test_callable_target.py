@@ -1,10 +1,16 @@
 """Contract tests for CallableTarget (plan Task 9, Step 2; design §8).
 
-The first test below is copied verbatim from
-``docs/plans/2026-07-02-agentic-evalkit-initial-release.md`` (Task 9, Step 2)
-where it lives as ``tests/contract/test_targets.py``; it is relocated here
-per this task's explicit test-tree ownership (``tests/unit/targets/**``)
-while keeping the test body byte-for-byte unmodified.
+A "contract test" checks that a class actually behaves the way its
+interface promises -- here, that CallableTarget is a valid ExecutionTarget
+(see ``src/agentic_evalkit/targets/base.py``).
+
+The first test below is copied word-for-word from
+``docs/plans/2026-07-02-agentic-evalkit-initial-release.md`` (Task 9, Step 2),
+where it originally lived in ``tests/contract/test_targets.py``. This
+project's convention is to keep a module's tests under a matching path
+inside ``tests/unit/...``, so the test was moved here -- to
+``tests/unit/targets/**`` -- without changing its code at all; the test
+body below is unchanged from the original, down to the last character.
 """
 
 import asyncio
@@ -99,10 +105,15 @@ async def test_callable_target_times_out_long_running_callable() -> None:
     import time
 
     def slow(value: dict[str, object]) -> dict[str, object]:
-        # 1.0s is 20x the 0.05s timeout -- ample to prove the timeout maps to
-        # ExecutionStatus.TIMEOUT -- while keeping the uncancellable
-        # to_thread sleep (which outlives the test and is awaited at
-        # event-loop shutdown) short.
+        # We sleep for 1.0s while the timeout is only 0.05s -- 20x longer,
+        # so there's no doubt the ExecutionStatus.TIMEOUT below is a real
+        # timeout and not a lucky race. Note that time.sleep() here runs on
+        # a background thread (via asyncio.to_thread) and can't be
+        # interrupted once started, so this thread keeps sleeping even
+        # after the test's real work is done -- Python's async machinery
+        # still has to wait for it before the process can fully shut down.
+        # That's why 1.0s and not something much longer: long enough to
+        # prove the point, short enough not to slow down the test suite.
         time.sleep(1.0)
         return {"answer": "too-late"}
 
@@ -137,7 +148,11 @@ async def test_callable_target_rejects_non_mapping_return_as_error() -> None:
 
 
 def test_callable_target_execute_signature_accepts_keyword_only_attempt_and_timeout() -> None:
-    """Design §8 / plan Step 5: execute(sample, *, attempt, timeout_seconds)."""
+    """Checks that execute()'s `attempt` and `timeout_seconds` parameters are
+    keyword-only (callers must write `attempt=...` and `timeout_seconds=...`,
+    not pass them positionally), as required by design doc section 8 / plan
+    Step 5: execute(sample, *, attempt, timeout_seconds).
+    """
     import inspect
 
     signature = inspect.signature(CallableTarget.execute)
@@ -147,6 +162,9 @@ def test_callable_target_execute_signature_accepts_keyword_only_attempt_and_time
 
 
 def test_target_failure_and_target_timeout_are_importable_from_errors() -> None:
-    """Sanity check binding target errors to the shared typed-error hierarchy."""
+    """Confirms TargetTimeout and TargetFailure live in the shared errors
+    module and are real Exception subclasses -- so callers can catch them
+    the same way as any other error in this codebase.
+    """
     assert issubclass(TargetTimeout, Exception)
     assert issubclass(TargetFailure, Exception)

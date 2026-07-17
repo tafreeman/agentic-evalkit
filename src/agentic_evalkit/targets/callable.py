@@ -1,10 +1,17 @@
-"""CallableTarget: an injected sync or async Python callable (design §8).
+"""CallableTarget: wraps a plain Python function as the system under test (design §8).
 
-Sync callables run through ``asyncio.to_thread`` so a slow synchronous
-system under test does not block the event loop; both sync and async paths
-are guarded by ``asyncio.timeout``. Exceptions are converted into typed
-``NormalizedExecutionResult`` errors without leaking local variables from the
-callable's frame -- only the exception type and message are recorded.
+The function handed in can be either a normal ("sync") function or an
+``async def`` function -- either works. A sync function is run via
+``asyncio.to_thread``, which moves it onto a background thread so a slow
+function cannot freeze the rest of the program while it runs (Python's
+async event loop can otherwise only do one thing at a time). Both sync and
+async calls are wrapped in ``asyncio.timeout``, so either kind is cancelled
+the same way if it runs too long. If the function raises an exception, it
+is caught and converted into a typed error result instead of crashing the
+whole evaluation run. Only the exception's type and message are recorded --
+deliberately not a full traceback -- so nothing that happened to be sitting
+in the function's local variables at the time of the error can leak into
+the recorded evidence.
 """
 
 import asyncio
@@ -25,11 +32,15 @@ TargetCallable = SyncCallable | AsyncCallable
 
 
 def _fingerprint(name: str, func: TargetCallable) -> str:
-    """Hash module/qualified-name/name into a stable ``callable:{name}:{hash}``.
+    """Build a short, stable ID for this callable: ``callable:{name}:{hash}``.
 
-    The hash is over the callable's identity (module + qualname), not its
-    output, so the fingerprint is stable across calls with different inputs
-    but changes if the underlying function object changes.
+    This is a "fingerprint": an ID for one exact target configuration, used
+    elsewhere to detect whether the target's identity changed between two
+    runs. It is built from the callable's identity -- its module and
+    qualified name -- plus ``name``, not from anything the callable
+    returns. That means calling the same function with different inputs
+    always produces the same fingerprint, but swapping in a different
+    function object changes it.
     """
     module = getattr(func, "__module__", "") or ""
     qualname = getattr(func, "__qualname__", "") or repr(func)
@@ -63,7 +74,7 @@ class CallableTarget:
                     f"{timeout_seconds}s timeout",
                 },
             )
-        except Exception as exc:  # deliberately normalized into an ERROR result below
+        except Exception as exc:  # deliberately broad -- turned into an ERROR result below
             return self._result(
                 sample,
                 attempt=attempt,
@@ -98,9 +109,9 @@ class CallableTarget:
     async def _invoke(self, sample: EvalSample, *, timeout_seconds: float | None) -> CallableResult:
         async with asyncio.timeout(timeout_seconds):
             if inspect.iscoroutinefunction(self._func):
-                async_func = cast(AsyncCallable, self._func)
+                async_func = cast("AsyncCallable", self._func)
                 return await async_func(sample.input)
-            sync_func = cast(SyncCallable, self._func)
+            sync_func = cast("SyncCallable", self._func)
             return await asyncio.to_thread(sync_func, sample.input)
 
     def _result(
