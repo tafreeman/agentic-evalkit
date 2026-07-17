@@ -1,36 +1,63 @@
-"""Grounded-citation probe grading (ADR-0012, design §9).
+"""Grading for the "grounded-citation" task (ADR-0012, design §9).
 
-Deterministic, LLM-free grading of a structured grounded answer against the
-trusted corpus its task supplied, plus an optional rubric-bound advisory
-judge tier -- the NIST-AREP-style grounded-citation probe: faithfulness
-(anti-hallucination), completeness (anti-cherry-picking), and sufficiency
-(anti-overreach).
+Did the AI actually back up its answer with real, verbatim quotes?
 
-The deterministic tier is a **grounding-hygiene floor, not an
-answer-correctness verdict**: it checks the citation discipline any correct
-grounded answer must clear -- the output parses into the documented
-``{answer, citations}`` contract, every cited document exists in the task's
-corpus, every quote is verbatim from its cited document, every required
-document is actually cited, and no planted do-not-cite canary token is
-echoed -- without asserting the answer itself is right. The sufficiency
-axis ("is the cited evidence strong enough for the claim?") cannot be
-decided deterministically; it belongs to the judge tier, which is
-score-inert and advisory unless the caller supplies a
-:class:`~agentic_evalkit.graders.judge.CalibrationArtifact` -- and even
-then ``JudgeGrader`` re-verifies the ratified floor at grade time
-(ADR-0007).
+A "grounded-citation" task gives the AI a question plus a trusted set of
+source documents, and expects an answer that cites those documents --
+similar in spirit to the evaluation style described in AI-evaluation
+standards guidance (NIST's AREP guidelines, cited alongside the UK AI
+Safety Institute's, as examples of authoritative advice on how to evaluate
+this kind of task). This module grades that answer along three separate
+angles: "faithfulness" (did the AI make something up that isn't actually in
+its sources -- i.e. hallucinate?), "completeness" (did it cherry-pick,
+ignoring some of the documents it was supposed to draw on?), and
+"sufficiency" (is the evidence it cited actually strong enough to support
+what it claimed, or is it overreaching?). The first two are checked here
+with plain code -- no AI model call involved, fully deterministic. The
+third question is instead checked by an optional AI judge (see below),
+since "is this evidence strong enough" isn't something a fixed rule can
+decide.
 
-Anti-gaming floor: a citation counts toward citation-presence and
-required-evidence coverage only when its normalized quote carries at least
-:data:`MIN_SUBSTANTIVE_QUOTE_TOKENS` tokens, so a degenerate answer citing
-one trivial verbatim word per required document cannot satisfy the gate.
+The deterministic checks in this file are a **grounding-hygiene floor, not
+a verdict on whether the answer is correct**. In other words: passing these
+checks proves the AI followed proper citation discipline, but says nothing
+about whether its actual answer is right. Specifically, these checks verify
+that the AI's output parses into the expected ``{answer, citations}``
+shape, every document it cites actually exists in the source material it
+was given, every quote it attributes to a document is an exact, verbatim
+match found in that document, every document it was required to use is
+actually cited somewhere, and no planted "do-not-cite" marker string (a
+"canary token" -- see ``contamination.py``) shows up anywhere in the
+answer. The "sufficiency" question above can't be answered by a fixed rule
+like these, so it's handed off to an AI judge instead. That judge's verdict
+never affects the score and can't block anything by default ("advisory")
+-- unless the caller hands in a
+:class:`~agentic_evalkit.graders.judge.CalibrationArtifact` (proof that
+this particular judge has been checked against real correct/incorrect
+examples and found reliable enough to trust). And even then,
+``JudgeGrader`` independently re-checks every time it grades that the
+calibration still meets the project's minimum reliability bar (ADR-0007):
+supplying a calibration object makes the judge *eligible* to gate, not
+automatically trusted.
 
-Containment normalization is the shared
-:func:`agentic_evalkit.graders.contamination.normalize_for_containment`
-(Unicode NFC / whitespace collapse / case fold, deliberately without
-``exact``'s numeric-shape rewrite -- an equality rule that would corrupt
-substring containment), so quote-faithfulness and canary-leak matching
-carry exactly one semantics across the package (ADR-0013).
+There's also a built-in defense against gaming these checks: a citation
+only counts toward "there's at least one real citation" or "this required
+document was covered" when its quote -- after cleanup for comparison -- has
+at least :data:`MIN_SUBSTANTIVE_QUOTE_TOKENS` words in it. Without this
+floor, an AI could technically pass every check by quoting one trivial,
+throwaway word (like "the") verbatim from each required document, without
+ever actually engaging with the source material.
+
+The text-cleanup-for-comparison logic is shared with
+:func:`agentic_evalkit.graders.contamination.normalize_for_containment`: it
+normalizes the Unicode encoding, collapses whitespace, and lowercases the
+text, but deliberately does *not* apply ``exact``'s number-reformatting
+step (the one that treats "5.0" and "5" as equal) -- that step makes sense
+when checking whether two whole answers are equal, but would corrupt the
+"does this quote appear inside this document" check if a number happened
+to sit inside the matched text. Sharing this exact cleanup logic means
+quote-checking and canary-leak-checking always agree on what counts as
+"the same text," everywhere in this package (ADR-0013).
 """
 
 import hashlib
@@ -68,15 +95,20 @@ __all__ = [
     "build_grounding_rubric",
 ]
 
-#: Minimum token count (after containment normalization) a citation's quote
-#: must carry before it counts toward citation-presence or required-evidence
-#: coverage. Guards the degenerate-pass hole found in adversarial review
-#: (2026-07-09): without it, one trivial verbatim word per required document
-#: plus any nonempty answer would clear every deterministic check.
+#: The minimum number of words a citation's quote must contain (after
+#: cleanup/normalization) before it counts toward "there's at least one
+#: real citation" or "this required document was covered." This closes a
+#: gaming hole found during an adversarial review on 2026-07-09: without
+#: this floor, an AI could pass every deterministic check just by quoting
+#: one trivial verbatim word (e.g. "the") from each required document, plus
+#: writing any non-empty answer -- without engaging with the source
+#: material at all.
 MIN_SUBSTANTIVE_QUOTE_TOKENS = 4
 
-#: Stable scope label stamped into every grade's evidence so no report can
-#: read the deterministic tier as an answer-correctness verdict.
+#: A fixed label recorded in every grade's evidence, so that anyone reading
+#: a report later can't mistake these deterministic checks for a verdict on
+#: whether the answer was actually correct -- they only check citation
+#: discipline (see the module docstring above).
 GRADING_SCOPE = "grounding-hygiene floor (citation discipline), not answer correctness"
 
 
@@ -86,9 +118,15 @@ def _token_count(text: str) -> int:
 
 
 def _quote_is_faithful(quote: str, document_text: str) -> bool:
-    """A quote is faithful iff its normalized form is a nonempty substring
-    of the normalized document text. An empty quote quotes nothing and is
-    never faithful -- guarding Python's vacuous ``"" in text`` truth.
+    """Check whether ``quote`` is a genuine, verbatim excerpt of ``document_text``.
+
+    A quote counts as faithful only if, after cleanup/normalization, it
+    appears as a non-empty substring somewhere inside the normalized
+    document text. An empty quote is never considered faithful, even
+    though Python would otherwise say an empty string is "found" inside any
+    text (``"" in text`` is always ``True`` in Python) -- that quirk would
+    let a meaningless, empty quote count as a valid citation, which this
+    explicitly guards against.
     """
     normalized_quote = normalize_for_containment(quote)
     if not normalized_quote:
@@ -97,13 +135,17 @@ def _quote_is_faithful(quote: str, document_text: str) -> bool:
 
 
 def _leaked_canary_tokens(answer: GroundedAnswer, canary_tokens: tuple[str, ...]) -> list[str]:
-    """Canary tokens echoed in the answer or any quote.
+    """Find any planted "do-not-say" marker strings that show up in the answer or any of its quotes.
 
-    Delegates matching to the shared, normalization-insensitive
-    :func:`agentic_evalkit.graders.contamination.find_canary_leaks` so this
-    grader and the reusable helper can never drift apart in semantics
-    (ADR-0013). Haystacks are scanned separately, never concatenated, so a
-    token can never be assembled across an answer/quote boundary.
+    The actual matching is delegated to the shared
+    :func:`agentic_evalkit.graders.contamination.find_canary_leaks` helper,
+    which ignores formatting differences like casing and spacing, so this
+    grader's definition of "the marker appears in the text" can never drift
+    out of sync with the shared definition used elsewhere (ADR-0013). Each
+    candidate piece of text (the answer itself, and each quote) is checked
+    separately, never joined together into one big string first -- so a
+    marker string can never accidentally be "found" just because the end
+    of one quote happens to connect with the start of another.
     """
     seen: set[str] = set()
     leaked: list[str] = []
@@ -117,7 +159,14 @@ def _leaked_canary_tokens(answer: GroundedAnswer, canary_tokens: tuple[str, ...]
 
 
 class _GroundingOracle(NamedTuple):
-    """Grading-side view of one task's corpus and oracle metadata."""
+    """The "answer key" this grader needs: the source documents plus grading-only facts about them.
+
+    This is the grader's private view of a task's ground truth -- separate
+    from what the AI itself was shown -- namely: the full text of every
+    source document (keyed by document ID), which documents the AI was
+    required to draw on, and which marker strings must never be echoed back
+    (see ``_leaked_canary_tokens`` above).
+    """
 
     document_text_by_id: dict[str, str]
     required_evidence: tuple[str, ...]
@@ -151,13 +200,17 @@ def _parse_string_items(value: object) -> tuple[str, ...] | None:
 
 
 def _parse_oracle(sample: EvalSample) -> _GroundingOracle | None:
-    """Extract the grading oracle a grounded-citation sample carries, or ``None``.
+    """Pull the "answer key" (see ``_GroundingOracle``) out of a sample, if it's there.
 
-    ``None`` means "this sample does not carry grounded-citation oracle
-    data" (the grader was pointed at a sample some other adapter prepared);
-    the grader abstains rather than failing the sample. ``canary_tokens``
-    may legitimately be empty -- the leak check is then vacuously clean --
-    but documents and required evidence must be present and nonempty.
+    Returns ``None`` when this sample simply doesn't carry grounded-citation
+    data at all -- meaning this grader was pointed at a sample some other,
+    unrelated adapter prepared, for a different kind of task. In that case
+    the grader abstains (declines to give a verdict) rather than failing
+    the sample outright, since that's not really this sample's fault.
+    ``canary_tokens`` is allowed to legitimately be an empty tuple -- the
+    leak check then simply always passes, since there's nothing to check
+    for -- but the documents and the required-evidence list must actually
+    be present and non-empty, or this still returns ``None``.
     """
     document_text_by_id = _parse_documents(sample.input.get("documents"))
     required_evidence = _parse_string_items(sample.metadata.get("required_evidence"))
@@ -178,8 +231,10 @@ def _failed_check_names(checks: dict[str, dict[str, Any]]) -> list[str]:
 
 
 def _check_evidence(checks: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    # Local evidence dicts use ``Any`` values and let pydantic validate at
-    # the ``GradeResult`` boundary, matching ``composite.py``'s precedent.
+    # These evidence dictionaries are loosely typed (`Any` values) here, and
+    # get properly checked later by Pydantic once they're placed into a
+    # `GradeResult` -- the same approach `composite.py` takes for its own
+    # evidence dictionaries.
     return {
         "grading_scope": GRADING_SCOPE,
         "checks": checks,
@@ -188,23 +243,28 @@ def _check_evidence(checks: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 
 class GroundedCitationGrader:
-    """Deterministic grounding-hygiene grader for structured grounded answers.
+    """Runs the deterministic citation-discipline checks described in the module docstring above.
 
-    Consumes ``execution.structured_output`` when present (else
-    ``execution.output``), validates it against
-    :class:`~agentic_evalkit.models.grounding.GroundedAnswer`, and runs the
-    :class:`~agentic_evalkit.models.grounding.GroundingCheck` battery
-    against the oracle data a
+    Reads ``execution.structured_output`` if the AI produced one (falling
+    back to plain ``execution.output`` otherwise), validates that it matches
+    the expected :class:`~agentic_evalkit.models.grounding.GroundedAnswer`
+    shape, and then runs the full set of checks defined in
+    :class:`~agentic_evalkit.models.grounding.GroundingCheck` against the
+    "answer key" data that a
     :class:`~agentic_evalkit.benchmarks.grounding.GroundedCitationAdapter`
-    sample carries. The primary outcome is binary; the per-check breakdown
-    is auxiliary evidence. ``hard_gate`` on the returned result is always
-    ``False`` -- gate policy belongs to the composition layer
-    (``WeightedGrader(..., hard_gate=True)``), matching ``ExactMatchGrader``.
+    sample carries. The headline result is a simple pass/fail; the results
+    of each individual check are kept too, as supplementary evidence. This
+    grader's own result always has ``hard_gate=False`` -- meaning it never
+    decides on its own whether a failure here should be allowed to block a
+    release. That decision is left to whatever combines this grader with
+    others (typically ``WeightedGrader(..., hard_gate=True)``), the same
+    pattern ``ExactMatchGrader`` follows.
 
     Args:
-        name: Stable grader identifier reported on every ``GradeResult``.
-        min_substantive_quote_tokens: Anti-gaming floor; see
-            :data:`MIN_SUBSTANTIVE_QUOTE_TOKENS`.
+        name: A stable label for this grader, recorded on every
+            ``GradeResult`` so you can tell which grader produced it.
+        min_substantive_quote_tokens: The minimum-quote-length anti-gaming
+            floor described above; see :data:`MIN_SUBSTANTIVE_QUOTE_TOKENS`.
     """
 
     def __init__(
@@ -349,31 +409,50 @@ def _rubric_digest(rubric: Rubric) -> str:
 
 
 class RubricBoundJudgeClient:
-    """Binds a :class:`Rubric` to any :class:`JudgeClient` (ADR-0012).
+    """Wraps a :class:`JudgeClient` so every request includes a specific rubric's checklist.
 
-    The first production binding of the rubric module to the judge pipeline:
-    every outgoing request's prompt is prefixed with the rubric's atomic
-    criteria and an instruction to return per-criterion PASS/FAIL verdicts
-    with evidence-citing rationales -- never a numeric rating (the
-    free-form-numeric-rating anti-pattern the eval-validity literature
-    warns against).
+    This is the first place in the codebase where the ``Rubric`` /
+    ``RubricCriterion`` data models (previously just plain data, not yet
+    connected to an actual live judge call) get wired into a real judge
+    request. Every outgoing prompt gets the rubric's individual, checkable
+    criteria listed up front, along with an instruction telling the judge
+    model to answer with a PASS/FAIL verdict for each criterion separately,
+    plus a short explanation citing evidence -- and, importantly, never as
+    a single free-form numeric rating (e.g. "7/10"). Asking a judge for a
+    bare numeric score with no justification is a well-documented failure
+    mode in eval-validity research: it's far less reliable than asking for
+    a specific, checkable verdict per criterion.
 
-    Identity: ``fingerprint`` covers the inner judge's fingerprint AND the
-    rubric content, so editing the rubric invalidates a
-    ``CalibrationArtifact`` exactly like changing the model or prompt would
-    (design §9: a fingerprint names the model+prompt configuration, and the
-    rubric is part of the prompt).
+    Identity (the ``fingerprint`` attribute): a "fingerprint" is a hash that
+    names the exact judge-model-plus-prompt configuration in use, so that a
+    ``CalibrationArtifact`` (proof that a specific judge configuration was
+    checked against real examples and found reliable) can be matched back
+    to the exact configuration it was measured on. This class's fingerprint
+    combines the wrapped judge's own fingerprint *and* the rubric's content
+    into one value, so that editing so much as the wording of a rubric
+    criterion invalidates any existing calibration for it -- exactly the
+    same way changing the underlying model or prompt would (design §9
+    treats the rubric as part of the prompt).
 
-    Position-bias probe: ``JudgeGrader`` re-sends every request with
-    ``metadata={"reversed": True}``; this client makes that probe concrete
-    by enumerating the rubric criteria in reverse order, so an
-    order-sensitive judge visibly flips its verdict and can never gate.
+    Position-bias probe: as explained in ``judge.py``, ``JudgeGrader``
+    double-checks that a judge isn't biased by option order by sending
+    every request a second time with ``metadata={"reversed": True}`` and
+    checking that the verdict doesn't flip. This class is what makes that
+    check concrete for a rubric-bound judge: when it sees that flag, it
+    literally lists the rubric's criteria in reverse order in the outgoing
+    prompt. That way, a judge model that's sensitive to the order its
+    criteria are presented in will visibly give a different verdict, and
+    ``JudgeGrader`` will correctly refuse to let it gate a release.
 
-    Fingerprint lifting: the wrapped response's ``fingerprint`` is rewritten
-    to this client's composite fingerprint only when the inner response
-    matched the inner client's own declared fingerprint; a genuine inner
-    mismatch passes through unchanged so ``JudgeGrader``'s
-    fingerprint-equality check still catches it.
+    Fingerprint lifting: this class rewrites the fingerprint on the
+    response it gets back from the wrapped judge, replacing it with its own
+    combined (judge + rubric) fingerprint -- but only when that response
+    actually matches the fingerprint the wrapped judge itself claims to
+    have. If the wrapped judge's response doesn't match its own declared
+    fingerprint (a genuine, unexpected mismatch -- meaning something has
+    gone wrong), this class leaves that mismatch untouched rather than
+    papering over it, so ``JudgeGrader``'s own fingerprint check downstream
+    still catches the problem instead of it being silently hidden.
     """
 
     def __init__(self, inner: JudgeClient, *, rubric: Rubric) -> None:
@@ -406,13 +485,20 @@ class RubricBoundJudgeClient:
 
 
 def build_grounding_rubric() -> Rubric:
-    """The three NIST-AREP grounded-citation axes as atomic rubric criteria.
+    """Build the rubric expressing the grounded-citation checks as individual criteria for a judge.
 
-    Faithfulness and completeness are deterministically approximated by
-    :class:`GroundedCitationGrader` (quote-faithfulness/citation-resolution
-    and required-evidence coverage respectively) and hard-gate there;
-    sufficiency cannot be decided deterministically and is judge-only,
-    advisory until calibrated (ADR-0007).
+    (Faithfulness, completeness, sufficiency.)
+
+    Faithfulness and completeness are already approximated by plain,
+    deterministic code in :class:`GroundedCitationGrader` (as
+    quote-faithfulness/citation-resolution and required-evidence coverage,
+    respectively); those checks are wired there as hard gates, so failing
+    either one forces an overall failure no matter what else looks good.
+    Sufficiency, on the other hand, genuinely can't be decided by a fixed
+    rule, so it's judged by an AI model instead, and stays advisory-only
+    (unable to block anything) unless and until that judge has been
+    calibrated -- checked against real examples and proven reliable
+    (ADR-0007).
     """
     return Rubric(
         rubric_id="grounded-citation-rubric@1",
@@ -454,22 +540,30 @@ def build_grounded_citation_grader(
     judge_weight: float = 0.0,
     name: str = "grounded-citation@1",
 ) -> Grader:
-    """Compose the grounded-citation probe (ADR-0012).
+    """Assemble the full grounded-citation grader: the deterministic checks plus an optional judge.
 
-    The deterministic tier is the hard gate (weight 1.0); the judge tier --
-    ``judge_client`` bound to :func:`build_grounding_rubric` via
-    :class:`RubricBoundJudgeClient` -- defaults to weight 0.0 (score-inert:
-    its verdict is recorded in child evidence but can never move the
-    composite score). Judge hard-gating without a calibration artifact is
-    structurally impossible here: the judge component is wired
-    ``hard_gate=False`` and ``JudgeGrader(gate=False)`` unless
-    ``calibration`` is supplied -- and even then ``JudgeGrader`` re-verifies
-    the ratified floor at grade time (ADR-0007).
+    (ADR-0012.)
+
+    The deterministic checks (:class:`GroundedCitationGrader`) are always
+    the hard gate here (weight 1.0 -- a failure there always fails the
+    whole thing). The optional judge tier -- ``judge_client`` wrapped with
+    the rubric from :func:`build_grounding_rubric` via
+    :class:`RubricBoundJudgeClient` -- defaults to weight 0.0, meaning its
+    verdict is recorded as evidence for a human to read, but mathematically
+    cannot move the combined score either way ("score-inert"). It's
+    structurally impossible for the judge to gate (block a release) here
+    unless the caller explicitly supplies a ``calibration`` artifact:
+    without one, the judge component is always built with
+    ``hard_gate=False`` and ``JudgeGrader(gate=False)``. And even when a
+    ``calibration`` is supplied, ``JudgeGrader`` still independently
+    re-checks at grading time that the calibration actually meets the
+    project's minimum reliability bar (ADR-0007) -- supplying a calibration
+    makes the judge *eligible* to gate, not automatically trusted.
 
     Raises:
         ValueError: ``calibration`` was supplied without a ``judge_client``
-            (nothing to calibrate), or ``judge_weight`` is negative
-            (rejected by ``WeightedGrader``).
+            (there would be nothing for that calibration to apply to), or
+            ``judge_weight`` is negative (rejected by ``WeightedGrader``).
     """
     if calibration is not None and judge_client is None:
         raise ValueError("calibration requires a judge_client to calibrate")

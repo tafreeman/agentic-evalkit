@@ -1,4 +1,6 @@
-"""Benchmark adapters and harness boundaries."""
+"""Benchmark adapters (turn raw dataset rows into gradable tasks) and the
+harness boundary (the piece that hands results off to real, authoritative
+verification tools)."""
 
 from agentic_evalkit.benchmarks.base import BenchmarkAdapter
 from agentic_evalkit.benchmarks.grounding import GroundedCitationAdapter

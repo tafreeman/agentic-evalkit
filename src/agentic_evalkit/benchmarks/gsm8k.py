@@ -1,11 +1,16 @@
 """GSM8K benchmark adapter (design §6.2, §7).
 
-GSM8K is the runnable quickstart preset: ``openai/gsm8k``, config ``main``,
-split ``test``, graded with ``normalized-exact@1`` (design §6.2). This
-module projects raw GSM8K rows (``question``/``answer`` fields, where
-``answer`` embeds step-by-step reasoning followed by a ``#### <number>``
-final-answer marker) into typed :class:`~agentic_evalkit.models.EvalSample`
-instances with a normalized numeric reference string.
+GSM8K (Grade School Math 8K) is the benchmark this project uses as its
+"does it work out of the box" quickstart example: it loads the
+``openai/gsm8k`` dataset (config ``main``, split ``test``) and grades
+answers with the ``normalized-exact@1`` grader, which just checks whether
+the final numeric answer matches exactly after some basic cleanup (design
+§6.2). This module turns raw GSM8K rows -- each with a ``question`` field
+and an ``answer`` field, where ``answer`` contains free-form step-by-step
+reasoning followed by a ``#### <number>`` marker giving the final answer --
+into this project's typed :class:`~agentic_evalkit.models.EvalSample`
+format, with a cleaned-up ("normalized") numeric answer string used as the
+grading reference.
 """
 
 from pydantic import JsonValue
@@ -21,22 +26,23 @@ _GRADER_NAME = "normalized-exact@1"
 
 
 def extract_final_answer(answer_text: str) -> str:
-    """Extract and normalize the final numeric answer from a GSM8K answer.
+    """Pull out and clean up the final numeric answer from a GSM8K answer string.
 
-    GSM8K answers embed free-form reasoning followed by a ``####`` marker
-    and the final numeric answer (for example, ``"work\\n#### 5.0"``). This
-    takes the text after the *final* ``####`` occurrence (reasoning text may
-    legitimately contain the literal characters elsewhere), then normalizes
-    it by:
+    A GSM8K answer field contains free-form reasoning text followed by a
+    ``####`` marker and then the final numeric answer (for example,
+    ``"work\\n#### 5.0"``). This function takes only the text after the
+    *last* ``####`` in the string (the reasoning text earlier on could
+    legitimately contain those same characters, so we can't just take the
+    first one), then cleans it up by:
 
-    - stripping surrounding whitespace;
+    - stripping leading/trailing whitespace;
     - removing thousands-separator commas (``"1,000"`` -> ``"1000"``);
-    - collapsing an integer-equivalent trailing ``.0`` decimal
-      (``"5.0"`` -> ``"5"``) so formatting differences do not cause a
-      normalized-exact grading mismatch.
+    - dropping a trailing ``.0`` when the number is a whole number
+      (``"5.0"`` -> ``"5"``), so that two answers differing only in this
+      kind of formatting still count as an exact match when graded.
 
     Raises:
-        ValueError: ``answer_text`` contains no ``####`` marker at all.
+        ValueError: ``answer_text`` doesn't contain a ``####`` marker at all.
     """
     if _FINAL_ANSWER_MARKER not in answer_text:
         raise ValueError(f"no {_FINAL_ANSWER_MARKER!r} marker found in answer text")
@@ -50,17 +56,18 @@ def extract_final_answer(answer_text: str) -> str:
 
 
 class Gsm8kAdapter:
-    """Projects raw GSM8K rows into typed, objectively gradable samples."""
+    """Turns raw GSM8K rows into typed samples that can be graded
+    objectively (by exact answer comparison, not by human or AI judgment)."""
 
     api_version = _API_VERSION
     name = _ADAPTER_NAME
 
     def prepare(self, record: SourceRecord) -> EvalSample:
-        """Project one GSM8K source record into an :class:`EvalSample`.
+        """Turn one raw GSM8K row into an :class:`EvalSample`.
 
         Raises:
-            DatasetSchemaMismatch: the row is missing ``question`` or
-                ``answer``, or ``answer`` has no ``####`` marker.
+            DatasetSchemaMismatch: the row is missing its ``question`` or
+                ``answer`` field, or ``answer`` has no ``####`` marker.
         """
         question = record.data.get("question")
         answer = record.data.get("answer")
@@ -88,11 +95,13 @@ class Gsm8kAdapter:
         )
 
     def validate_oracle(self, sample: EvalSample) -> bool:
-        """A GSM8K sample is oracle-valid iff it carries a nonempty reference."""
+        """A GSM8K sample is ready to grade exactly when it has a non-empty
+        reference answer to compare against."""
         return bool(sample.reference)
 
     def aggregate_metadata(self) -> dict[str, JsonValue]:
-        """Benchmark-specific metadata recorded on run aggregation (design §7)."""
+        """Extra, benchmark-specific details recorded when summarizing a run
+        (design §7)."""
         return {
             "benchmark": "gsm8k",
             "adapter": _ADAPTER_NAME,

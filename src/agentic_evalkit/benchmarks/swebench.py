@@ -1,13 +1,18 @@
 """SWE-bench Verified benchmark adapter (design §6.2, §7.1).
 
-``princeton-nlp/SWE-bench_Verified`` (config ``default``, split ``test``) is
-discoverable, previewable, and projectable, and this adapter can export the
-official prediction schema without Docker or a code checkout; authoritative
-resolution grading requires the optional ``swebench`` harness capability
-(``benchmarks.harness``). This module never checks out code, never executes
-a patch, and never labels anything "resolved" — that verdict can only come
-from a real :class:`~agentic_evalkit.benchmarks.harness.HarnessResult`
-(design §7.1: "Generic rubric or similarity scoring must never be labeled
+The ``princeton-nlp/SWE-bench_Verified`` dataset (config ``default``, split
+``test``) works with this project's normal dataset tooling: it can be
+looked up, previewed a few rows at a time, and turned into typed samples.
+This adapter can also export a prediction in the exact format the official
+SWE-bench tooling expects, and it can do all of that without Docker
+installed and without actually checking out the target repository's code.
+Getting a real, authoritative pass/fail verdict on whether a fix actually
+works, though, requires the optional ``swebench`` harness feature (see
+``benchmarks.harness``) -- this module by itself never checks out code,
+never applies a patch, and never labels anything "resolved" itself. That
+verdict can only ever come from a real
+:class:`~agentic_evalkit.benchmarks.harness.HarnessResult` (design §7.1:
+"Generic rubric or similarity scoring must never be labeled
 `SWE-bench resolved`.").
 """
 
@@ -34,12 +39,15 @@ _REQUIRED_STRING_FIELDS = (
 
 
 def _parse_test_name_list(value: object, *, field_name: str, row_id: str) -> tuple[str, ...]:
-    """Parse a SWE-bench fail/pass-to-pass field from a JSON string or array.
+    """Parse one of SWE-bench's test-name list fields, in whichever format it comes in.
 
-    Upstream SWE-bench rows encode ``FAIL_TO_PASS``/``PASS_TO_PASS`` as a
-    JSON-encoded string (``'["test_x"]'``) in some sources and as a native
-    array in others; this accepts either and always returns a tuple of
-    plain strings.
+    ``FAIL_TO_PASS`` and ``PASS_TO_PASS`` are lists of test names -- the
+    tests that should go from failing to passing (or stay passing) once a
+    correct fix is applied. Depending on where the data came from, the
+    original SWE-bench rows store these either as a JSON string that still
+    needs parsing (for example ``'["test_x"]'``) or as an already-native
+    array. This function accepts either form and always hands back a plain
+    tuple of strings.
     """
     parsed = value
     if isinstance(parsed, str):
@@ -59,22 +67,25 @@ def _parse_test_name_list(value: object, *, field_name: str, row_id: str) -> tup
 
 
 class SweBenchVerifiedAdapter:
-    """Projects raw SWE-bench Verified rows and exports official predictions."""
+    """Turns raw SWE-bench Verified rows into samples, and exports
+    predictions in the official format the real SWE-bench tooling expects."""
 
     api_version = _API_VERSION
     name = _ADAPTER_NAME
 
     def prepare(self, record: SourceRecord) -> EvalSample:
-        """Project one SWE-bench Verified source record into an ``EvalSample``.
+        """Turn one raw SWE-bench Verified row into an ``EvalSample``.
 
-        Preserves issue, repository, base-commit, and test metadata as
-        sample metadata/artifacts. This never checks out the repository or
-        applies any patch — it is pure, offline row projection.
+        Keeps the issue description, repository name, base commit, and test
+        information as sample metadata/artifacts. This never actually
+        downloads or checks out the repository, and never applies any patch
+        -- it's a pure, offline transformation of one row's fields into the
+        typed sample format.
 
         Raises:
-            DatasetSchemaMismatch: a required field is missing, not a
-                string, or ``FAIL_TO_PASS``/``PASS_TO_PASS`` cannot be
-                parsed into a list of test names.
+            DatasetSchemaMismatch: a required field is missing or isn't a
+                string, or ``FAIL_TO_PASS``/``PASS_TO_PASS`` can't be parsed
+                into a list of test names.
         """
         missing = [
             field
@@ -87,9 +98,13 @@ class SweBenchVerifiedAdapter:
                 context={"row_id": record.row_id},
             )
 
-        # `cast` documents the invariant the `missing` check above already
-        # proved (every field in `_REQUIRED_STRING_FIELDS` is a `str`) without
-        # a runtime check that `assert` would strip under `python -O`.
+        # `cast` here just tells the type checker "trust me, this is a str"
+        # -- it does nothing at runtime. We can safely say that because the
+        # `missing` check just above already confirmed every field in
+        # `_REQUIRED_STRING_FIELDS` really is a string. We use `cast`
+        # instead of an `assert` because Python strips `assert` statements
+        # out entirely when run in optimized mode (`python -O`), so an
+        # `assert` here would silently stop protecting us in that mode.
         instance_id = cast("str", record.data["instance_id"])
         repo = cast("str", record.data["repo"])
         base_commit = cast("str", record.data["base_commit"])
@@ -127,15 +142,15 @@ class SweBenchVerifiedAdapter:
         patch: str,
         model_name_or_path: str = _DEFAULT_MODEL_NAME_OR_PATH,
     ) -> dict[str, str]:
-        """Export the official SWE-bench prediction shape for ``sample``.
+        """Export ``sample``'s prediction in the official SWE-bench format.
 
-        Returns exactly the three official SWE-bench prediction keys
-        (``instance_id``, ``model_name_or_path``, ``model_patch``) — no
-        adapter or framework metadata is ever mixed into the export, so the
-        result is directly consumable by the real SWE-bench harness or a
-        leaderboard submission. ``model_name_or_path`` defaults to
-        ``"agentic-evalkit-target"`` but callers should pass the actual
-        system name for real submissions.
+        Returns exactly the three fields the official SWE-bench tooling
+        expects (``instance_id``, ``model_name_or_path``, ``model_patch``)
+        -- nothing else from this project's own data model gets mixed in,
+        so the result can be handed directly to the real SWE-bench harness
+        or submitted to a leaderboard as-is. ``model_name_or_path`` defaults
+        to the placeholder ``"agentic-evalkit-target"``, but callers making
+        a real submission should pass the actual system's name instead.
         """
         instance_id = sample.metadata.get("instance_id")
         if not isinstance(instance_id, str):
@@ -150,19 +165,21 @@ class SweBenchVerifiedAdapter:
         }
 
     def validate_oracle(self, sample: EvalSample) -> bool:
-        """Validate row completeness and prediction identity, not patch correctness.
+        """Check the row is complete enough to identify and route -- this
+        does not judge whether any actual patch is correct.
 
-        This confirms the sample carries everything needed to export a
-        prediction (an ``instance_id``) and to eventually route it through
-        an authoritative harness — it never inspects or judges patch
-        content, since only a real ``HarnessResult`` may determine
-        resolution (design §7.1).
+        This only confirms the sample has what it needs to export a
+        prediction (an ``instance_id``) and eventually be sent through an
+        authoritative harness for real grading. It never looks at or judges
+        any patch's content -- only a real ``HarnessResult`` is allowed to
+        decide whether an issue is actually resolved (design §7.1).
         """
         instance_id = sample.metadata.get("instance_id")
         return isinstance(instance_id, str) and bool(instance_id)
 
     def aggregate_metadata(self) -> dict[str, JsonValue]:
-        """Benchmark-specific metadata recorded on run aggregation (design §7)."""
+        """Extra, benchmark-specific details recorded when summarizing a run
+        (design §7)."""
         return {
             "benchmark": "swebench-verified",
             "adapter": _ADAPTER_NAME,

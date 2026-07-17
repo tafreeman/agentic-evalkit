@@ -1,19 +1,26 @@
-"""Pipeline orchestration: dataset -> adapter -> target -> grader (plan Task 11).
+"""Runs one evaluation from start to finish: dataset -> adapter -> target -> grader (plan Task 11).
 
-``EvalRunner`` is the single place that wires together an already-resolved
-set of named components (adapters, execution targets, graders) and drives
-one :class:`~agentic_evalkit.models.EvalRunManifest` through to a complete
-:class:`~agentic_evalkit.models.EvalRunResult`. It does not select, import,
-or construct those components itself -- the caller (typically the CLI or a
-higher-level catalog/registry, added in a later task) injects them by name.
+``EvalRunner`` is the one place in this package that actually drives an
+evaluation run. Given a manifest (the config describing what to run) and a
+set of already-built components -- adapters, execution targets (wrappers
+around the AI system being tested), and graders (things that judge whether
+an output was correct) -- it walks through the whole pipeline: pull records
+from the dataset, adapt each one into a sample, run it against the target,
+grade the result, and assemble everything into one complete result object.
+``EvalRunner`` itself never chooses, imports, or constructs any of those
+components -- the caller (usually the CLI, or a higher-level registry added
+in a later task) is responsible for building them and handing them to the
+runner by name.
 
-The runner is deliberately decoupled from the concrete dataset catalog: it
-depends only on the small, local ``_CatalogProtocol`` defined below (an
-async ``resolve`` plus an async-iterator ``iter_records``), not on
-``agentic_evalkit.datasets.catalog.DatasetCatalog``. This keeps the runner
-importable and testable without pulling in provider/cache machinery, and
-lets any object with the right shape (a real catalog, a fake, a filtered
-view) stand in for it.
+The runner deliberately doesn't depend on the real dataset catalog class.
+Instead, it only requires that whatever "catalog" it's given matches a
+small, locally defined shape (``_CatalogProtocol`` below): something with
+an async ``resolve`` method and an async ``iter_records`` iterator. This
+keeps the runner lightweight to import and easy to test in isolation,
+without dragging in all the dataset-provider and caching machinery -- and
+it means any object with the right two methods (a real catalog, a
+lightweight test double, a filtered view over a catalog) can stand in for
+it.
 """
 
 from __future__ import annotations
@@ -58,31 +65,38 @@ if TYPE_CHECKING:
     from agentic_evalkit.graders.base import Grader
     from agentic_evalkit.targets.base import ExecutionTarget
 
-#: Serialized ``NormalizedExecutionResult.output`` larger than this many bytes
-#: is spilled to the artifact store and replaced with a reference (plan
-#: Task 11, Step 5, requirement 8) instead of being kept inline in the run
-#: result. This keeps large tool outputs, logs, or generated files out of the
-#: in-memory/JSON-serialized ``EvalRunResult`` while remaining retrievable.
+#: If a sample's output, once serialized, is bigger than this many bytes, it
+#: gets moved ("spilled") out to the artifact store and replaced in the run
+#: result with just a reference pointing at it (plan Task 11, Step 5,
+#: requirement 8), rather than being kept directly inline. This keeps large
+#: tool outputs, logs, or generated files from bloating the in-memory or
+#: JSON-serialized ``EvalRunResult``, while still letting you go fetch the
+#: full content later if you need it.
 _LARGE_OUTPUT_THRESHOLD_BYTES = 8192
 
 EventSink = Callable[[RunEvent], None]
 
-#: A structural adapter boundary matching ``BenchmarkAdapter.prepare`` (design
-#: §7). The runner only ever calls ``prepare``; it never validates oracles or
-#: aggregates benchmark metadata itself.
+#: The one method the runner actually needs from a ``BenchmarkAdapter``
+#: (design §7): something callable that turns one raw ``SourceRecord`` into
+#: one ``EvalSample``, matching ``BenchmarkAdapter.prepare``'s signature.
+#: The runner only ever calls this ``prepare`` step -- it never checks
+#: correct answers ("oracles") or gathers benchmark-wide statistics itself;
+#: those are the adapter's own responsibility, not the runner's.
 Adapter = Callable[[SourceRecord], EvalSample]
 
 
 @runtime_checkable
 class _CatalogProtocol(Protocol):
-    """The runner's own, minimal view of a dataset catalog.
+    """The minimal shape of "a dataset catalog" that the runner actually needs.
 
-    Deliberately local to this module rather than imported from
-    ``agentic_evalkit.datasets.catalog``: the runner depends on this shape
-    (resolve a ``DatasetRef`` once, then iterate records from the resolved
-    dataset), not on any particular catalog implementation. Any object -- a
-    real ``DatasetCatalog``, a single provider, or a test fake -- that
-    exposes these two methods satisfies this protocol.
+    This is defined here, locally, instead of importing the real catalog
+    class from ``agentic_evalkit.datasets.catalog`` -- because the runner
+    doesn't care about any particular catalog implementation. All it needs
+    is something that can resolve a ``DatasetRef`` once, and then let it
+    iterate over the records in that resolved dataset. Any object that has
+    these two methods -- a real ``DatasetCatalog``, a single dataset
+    provider, or a lightweight fake used in tests -- satisfies this
+    protocol and can be passed to the runner.
     """
 
     async def resolve(self, ref: DatasetRef) -> ResolvedDataset: ...
@@ -93,7 +107,7 @@ class _CatalogProtocol(Protocol):
 
 
 class _PrepareAdapter(Protocol):
-    """Matches the subset of ``BenchmarkAdapter`` the runner calls."""
+    """The one piece of ``BenchmarkAdapter`` the runner actually calls: its ``prepare`` method."""
 
     def prepare(self, record: SourceRecord) -> EvalSample: ...
 
@@ -111,34 +125,42 @@ def _default_id_factory() -> str:
 
 
 class EvalRunner:
-    """Drives one manifest through resolve -> prepare -> execute -> grade.
+    """Runs one manifest through resolve -> prepare -> execute -> grade, end to end.
 
     Args:
-        catalog: Anything satisfying :class:`_CatalogProtocol` -- resolves a
-            ``DatasetRef`` once per run and iterates ``SourceRecord`` values
-            from the resolved dataset.
-        adapters: Named ``BenchmarkAdapter``-shaped objects (only ``prepare``
-            is called), keyed by the name a manifest's ``adapter`` field
-            references.
-        targets: Named :class:`~agentic_evalkit.targets.base.ExecutionTarget`
-            instances, keyed by the name a manifest's ``target_name`` field
-            references.
-        graders: Named :class:`~agentic_evalkit.graders.base.Grader`
-            instances, keyed by the name a manifest's ``grader`` field
-            references.
-        artifact_store: Where large outputs are spilled (see
-            ``_LARGE_OUTPUT_THRESHOLD_BYTES``).
-        clock: Injectable timestamp source; defaults to ``datetime.now(UTC)``.
-            Tests can inject a deterministic clock.
-        id_factory: Injectable run-ID source; defaults to a random UUID hex
-            string. Tests can inject a deterministic sequence.
-        redaction_policy: Policy applied to spilled artifact bytes before
-            they are written (see ``_spill_large_output``). Defaults to
+        catalog: Anything matching :class:`_CatalogProtocol` -- it resolves
+            a ``DatasetRef`` once per run, then lets the runner iterate over
+            the ``SourceRecord`` values in that resolved dataset.
+        adapters: A lookup of ``BenchmarkAdapter``-like objects, keyed by
+            name. The runner only ever calls their ``prepare`` method. The
+            name used to look one up comes from the manifest's ``adapter``
+            field.
+        targets: A lookup of
+            :class:`~agentic_evalkit.targets.base.ExecutionTarget` instances
+            (each one a wrapper around some AI system being tested), keyed
+            by name. The name comes from the manifest's ``target_name``
+            field.
+        graders: A lookup of :class:`~agentic_evalkit.graders.base.Grader`
+            instances (things that judge whether an output was correct),
+            keyed by name. The name comes from the manifest's ``grader``
+            field.
+        artifact_store: Where outputs that are too large to keep inline get
+            saved instead (see ``_LARGE_OUTPUT_THRESHOLD_BYTES``).
+        clock: Where the runner gets the current time from. Defaults to the
+            real ``datetime.now(UTC)``, but tests can substitute a fake
+            clock that returns fixed, predictable timestamps.
+        id_factory: Where the runner gets a new run ID from. Defaults to
+            generating a random UUID, but tests can substitute something
+            that returns predictable IDs instead.
+        redaction_policy: The rules used to strip out anything that looks
+            like a secret from output bytes before they're spilled to the
+            artifact store (see ``_spill_large_output``). Defaults to
             :data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`,
-            so spilled artifacts are redacted by default and real runs never
-            spill raw secrets to disk. A caller may pass a custom
-            ``RedactionPolicy`` to tune the patterns, or ``RedactionPolicy()``
-            (empty patterns) to explicitly opt out of spill redaction.
+            so spilled artifacts are redacted automatically and a real run
+            never accidentally writes a raw secret to disk. A caller can
+            supply a custom ``RedactionPolicy`` to change which patterns
+            count as secrets, or pass ``RedactionPolicy()`` with no patterns
+            at all to deliberately turn this protection off.
     """
 
     def __init__(
@@ -167,31 +189,40 @@ class EvalRunner:
         manifest: EvalRunManifest,
         event_sink: EventSink | None = None,
     ) -> EvalRunResult:
-        """Execute ``manifest`` and return the complete, provenance-carrying result.
+        """Run everything ``manifest`` describes and return the full, provenance-carrying result.
 
-        ``manifest`` is never mutated: every value this method needs is read
-        from it, and nothing is written back (requirement 12). Cancellation
-        of the awaiting task (e.g. ``task.cancel()``) propagates
-        ``asyncio.CancelledError`` after any already-scheduled attempts are
-        allowed to finish or observe cancellation themselves (requirement
-        11); no attempt is left as an orphan background task.
+        ``manifest`` is treated as read-only: this method only ever reads
+        values from it and never writes anything back onto it (requirement
+        12). If the code awaiting this coroutine gets cancelled (for
+        example via ``task.cancel()``), that cancellation is honored --
+        Python raises ``asyncio.CancelledError`` here -- but only after any
+        attempts that were already in flight get a chance to finish or
+        notice the cancellation themselves first (requirement 11). Nothing
+        is left running unsupervised in the background.
 
-        Manifest validation happens before any ``run_id`` is minted, so a
-        ``ManifestValidationError`` from a typo'd component name is a
-        precondition failure, not a run that started and then aborted -- it
-        raises directly and never reaches the failure handling below.
+        The manifest is validated before a ``run_id`` is even generated.
+        That ordering matters: if validation fails (for example, because of
+        a typo in a component name), that's treated as "the run never
+        actually started" rather than "a run started and then broke" -- a
+        ``ManifestValidationError`` is raised directly here, and none of the
+        failure-handling logic described below applies to it.
 
-        Everything from the dataset resolving onward runs with one ``run_id``
-        already established (and ``RunStarted`` already emitted). Any
-        exception that escapes that region -- a dataset provider error, the
-        awaiting task being cancelled (``asyncio.CancelledError``), or any
-        other unexpected failure -- is an infrastructure-level abort: exactly
-        one :class:`~agentic_evalkit.events.RunFailed` is emitted for the
-        already-known ``run_id`` and the original exception is re-raised
-        unchanged (never swallowed, never replaced), so callers -- the CLI
-        maps exception types to exit codes -- see the same behavior as
-        before, plus the added event. ``RunCompleted`` is therefore emitted
-        only on the success path and never alongside ``RunFailed``.
+        From the point the dataset starts resolving onward, a ``run_id``
+        exists and the ``RunStarted`` event has already been sent. If
+        anything goes wrong from this point on -- the dataset provider
+        raises an error, the run gets cancelled, or any other unexpected
+        exception occurs -- that counts as our own infrastructure breaking
+        (as opposed to the AI system under test just giving a wrong
+        answer). In that case, exactly one
+        :class:`~agentic_evalkit.events.RunFailed` event is sent for the
+        already-known ``run_id``, and then the original exception is
+        re-raised exactly as it was -- never swallowed, never replaced with
+        something else. That preserves existing behavior for callers like
+        the CLI, which decides its exit code based on the exception type --
+        this method just also emits the extra event before re-raising.
+        Because of this, ``RunCompleted`` is only ever sent when everything
+        succeeded, and is never sent together with ``RunFailed`` for the
+        same run.
         """
         sink: EventSink = event_sink if event_sink is not None else _noop_sink
         self._validate_manifest(manifest)
@@ -239,15 +270,18 @@ class EvalRunner:
         )
 
     def _emit_run_failed(self, sink: EventSink, *, run_id: str, error: BaseException) -> None:
-        """Emit one ``RunFailed`` for an infrastructure-level abort of ``run_id``.
+        """Send one ``RunFailed`` event: ``run_id`` was aborted by an infrastructure failure.
 
-        The original ``error`` is always re-raised by the caller regardless
-        of what happens here: if the sink itself raises while handling this
-        notification, that secondary failure is discarded rather than
-        allowed to replace or mask the run's real failure cause.
+        Whatever happens inside this method, the caller always re-raises
+        the original ``error`` afterward. So if the event sink itself
+        raises an exception while handling this notification, that
+        secondary problem is simply thrown away rather than being allowed
+        to hide or replace the real reason the run failed.
         """
-        # A broken sink must never replace or mask the caller's real failure
-        # (`error`, re-raised by the caller regardless).
+        # If the event sink itself is broken and raises here, that must
+        # never hide or replace the real failure (`error`) -- which the
+        # caller is going to re-raise regardless of what happens in this
+        # method.
         with contextlib.suppress(Exception):
             sink(
                 RunFailed(
@@ -259,11 +293,14 @@ class EvalRunner:
             )
 
     def _validate_manifest(self, manifest: EvalRunManifest) -> None:
-        """Requirement 1: validate component names and capabilities up front.
+        """Check the manifest's component names and settings before doing anything else.
 
-        Failing fast here -- before any dataset resolution or execution --
-        means a typo'd component name never produces a partially-run,
-        confusing result.
+        (Requirement 1.)
+
+        Checking this upfront -- before resolving the dataset or running
+        anything -- means a typo in a component name is caught
+        immediately, instead of producing a confusing, partially completed
+        run.
         """
         missing: dict[str, JsonValue] = {}
         if manifest.adapter not in self._adapters:
@@ -291,12 +328,16 @@ class EvalRunner:
     async def _prepare_samples(
         self, manifest: EvalRunManifest, resolved_dataset: ResolvedDataset
     ) -> tuple[EvalSample, ...]:
-        """Requirements 3-4: iterate the selection and prepare each record.
+        """Pull the selected records from the dataset and adapt each into a sample.
 
-        Iteration order from ``catalog.iter_records`` is preserved, which is
-        what makes requirement 10 (deterministic sample/attempt order in the
-        final result) achievable: sample order is fixed here, before any
-        concurrent execution begins.
+        (Requirements 3-4.)
+
+        The order records come back from ``catalog.iter_records`` is kept
+        exactly as-is. That's what makes requirement 10 possible (the final
+        result always lists samples/attempts in the same, predictable
+        order): the order is locked in right here, before any concurrent
+        execution starts and could otherwise finish samples in a different
+        order than they started in.
         """
         adapter = self._adapters[manifest.adapter]
         selection = manifest.selection
@@ -315,17 +356,25 @@ class EvalRunner:
         samples: tuple[EvalSample, ...],
         sink: EventSink,
     ) -> list[SampleResult]:
-        """Requirements 5, 9, 10, 11: bounded concurrency, ordered events/results.
+        """Run every sample/attempt with a cap on how many run at once, in a predictable order.
 
-        Every ``(sample, attempt)`` pair becomes one task in an
-        ``asyncio.TaskGroup``, gated by a semaphore sized to
-        ``manifest.concurrency``. Results are collected into a
-        pre-sized list indexed by task order (not completion order), so the
-        returned list is in deterministic sample/attempt order regardless of
-        which task happens to finish first. If the caller cancels the
-        awaiting task, ``TaskGroup`` cancels every still-running child task
-        and re-raises ``CancelledError`` once they have all unwound -- no
-        child task is left running unsupervised.
+        (Requirements 5, 9, 10, 11.)
+
+        Every ``(sample, attempt)`` combination becomes its own task inside
+        an ``asyncio.TaskGroup`` (a way of running several async tasks
+        together and waiting for all of them to finish). A semaphore -- a
+        simple counter that only lets a limited number of tasks proceed at
+        once -- caps how many of these run at the same time, based on
+        ``manifest.concurrency``. Results are written into a list that was
+        already sized and laid out in advance, with each task writing to
+        its own fixed slot (based on its position in the plan, not on when
+        it happens to finish). That guarantees the returned list is always
+        in the same sample/attempt order, no matter which task actually
+        completes first. If the caller cancels the surrounding task,
+        ``TaskGroup`` automatically cancels every child task that's still
+        running, and only re-raises ``CancelledError`` once all of them
+        have actually stopped -- so no child task is ever left running
+        unsupervised in the background.
         """
         target = self._targets[manifest.target_name]
         grader = self._graders[manifest.grader]
@@ -365,22 +414,28 @@ class EvalRunner:
         timeout_seconds: float | None,
         sink: EventSink,
     ) -> SampleResult:
-        """One sample/attempt's full pipeline: execute, grade, spill.
+        """Run one (sample, attempt) through execute -> grade -> move large output out of memory.
 
-        Requirement 6: grading only ever runs for an execution whose status
-        is ``COMPLETED``. Requirement 7: every other status (failed, timeout,
-        cancelled, error) is preserved as-is on the returned
-        ``NormalizedExecutionResult`` with ``grade=None`` -- the runner never
-        collapses these into a grader-level abstain/fail, so a caller can
-        always distinguish "the system under test broke" from "the system
-        under test answered incorrectly".
+        Grading only ever happens if the execution's status came back as
+        ``COMPLETED`` (requirement 6). Every other possible status --
+        failed, timed out, cancelled, or errored -- is left exactly as it
+        is on the returned ``NormalizedExecutionResult``, with ``grade``
+        set to ``None`` (requirement 7). The runner deliberately never
+        turns one of these into a grader-style "abstain" or "fail" verdict,
+        because doing so would blur together two very different
+        situations: "the AI system under test broke or didn't run" versus
+        "the AI system under test ran fine but gave a wrong answer."
+        Keeping them separate means a caller can always tell which one
+        actually happened.
 
-        Grading, when it runs, always sees the execution exactly as the
-        target returned it -- ``_spill_large_output`` does not run until
-        after grading has already happened (ADR-0017), so a grader is never
-        handed a spilled ``output=None`` placeholder just because the real
-        output was large. Spilling is purely a persistence concern applied
-        to the result on its way out.
+        When grading does run, it always sees the execution result exactly
+        as the target originally returned it. That's because
+        ``_spill_large_output`` (which moves oversized output out to the
+        artifact store) deliberately doesn't run until *after* grading has
+        already finished (ADR-0017) -- so a grader is never handed a
+        stripped-out ``output=None`` placeholder just because the real
+        output happened to be large. Spilling only affects how the final
+        result gets stored, never what the grader is allowed to see.
         """
         sink(
             SampleStarted(
@@ -415,9 +470,11 @@ class EvalRunner:
                 )
             )
 
-        # Unconditional, and deliberately after grading (ADR-0017): a
-        # non-completed execution can still carry a huge output that needs
-        # spilling for storage even though it was never gradable.
+        # This spill step always runs, and deliberately happens after
+        # grading (ADR-0017): even an execution that was never gradable
+        # (for example, one that timed out) can still be carrying a huge
+        # output that needs to be moved out to the artifact store before we
+        # store the final result.
         execution = self._spill_large_output(execution)
         sink(
             SampleCompleted(
@@ -432,32 +489,44 @@ class EvalRunner:
     def _spill_large_output(
         self, execution: NormalizedExecutionResult
     ) -> NormalizedExecutionResult:
-        """Requirement 8: store large outputs as artifacts, keep a reference.
+        """Move an oversized output to the artifact store, replacing it with a reference.
 
-        Called only after grading has already happened (see
-        ``_execute_and_grade``, ADR-0017), so a grader is never handed a
-        spilled/``None`` output as a result of size alone -- this method's
-        job is exclusively what gets persisted, not what gets graded.
+        (Requirement 8.)
 
-        Builds a *new* ``NormalizedExecutionResult`` via ``model_copy`` (the
-        contract is frozen) rather than mutating the target's returned
-        instance. Small outputs are left inline unchanged.
+        This only runs after grading has already happened (see
+        ``_execute_and_grade``, ADR-0017) -- so the fact that an output got
+        moved out to storage for being too big can never accidentally
+        affect what the grader saw. This method's only job is deciding
+        what gets saved to disk, not what gets graded.
 
-        This is the only place in the runner that applies
-        ``self._redaction_policy``'s ``secret_patterns``, and it applies them
-        to the serialized string *before* the size check -- so a spilled
-        artifact never carries a raw credential to disk even though the
-        events module docstring promises no unredacted output payload
-        anywhere in the pipeline. Inline outputs (below the spill threshold)
-        are deliberately left as-is here: they remain part of the in-memory
-        ``EvalRunResult`` and are redacted exactly once, at the report
-        boundary, by :func:`agentic_evalkit.reporters.base.apply_redaction`
-        (design §12). Redacting twice -- once here, once at the report
-        boundary -- would be redundant; redacting only here and never at the
-        report boundary would leave the in-memory result (and any other
-        consumer of it besides a rendered report) holding raw secrets. This
-        method redacts only the bytes that are about to leave the in-memory
-        result and land on disk as an artifact.
+        Rather than modifying the ``execution`` object that was passed in,
+        this builds a brand new ``NormalizedExecutionResult`` via
+        ``model_copy`` (the class is immutable/frozen, so its fields can't
+        be changed in place). If the output is small enough to stay
+        inline, it's returned completely unchanged.
+
+        This is the only place in the whole runner that applies
+        ``self._redaction_policy``'s ``secret_patterns`` (the patterns used
+        to detect and blank out things that look like secrets). It does
+        that redaction on the serialized output text *before* checking its
+        size -- so if something does get spilled to disk, it's guaranteed
+        to never contain a raw, unredacted credential, honoring the
+        promise (made in the events module's docstring) that nothing in
+        this pipeline writes out an unredacted output anywhere.
+
+        Outputs that are small enough to stay inline are deliberately left
+        alone here, redaction and all -- they're still part of the
+        in-memory ``EvalRunResult``, and get redacted exactly once, later,
+        at the point a report is actually generated, by
+        :func:`agentic_evalkit.reporters.base.apply_redaction` (design
+        §12). Redacting them here too, in addition to that later step,
+        would be pointless duplicate work. But skipping redaction here
+        entirely (and only ever doing it at the report stage) would mean
+        the in-memory result -- and anything else that reads it besides a
+        rendered report -- would still be holding the raw, unredacted
+        secret. So the rule this method follows is: redact only the
+        specific bytes that are actually about to leave memory and be
+        written to disk as a stored artifact.
         """
         if execution.output is None:
             return execution
@@ -479,13 +548,15 @@ class EvalRunner:
         )
 
     def _compiled_secret_patterns(self) -> tuple[re.Pattern[str], ...]:
-        """Compile ``self._redaction_policy.secret_patterns``, or none at all.
+        """Compile ``self._redaction_policy.secret_patterns`` into regexes, or none at all.
 
-        Returns an empty tuple both when the policy was explicitly set to
-        ``None`` (opting out of spill redaction) and when a policy was
-        supplied with no ``secret_patterns`` of its own. The constructor
-        default is :data:`DEFAULT_REDACTION_POLICY`, which does carry
-        patterns, so the ordinary path compiles those.
+        Returns an empty tuple in two different cases: when the policy was
+        explicitly set to ``None`` (meaning the caller opted out of spill
+        redaction entirely), and when a policy object was given but its
+        own ``secret_patterns`` list happens to be empty. In the normal
+        case, though, the constructor's default value is
+        :data:`DEFAULT_REDACTION_POLICY`, which does have patterns defined
+        -- so ordinarily, this compiles and returns those.
         """
         if self._redaction_policy is None:
             return ()
@@ -493,12 +564,14 @@ class EvalRunner:
 
 
 def _redact(value: str, patterns: tuple[re.Pattern[str], ...]) -> str:
-    """Replace every match of any ``patterns`` entry in ``value`` with ``[REDACTED]``.
+    """Replace every part of ``value`` matching any of ``patterns`` with the text ``[REDACTED]``.
 
-    A pure string -> string function, mirroring
-    ``agentic_evalkit.reporters.base._redact_string``: this module cannot
-    import that private helper, so the same substitution behavior is
-    reimplemented locally against the same :class:`RedactionPolicy` contract.
+    This is a plain function that takes a string and returns a new string
+    -- it doesn't touch anything else. It deliberately does the same thing
+    as ``agentic_evalkit.reporters.base._redact_string``: since that's a
+    private helper this module isn't allowed to import directly, the same
+    substitution logic is duplicated here, built against the same
+    :class:`RedactionPolicy` rules.
     """
     redacted = value
     for pattern in patterns:
@@ -507,15 +580,21 @@ def _redact(value: str, patterns: tuple[re.Pattern[str], ...]) -> str:
 
 
 def _summarize(sample_results: list[SampleResult]) -> RunSummary:
-    """Requirement 7: separated outcome counts, never collapsed together.
+    """Count up how each sample turned out, keeping every kind of "not passed" strictly separate.
 
-    ``RunSummary.failed`` means "the system under test was graded and got
-    the task wrong" (a ``GradeResult`` outcome, below). An
-    ``ExecutionStatus.FAILED`` result never reaches grading (requirement 6),
-    so it is an operational failure, not a task failure; it is counted in
-    ``errors`` alongside ``ExecutionStatus.ERROR`` rather than in ``failed``,
-    which would otherwise make an infrastructure problem look like an
-    incorrect answer.
+    (Requirement 7.)
+
+    ``RunSummary.failed`` specifically means "the AI system under test ran
+    successfully, a grader looked at its answer, and the grader said it
+    was wrong" (this comes from a ``GradeResult`` outcome, described
+    below). It does *not* include cases where the system under test never
+    even finished running. An ``ExecutionStatus.FAILED`` result never
+    makes it to grading in the first place (requirement 6) -- it means our
+    own infrastructure or the target broke, not that the AI gave a wrong
+    answer. So it's counted in ``errors`` (alongside
+    ``ExecutionStatus.ERROR``), never in ``failed``. Mixing the two
+    together would wrongly make an infrastructure problem look like the AI
+    simply answered incorrectly.
     """
     passed = failed = partial = errors = timeouts = cancelled = abstained = unavailable = 0
     for result in sample_results:

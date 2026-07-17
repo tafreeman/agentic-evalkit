@@ -1,23 +1,51 @@
-"""Hugging Face discovery and Dataset Viewer provider (design §6.1-§6.2).
+"""Connects this codebase to Hugging Face's dataset ecosystem: dataset
+search/discovery, plus the "Dataset Viewer" API (design doc §6.1-§6.2).
 
-This provider never imports ``datasets`` or ``pyarrow`` and never sets
-``trust_remote_code=True``. Discovery and immutable revision metadata come
-from ``huggingface_hub.HfApi`` (injected, so sync Hub calls run through
-``asyncio.to_thread``); row access, validity, schema, size, statistics, and
-Parquet-file metadata come from the Dataset Viewer HTTP API
-(``https://datasets-server.huggingface.co``) through an injected
-``httpx.AsyncClient``.
+Hugging Face Hub is a hosting platform for ML datasets and models (some
+public, some private or "gated" -- requiring the owner's approval). The
+"Dataset Viewer" is a separate HTTP service Hugging Face runs alongside the
+Hub that lets a caller inspect a dataset's rows, schema, size, and
+statistics directly over HTTP, without downloading and loading the entire
+dataset first. This module talks to both:
 
-``resolve()`` treats ``/is-valid``, ``dataset_info``, and ``/splits`` as
-load-bearing: a failure on any of them fails the whole resolution with a
-typed error. ``/size``, ``/statistics``, and ``/parquet`` are best-effort:
-many valid datasets legitimately lack statistics or a Parquet conversion, so
-a failure on any of them is recorded as an absence in
-``ResolvedDataset.schema_metadata`` (``"<name>_available": False``) and
-resolution continues.
+- Dataset discovery and *revision* metadata -- i.e. figuring out exactly
+  which unchanging version of a dataset we mean, so it can't silently
+  change later (see ``resolve()`` below) -- come from
+  ``huggingface_hub.HfApi`` (injected as a dependency). ``HfApi``'s calls
+  are ordinary blocking/synchronous Python calls, so every one used here
+  runs through ``asyncio.to_thread`` (which hands the blocking call to a
+  background thread) so it never freezes this module's own async code while
+  waiting for a response.
+- Row access, validity, schema, size, statistics, and Parquet-file metadata
+  come from the Dataset Viewer's HTTP API
+  (``https://datasets-server.huggingface.co``), called through an injected
+  ``httpx.AsyncClient``.
 
-See ``docs/plans/agent-prompts/task6-hf.md`` and design §6.2 for the
-contract this module implements.
+This module deliberately never imports the heavier ``datasets`` or
+``pyarrow`` libraries -- which would let it download and load an entire
+dataset into memory -- and never sets Hugging Face's
+``trust_remote_code=True`` option, which would let a dataset's own
+(potentially untrusted) Python code run locally. This keeps the module a
+thin, read-only HTTP client that can never execute code supplied by a
+dataset.
+
+``resolve()`` -- the method that pins down exactly which dataset, version,
+config, and split to use -- treats three Dataset Viewer calls as
+**load-bearing**: ``/is-valid``, ``dataset_info`` (which must return a
+non-empty commit SHA -- Hugging Face's unique, Git-style identifier for one
+exact version of the dataset), and ``/splits``. "Load-bearing" means if any
+one of these three fails, the entire resolution fails with it, raising a
+specific, purpose-built ("typed") exception describing what went wrong,
+rather than quietly returning a result that might be wrong. Three other
+calls -- ``/size``, ``/statistics``, and ``/parquet`` -- are **best-effort**:
+plenty of valid, perfectly usable datasets simply don't have statistics or a
+Parquet export available, so a failure on any one of these is not treated as
+an error at all. Instead it is recorded as an absence in
+``ResolvedDataset.schema_metadata`` (as ``"<name>_available": False``, e.g.
+``"statistics_available": False``), and resolution continues normally.
+
+See ``docs/plans/agent-prompts/task6-hf.md`` and the design doc's §6.2 for
+the full contract this module implements.
 """
 
 from __future__ import annotations
@@ -60,14 +88,27 @@ if TYPE_CHECKING:
 
     from pydantic import JsonValue as ModelJsonValue
 
-# Error ``context=`` dicts use ``errors.JsonValue`` (the stdlib-only type the
-# error hierarchy is typed against); model fields (e.g.
-# ``ResolvedDataset.schema_metadata``) use pydantic's richer ``JsonValue``.
-# The two are structurally similar but not the same type, so this module
-# keeps them distinctly named rather than aliasing one to the other.
-# ``AgenticEvalkitError.__init__`` types ``context`` as
-# ``dict[str, JsonValue | SecretValue] | None``; matching that union exactly
-# (rather than just ``JsonValue``) satisfies mypy's dict invariance check.
+# This codebase actually has two different "any JSON-shaped value" types,
+# and this module has to be careful to use the right one in the right
+# place. Error ``context=`` dicts (extra debugging details attached to an
+# exception) use ``errors.JsonValue`` -- a type built only from plain
+# Python types (str, int, dict, etc.), because the exception-class
+# hierarchy itself doesn't depend on pydantic. Model fields, like
+# ``ResolvedDataset.schema_metadata``, instead use pydantic's own richer
+# ``JsonValue`` type. The two describe similar data but are technically
+# different Python types, so this module keeps them distinctly named here
+# (``ErrorContextValue`` for the former) rather than treating them as
+# interchangeable.
+#
+# ``AgenticEvalkitError.__init__`` declares its ``context`` parameter as
+# exactly ``dict[str, JsonValue | SecretValue] | None``. The type alias
+# below matches that exact shape (rather than just reusing ``JsonValue`` on
+# its own) because mypy checks generic containers like ``dict[str, X]``
+# strictly: even though every plain ``JsonValue`` is also a valid
+# ``JsonValue | SecretValue``, mypy will not automatically treat
+# ``dict[str, JsonValue]`` as compatible with ``dict[str, JsonValue |
+# SecretValue]``. Spelling out the exact same union here is what keeps
+# mypy satisfied.
 ErrorContext = dict[str, ErrorContextValue | SecretValue]
 
 _VIEWER_BASE_URL: Final[str] = "https://datasets-server.huggingface.co"
@@ -87,10 +128,17 @@ async def _default_sleep(seconds: float) -> None:
 
 
 def _canonical_digest(row: dict[str, ModelJsonValue]) -> str:
-    """SHA-256 of the canonical (sorted-key, compact) JSON of one row.
+    """Compute a SHA-256 fingerprint (hash) of one row's data.
 
-    Matches the convention used by ``agentic_evalkit.datasets.local`` so a
-    given row's digest does not depend on which provider produced it.
+    To get the same fingerprint for the same data every time, we first turn
+    the row into "canonical" JSON: keys sorted alphabetically and no extra
+    whitespace, so two Python dicts with identical contents always produce
+    the exact same JSON string (and therefore the exact same hash), no
+    matter what order their keys happened to be in originally. This matches
+    the convention used by ``agentic_evalkit.datasets.local``, so the same
+    row's fingerprint comes out identical whether it was fetched from
+    Hugging Face or read from a local file -- the digest depends only on
+    the row's content, never on which provider produced it.
     """
     canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -102,11 +150,16 @@ def _response_digest(payload: bytes) -> str:
 
 @runtime_checkable
 class _HubClient(Protocol):
-    """The subset of ``huggingface_hub.HfApi`` this provider calls.
+    """Declares only the two ``huggingface_hub.HfApi`` methods this file calls.
 
-    A structural protocol so tests can inject a lightweight ``_FakeHub``
-    instead of a real ``HfApi`` (and so this provider never assumes more of
-    the Hub client than it actually uses).
+    ``Protocol`` is Python's structural-typing tool: instead of requiring a
+    formal ``class Foo(HfApi)`` relationship, anything with matching
+    methods -- ``dataset_info`` and ``list_datasets`` -- counts as a
+    ``_HubClient``, whether or not it's actually related to ``HfApi`` at
+    all. That lets tests inject a small, fast, hand-written stand-in
+    (``_FakeHub``) instead of a real ``HfApi``, and it keeps this file
+    honest about the fact that it only ever needs these two methods, not
+    the dozens of others the real ``HfApi`` class provides.
     """
 
     def dataset_info(self, repo_id: str, *, revision: str | None = None, **kwargs: Any) -> Any: ...
@@ -128,12 +181,17 @@ _KNOWN_VALIDITY_CAPABILITIES: Final[tuple[str, ...]] = (
 
 
 def _reports_usable_capability(payload: dict[str, Any]) -> bool:
-    """Whether an ``/is-valid`` payload signals at least one usable capability.
+    """Decide whether a Hugging Face ``/is-valid`` response says this dataset works at all.
 
-    A successful (2xx) ``/is-valid`` response is treated as usable unless it
-    explicitly reports every known capability as false; an unrecognized or
-    empty payload shape is not itself proof of invalidity, only an explicit
-    "nothing works" signal is.
+    The Dataset Viewer's ``/is-valid`` endpoint reports true/false for each
+    named feature it might support for a dataset -- e.g. ``preview``,
+    ``viewer``, ``search``, ``filter``, ``statistics`` (see
+    ``_KNOWN_VALIDITY_CAPABILITIES`` below). We treat a successful (2xx)
+    response as "this dataset is usable" unless it explicitly marks *every*
+    one of those features as false. If the response is missing these
+    fields, or has some other shape we don't recognize, that is not itself
+    treated as proof the dataset is broken -- only an explicit "nothing
+    here works" answer counts as that.
     """
     reported = [payload[key] for key in _KNOWN_VALIDITY_CAPABILITIES if key in payload]
     if not reported:
@@ -152,7 +210,16 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
 
 
 def _jittered_backoff_seconds(attempt: int) -> float:
-    """Exponential backoff with full jitter, zero-indexed by retry attempt."""
+    """Pick a random wait time before the next retry ("exponential backoff with full jitter").
+
+    ``attempt`` counts retries from 0 (the first retry is attempt 0). The
+    maximum possible wait doubles with each attempt -- this is the
+    "exponential" part -- but instead of always waiting that maximum, we
+    pick a uniformly random value between 0 and it (the "full jitter"
+    part). Randomizing like this spreads retries out over time, so that
+    many callers who all failed at the same moment don't all retry at
+    exactly the same moment and overwhelm the server again.
+    """
     ceiling = _BACKOFF_BASE_SECONDS * (2**attempt)
     return random.uniform(0.0, ceiling)  # noqa: S311 -- backoff jitter, not security-sensitive
 
@@ -160,12 +227,28 @@ def _jittered_backoff_seconds(attempt: int) -> float:
 def _raise_for_load_bearing_status(
     response: httpx.Response, *, endpoint: str, dataset_id: str
 ) -> None:
-    """Classify a final (non-retried, or retries-exhausted) response status.
+    """Turn a final failed HTTP response into a specific, typed exception.
 
-    Only called for load-bearing endpoints (``/is-valid``, ``/splits``) and
-    for the Dataset Viewer request path in general; best-effort endpoints use
-    :func:`_is_success` and swallow non-2xx responses instead of calling
-    this.
+    "Final" means either the response's status was not one of the
+    retryable ones handled by :func:`_get`, or all of :func:`_get`'s
+    retries have already been used up -- so this only runs once nothing
+    more can be done about the request itself. Depending on the status
+    code, this raises a different, purpose-built exception -- e.g.
+    :class:`DatasetAccessDenied` for 401/403, :class:`DatasetNotFound` for
+    404, :class:`DatasetRateLimited` for 429 -- so callers can tell these
+    situations apart instead of catching one generic error.
+
+    This function itself does not know or care whether the endpoint being
+    called is "load-bearing" (a failure that must fail the whole
+    operation) or "best-effort" (a failure that's fine to shrug off and
+    record instead) -- see the module docstring for what those two words
+    mean here. That distinction is enforced by each *caller* of
+    :func:`_get` instead: load-bearing callers (like the ``/is-valid`` and
+    ``/splits`` calls in ``resolve()``) let the exception this function
+    raises propagate straight up and fail the whole request, while
+    best-effort callers (the ``_best_effort_*`` methods below) catch that
+    same exception and record the corresponding feature as unavailable
+    rather than letting it fail anything.
     """
     status = response.status_code
     context: ErrorContext = {
@@ -221,11 +304,19 @@ class HuggingFaceDatasetProvider:
     """
 
     api_version: Final[str] = "1"
-    #: Every method here calls the Hub or the Dataset Viewer HTTP API
-    #: (ADR-0010); this provider can never honestly satisfy ``offline=True``
-    #: itself, so ``DatasetCatalog`` continues to reject offline calls to it
-    #: (except ``preview``, already served from the content-addressed cache
-    #: when a cache is configured).
+    #: Declares to callers (see ADR-0010, an architecture decision recorded
+    #: in this project's docs) that this provider always needs the
+    #: network: every single method here calls either the Hub or the
+    #: Dataset Viewer HTTP API, with no local fallback. Because of that,
+    #: this provider can never honestly claim to work with
+    #: ``offline=True`` (a caller asking "don't touch the network for this
+    #: call") -- so ``DatasetCatalog``, the class that routes requests to
+    #: providers, keeps rejecting offline calls made against this
+    #: provider. The one exception is ``preview``, whose results
+    #: ``DatasetCatalog`` can still serve from its "content-addressed"
+    #: cache (a cache keyed by an exact fingerprint of the request,
+    #: defined in ``agentic_evalkit.datasets.cache``) when one has been
+    #: configured and already has this exact page stored.
     requires_network: Final[bool] = True
 
     def __init__(
@@ -258,14 +349,20 @@ class HuggingFaceDatasetProvider:
         needs no token; ``HF_TOKEN``/the standard credential store are
         honored automatically for private or gated data).
         """
-        # HfApi's real methods use enumerated keyword-only parameters rather
-        # than a **kwargs catch-all, so mypy cannot statically prove it
-        # satisfies _HubClient's looser **kwargs signature even though every
-        # call this provider makes only uses the specific keywords HfApi
-        # actually accepts (see _HubClient's docstring). This is verified at
-        # runtime via @runtime_checkable in the test suite
-        # (test_create_returns_context_manager_owning_its_client and direct
-        # isinstance checks against a real HfApi()).
+        # The real HfApi class spells out its methods' keyword arguments
+        # explicitly, rather than accepting a generic **kwargs catch-all
+        # the way _HubClient's Protocol methods do. Because of that
+        # mismatch in how the two are *declared*, mypy's static type
+        # checker cannot prove on its own that a real HfApi instance
+        # actually satisfies the _HubClient Protocol -- even though, in
+        # practice, every call this provider makes only ever uses keyword
+        # arguments that HfApi genuinely accepts (see _HubClient's
+        # docstring above). Since mypy can't confirm this ahead of time,
+        # it's instead checked while the tests actually run, via Python's
+        # @runtime_checkable decorator on _HubClient (see
+        # test_create_returns_context_manager_owning_its_client and the
+        # direct isinstance() checks against a real HfApi() elsewhere in
+        # the test suite).
         resolved_hub: _HubClient = hub if hub is not None else cast("_HubClient", HfApi())
         return _OwnedProviderContext(
             hub=resolved_hub,
@@ -284,12 +381,17 @@ class HuggingFaceDatasetProvider:
         limit: int = 20,
         cursor: str | None = None,
     ) -> SearchPage:
-        """Map ``HfApi.list_datasets`` results to a ``SearchPage``.
+        """Run a Hub search and package the results as a ``SearchPage``.
 
-        Hugging Face Hub search does not expose a stable opaque cursor for
-        this endpoint, so this provider fetches at most ``limit`` hits per
-        call and always returns ``cursor=None``; a caller wanting more
-        results reissues ``search`` with a larger ``limit``.
+        Many paginated APIs hand back an opaque "cursor" token alongside a
+        page of results -- a stand-in value you pass back on the next call
+        meaning "continue after where I left off." Hugging Face Hub's
+        search does not offer a stable cursor like that for this endpoint,
+        so this method has no "next page" token to give back: it fetches
+        at most ``limit`` hits in one call and always returns
+        ``cursor=None``. A caller wanting more results simply calls
+        ``search`` again with a larger ``limit``, rather than paging
+        through a cursor.
         """
         kwargs: dict[str, Any] = {"search": query, "limit": limit}
         if filters:
@@ -312,12 +414,29 @@ class HuggingFaceDatasetProvider:
     # --- resolve() --------------------------------------------------------
 
     async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
-        """Immutably resolve ``ref`` per plan Step 3 / design §6.2.
+        """Turn a loose dataset reference into one exact, pinned-down dataset snapshot.
 
-        Load-bearing (failure fails resolution): ``/is-valid``,
-        ``dataset_info`` (requiring a nonempty commit SHA), ``/splits``.
-        Best-effort (failure is recorded in ``schema_metadata`` and
-        resolution continues): ``/size``, ``/statistics``, ``/parquet``.
+        ``ref`` may be underspecified -- e.g. it might name a dataset
+        without saying exactly which revision, config, or split to use.
+        ``resolve()`` fills in every one of those and returns a
+        ``ResolvedDataset``: an immutable (never modified after creation)
+        record describing one exact, reproducible dataset snapshot, so that
+        running the same evaluation again later uses the exact same data.
+        See plan Step 3 / the design doc's §6.2 for the full contract this
+        implements.
+
+        Three of the Hugging Face calls this makes are **load-bearing**,
+        meaning a failure on any one of them fails the entire resolution:
+        ``/is-valid``, ``dataset_info`` (which must return a non-empty
+        commit SHA -- Hugging Face's unique, Git-style ID for one exact
+        version of the dataset; an empty one means we can't actually pin a
+        version, so we cannot proceed), and ``/splits``. Three other calls
+        are **best-effort**, meaning a failure on any one of them is simply
+        recorded rather than treated as fatal: ``/size``, ``/statistics``,
+        and ``/parquet``. Plenty of legitimate datasets lack statistics or
+        a Parquet export, so those failures are recorded in
+        ``schema_metadata`` and resolution continues normally rather than
+        being aborted.
         """
         await self._check_is_valid(ref.dataset_id)
         info = await self._fetch_dataset_info(ref)
@@ -377,12 +496,18 @@ class HuggingFaceDatasetProvider:
             )
 
     async def _fetch_dataset_info(self, ref: DatasetRef) -> _DatasetInfoSummary:
-        """Call Hub ``dataset_info`` exactly once and extract every field ``resolve()`` needs.
+        """Call the Hub's ``dataset_info`` exactly once and pull out everything ``resolve()`` needs.
 
-        ``dataset_info`` is a single synchronous Hub call run through
-        ``asyncio.to_thread``; both the load-bearing commit SHA and the
-        best-effort license/citation/card/gated metadata come from this one
-        result rather than issuing the call twice.
+        ``dataset_info`` is an ordinary blocking/synchronous Hub call, so it
+        is run through ``asyncio.to_thread`` (handing it off to a
+        background thread) like every other Hub call in this module. Both
+        the load-bearing commit SHA (the piece ``resolve()`` cannot proceed
+        without -- see its docstring) and the best-effort license,
+        citation, "card" metadata (the structured, README-like description
+        a dataset publishes on the Hub), and gated flag (whether the
+        dataset requires the owner's approval to access) all come from
+        this single response, rather than calling the Hub twice to get
+        them separately.
         """
 
         def _call() -> Any:
@@ -520,11 +645,14 @@ class HuggingFaceDatasetProvider:
     async def preview(
         self, dataset: ResolvedDataset, *, offset: int = 0, limit: int = 10
     ) -> SamplePage:
-        """Return one page of rows via ``/rows``, capped at 100 per request.
+        """Return one page of rows via the Dataset Viewer's ``/rows`` endpoint (100 rows max).
 
-        A partial page (fewer rows than requested because the upstream total
-        was reached) is returned as-is; the caller sees ``total_rows`` and
-        can tell a partial page from a full dataset.
+        If fewer rows come back than were requested because the dataset's
+        total row count was reached, that shorter page is returned as-is
+        rather than treated as an error; the caller can compare the number
+        of rows returned against ``total_rows`` to tell a "ran out of
+        data" partial page apart from a request that simply asked for
+        fewer rows to begin with.
         """
         bounded_limit = min(limit, _MAX_PAGE_LIMIT)
         config, split = _require_config_and_split(dataset)
@@ -622,14 +750,23 @@ class HuggingFaceDatasetProvider:
         dataset_id: str,
         timeout_seconds: float | None = None,
     ) -> httpx.Response:
-        """GET a Dataset Viewer endpoint with bounded retries.
+        """Make one GET request to a Dataset Viewer endpoint, retrying a limited number of times.
 
-        Retries only connection errors and HTTP 429/502/503/504, honoring
-        ``Retry-After`` when present and otherwise using jittered exponential
-        backoff, up to ``self._max_retries`` retries (so at most
-        ``max_retries + 1`` total attempts). Any other status is classified
-        immediately by :func:`_raise_for_load_bearing_status` without a
-        retry.
+        Only two kinds of failure are retried: connection-level errors (the
+        request never reached the server at all) and HTTP responses with
+        status 429 (rate limited -- too many requests too fast) or
+        502/503/504 (server-side errors that are usually temporary, e.g.
+        the upstream service was briefly overloaded or restarting). When
+        the server sends a ``Retry-After`` header telling us how long to
+        wait, we honor that; otherwise we wait using
+        :func:`_jittered_backoff_seconds` (a randomized, increasingly long
+        delay -- see that function's docstring). We retry at most
+        ``self._max_retries`` times, so at most ``max_retries + 1``
+        attempts happen in total. Any other failure status is not retried
+        at all -- it is immediately turned into a specific exception by
+        :func:`_raise_for_load_bearing_status` (see its docstring for what
+        "immediately" means here and how it decides which exception to
+        raise).
         """
         url = _viewer_url(path)
         attempt = 0
@@ -742,11 +879,23 @@ def _first_str(value: ModelJsonValue) -> str | None:
 
 
 def _select_config_and_split(ref: DatasetRef, splits: list[dict[str, Any]]) -> tuple[str, str]:
-    """Validate the ref's config/split against ``/splits``, or uniquely infer them.
+    """Pin down which config and split to use, validating or inferring them from ``/splits``.
 
-    Raises ``DatasetConfigRequired`` when the config/split cannot be
-    determined unambiguously (either an explicit value the viewer does not
-    know about, or an omitted value with more than one candidate).
+    Many Hugging Face datasets bundle multiple variants under one dataset
+    ID -- a "config" is the name of one such variant (e.g. different
+    languages of the same dataset), and a "split" is a named partition
+    within it (e.g. ``train``, ``validation``, ``test``). ``/splits``
+    reports every config/split combination the Dataset Viewer actually
+    knows about for this dataset. If the caller's ``ref`` already names
+    both an exact config and split, this just checks that combination is
+    really one of the ones ``/splits`` lists. If the caller left one or
+    both unspecified, this tries to fill in the gap automatically -- but
+    only when there is exactly one combination it could possibly mean.
+
+    Raises ``DatasetConfigRequired`` when a single config/split combination
+    cannot be pinned down unambiguously -- either because the caller gave
+    an explicit combination that ``/splits`` doesn't recognize, or because
+    they left it unspecified and more than one combination could match.
     """
     available = tuple((str(entry.get("config")), str(entry.get("split"))) for entry in splits)
 

@@ -1,10 +1,19 @@
-"""Immutable rubric contracts and validation rules (design §9, plan Task 10 Step 4).
+"""Data models for a rubric -- the checklist of specific things a judge or human should check.
 
-"Rubrics use atomic criteria with stable IDs, evidence requirements,
-weights, hard-gate flags, and explicit handling of missing evidence. Broad
-holistic scores are advisory only" (design §9). These models validate that
-policy at construction time; they do not themselves grade anything (grading
-a rubric against an execution is a judge/human concern, wired in later).
+Design §9, plan Task 10 Step 4.
+
+Design §9 lays out the policy this module encodes: "Rubrics use atomic
+criteria with stable IDs, evidence requirements, weights, hard-gate flags,
+and explicit handling of missing evidence. Broad holistic scores are
+advisory only." In plain terms: a rubric should be built out of small,
+specific, individually checkable items (e.g. "does the answer cite its
+source"), each with a stable ID, a weight, and a flag saying whether
+failing it alone should fail the whole rubric -- rather than one vague "is
+this a good answer overall?" question that no one can check objectively.
+These classes only validate that a rubric is well-formed *when it's
+constructed*; they don't do any grading themselves -- actually scoring a
+rubric against something an AI produced is the job of a judge (or a
+human), wired in elsewhere.
 """
 
 import re
@@ -14,9 +23,11 @@ from pydantic import Field, model_validator
 
 from agentic_evalkit.models.base import FrozenModel
 
-# Phrases that signal a criterion is asking for a broad, holistic judgment
-# rather than an atomic, checkable fact. Such criteria cannot be evidence-free
-# hard gates (design §9: "Broad holistic scores are advisory only").
+# Phrases that suggest a criterion is really asking for a vague, big-picture
+# opinion (e.g. "is this a good response overall?") rather than checking one
+# specific, checkable fact. A criterion like that isn't allowed to skip the
+# evidence requirement or single-handedly fail the whole rubric (design §9:
+# "Broad holistic scores are advisory only").
 _BROAD_JUDGMENT_PATTERN = re.compile(
     r"\b(overall|in general|holistic|good response|bad response|quality of the response)\b",
     re.IGNORECASE,
@@ -24,19 +35,28 @@ _BROAD_JUDGMENT_PATTERN = re.compile(
 
 
 class RubricCriterion(FrozenModel):
-    """One atomic, independently checkable rubric criterion.
+    """One single, specific, checkable item within a larger rubric.
 
     Attributes:
-        criterion_id: Stable identifier, unique within its ``Rubric``.
-        description: What evidence-backed fact this criterion checks.
-        scale: ``"binary"`` (met / not met) or ``"bounded"`` (a numeric
-            range given by ``scale_min``/``scale_max``).
-        requires_evidence: Whether a grade against this criterion must cite
-            evidence. Criteria whose ``description`` reads as a broad
-            holistic judgment must set this ``True`` (enforced by
-            :meth:`_validate_policy`).
-        weight: Non-negative contribution weight within the parent rubric.
-        hard_gate: Whether failing this criterion alone fails the rubric.
+        criterion_id: A stable name for this criterion, unique within its
+            parent ``Rubric`` (e.g. ``"cites_source"``).
+        description: The specific, evidence-backed fact this criterion
+            checks -- written so it's clear exactly what would make it pass
+            or fail.
+        scale: ``"binary"`` (simply met / not met) or ``"bounded"`` (scored
+            somewhere within a numeric range given by
+            ``scale_min``/``scale_max``).
+        requires_evidence: Whether a grade against this criterion has to
+            point to specific supporting evidence, rather than just stating
+            a bare verdict. Any criterion whose ``description`` reads like a
+            vague, big-picture judgment (see ``_BROAD_JUDGMENT_PATTERN``
+            above) is required to set this to ``True`` -- enforced
+            automatically by :meth:`_validate_policy` below.
+        weight: How much this criterion contributes to the parent rubric's
+            overall score, relative to the other criteria. Must be zero or
+            positive.
+        hard_gate: If ``True``, failing this one criterion fails the whole
+            rubric, no matter how well everything else scores.
     """
 
     criterion_id: str

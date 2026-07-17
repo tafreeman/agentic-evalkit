@@ -1,11 +1,29 @@
-"""HttpTarget: a versioned request/response mapping over HTTP (design §8).
+"""HttpTarget: calls an HTTP endpoint as the system under test (design §8).
 
-Receives an injected ``httpx.AsyncClient`` so tests can supply a
-``MockTransport`` and production code can supply connection pooling,
-proxies, and TLS policy externally. Retries only connection failures, 429,
-and 502/503/504 with bounded exponential backoff honoring a server
-``Retry-After`` header; validation errors and other 4xx responses are never
-retried. Authorization headers are redacted from any recorded evidence.
+Each request and response is a JSON object tagged with a schema/protocol
+version number, so both sides agree on the message format.
+
+Rather than creating its own HTTP client, this class is handed an
+already-configured ``httpx.AsyncClient`` from outside. That lets tests
+pass in a fake client (a ``MockTransport``) that never makes a real
+network call, while production code can pass in a client that is already
+set up with connection pooling, proxy settings, and TLS/certificate
+configuration -- none of which this class needs to know about.
+
+If a request fails to connect, or the server responds with status 429
+(rate limited) or 502/503/504 (typically transient server-side errors),
+it is retried automatically, up to a limited number of times, waiting
+longer between each attempt ("exponential backoff", capped so the wait
+never grows unbounded). If the server tells us how long to wait via a
+``Retry-After`` header, that is honored instead of our own calculated
+wait. Other 4xx responses (for example, a malformed request) mean
+something is wrong with the request itself rather than a temporary
+glitch, so they are never retried.
+
+Any header that could carry credentials (``Authorization``,
+``Proxy-Authorization``) is blanked out -- "redacted" -- before it is
+stored or shown anywhere, so secrets never end up in saved logs or
+reports.
 """
 
 import asyncio
@@ -160,7 +178,10 @@ class HttpTarget:
                 )
 
             if response.status_code >= 400:
-                # Non-retryable 4xx/5xx: never retried, fail on first attempt.
+                # Any other 4xx or 5xx status -- one that is not in the
+                # retryable set handled above -- is treated as a permanent
+                # failure: it is never retried, and this attempt fails
+                # immediately.
                 return self._error_result(
                     sample,
                     attempt=attempt,
@@ -180,8 +201,11 @@ class HttpTarget:
                 request_headers=request_headers,
             )
 
-        # Defensive: the loop above always returns before exhausting its
-        # range, but mypy --strict requires every path to return.
+        # This line is never actually reached: every branch inside the
+        # loop above returns before the loop can run out of retries. It
+        # is here only because mypy --strict requires every code path to
+        # explicitly return a value, and it cannot prove on its own that
+        # the loop always returns early.
         return self._error_result(
             sample,
             attempt=attempt,

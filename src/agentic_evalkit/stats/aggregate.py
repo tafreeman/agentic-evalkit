@@ -1,33 +1,46 @@
-"""Run aggregation, exact outcome counting, and Wilson confidence intervals.
+"""Counting up results for a run, and putting confidence intervals around them.
 
-Design §10 and ADR-0008 require every report to retain sample-level
-outcomes and separate operational failures (errors, timeouts,
-cancellations, unavailable capabilities) from definitive grading outcomes
-(pass/fail/partial/abstain), so a system that crashed cannot be reported
-as if it had failed the task.
+Design §10 and ADR-0008 require every report to keep every individual
+sample's outcome, and to keep two kinds of failure clearly separate:
+"operational" failures where something broke before we could judge the
+task at all (errors, timeouts, cancellations, unavailable capabilities),
+versus "definitive" grading outcomes (pass/fail/partial/abstain) where the
+task actually ran and got judged. This split matters because a system that
+crashed should never be reported as if it had tried the task and failed
+it.
 
-``aggregate_run`` recounts every outcome directly from ``run.samples``
-rather than trusting any caller-supplied :class:`~agentic_evalkit.models.RunSummary`
-so aggregation is always correct even if the summary attached to a run is
-stale or wrong. It classifies each :class:`~agentic_evalkit.models.SampleResult`
-using both its execution status and its grade status: an execution failure
-(error/timeout/cancelled) is counted as that operational outcome even when
-no grade was ever produced, and only a completed execution with a
-definitive grade status contributes to the pass/fail/partial/abstain/
-unavailable counts.
+``aggregate_run`` re-counts every outcome by walking ``run.samples``
+itself, rather than trusting whatever count is already attached to the
+run's summary (a :class:`~agentic_evalkit.models.RunSummary`, which might
+be stale or wrong) -- so the totals in a report are always correct, even
+if something else miscounted earlier. For each
+:class:`~agentic_evalkit.models.SampleResult` it looks at both the
+execution status and the grade status: if the run itself failed (error,
+timeout, cancelled), that counts as an operational failure regardless of
+whether a grade also happened to be attached. Only a sample that finished
+running *and* has a definitive grade gets counted into the
+pass/fail/partial/abstain/unavailable buckets.
 
-``wilson_interval`` computes a 95% Wilson score interval for a binary rate
-using :class:`statistics.NormalDist` -- no numpy/scipy dependency.
+``wilson_interval`` computes a "confidence interval" for a pass rate -- a
+range that's likely to contain the true underlying rate, given that we
+only tested a limited number of samples. A narrower range means we're more
+sure of the number; a wider range means we should be more cautious about
+trusting it. It uses a specific, well-established method called the
+"Wilson score interval" (see that function's own docstring for why), built
+from :class:`statistics.NormalDist` in Python's standard library -- so
+this doesn't need numpy or scipy as a dependency.
 
-``build_report_aggregates`` and ``pass_at_k_by_sample`` are the CLI-facing
-seam that closes the gap between this module existing and a report actually
-carrying its numbers: every reporter's ``write()`` accepts an optional
-``aggregates: dict[str, JsonValue] | None`` (``agentic_evalkit.reporters.base.Reporter``),
-documented there as "supplied by a caller that already ran
-``agentic_evalkit.stats``" -- ``build_report_aggregates`` is exactly that
-call, so ``agentic_evalkit.cli.runs.write_canonical_report`` and
-``agentic_evalkit.cli.reports.report`` can both produce it with one line
-rather than each re-deriving the same shape.
+``build_report_aggregates`` and ``pass_at_k_by_sample`` exist so that a
+report can actually carry these numbers end-to-end: every reporter's
+``write()`` method accepts an optional
+``aggregates: dict[str, JsonValue] | None`` argument
+(``agentic_evalkit.reporters.base.Reporter``), documented there as
+"supplied by a caller that already ran ``agentic_evalkit.stats``".
+``build_report_aggregates`` is exactly that caller, so
+``agentic_evalkit.cli.runs.write_canonical_report`` and
+``agentic_evalkit.cli.reports.report`` can each produce the full
+aggregates payload in one line instead of each having to re-derive the
+same shape themselves.
 """
 
 from __future__ import annotations
@@ -62,24 +75,50 @@ __all__ = [
     "wilson_interval",
 ]
 
-# The 97.5th-percentile z-score of the standard normal distribution, i.e.
-# the two-sided 95% critical value (Task 12 Step 4: "Wilson bounds using
-# statistics.NormalDist().inv_cdf(0.975)"). Computed once at import time
-# since it never depends on run data.
+# A fixed number used throughout this module for building 95% confidence
+# intervals: how many "standard deviations" out from the center of a
+# normal (bell-curve) distribution you need to go to capture the middle
+# 95% of it (leaving 2.5% in each of the two tails). Statisticians call
+# this a "z-score" or "critical value" for a two-sided 95% interval. (Task
+# 12 Step 4: "Wilson bounds using statistics.NormalDist().inv_cdf(0.975)".)
+# Computed once here, at import time, since it's a fixed constant that
+# never depends on any run's data.
 _Z_95: float = NormalDist().inv_cdf(0.975)
 
 
 class IntervalMethod(StrEnum):
-    """Which construction produced a rate's or score mean's interval bounds.
+    """Which method was used to build a confidence interval around a rate or a mean score.
 
-    ``WILSON`` is the per-observation Wilson score interval used when every
-    observation is an independent trial (``attempts == 1``). ``CLUSTER_ROBUST``
-    is the per-``sample_id`` cluster-robust Wald interval used when
-    ``attempts > 1`` groups correlated repeated attempts, so the interval is
-    not narrowed by pseudo-replication (ADR-0016). Stamped on the estimate so a
-    consumer can tell, machine-readably, which method produced the bounds --
-    a ``StrEnum`` rather than a free string, per the fixed-vocabulary rule
-    ADR-0002 applies to every wire status.
+    Which one applies depends on whether each sample was attempted once or
+    multiple times:
+
+    ``WILSON`` is used when every observation is an independent trial --
+    i.e. each question in the dataset was only attempted once
+    (``attempts == 1``). It's the "Wilson score interval" computed by
+    :func:`wilson_interval` (see that function for what it is and why).
+
+    ``CLUSTER_ROBUST`` is used when ``attempts > 1``, meaning the same
+    question was attempted multiple times. Treating every attempt as a
+    fully independent data point in that case would be a statistical
+    mistake called "pseudo-replication": repeated attempts at the *same*
+    question tend to succeed or fail together more than attempts at
+    different questions do, so counting them as independent would make our
+    confidence interval look falsely narrow (i.e. falsely confident). To
+    avoid that, this groups all the attempts for a given ``sample_id`` into
+    one cluster, takes each cluster's own average, and builds the interval
+    from those per-cluster averages instead -- a "cluster-robust" interval,
+    of the simple mean-plus-or-minus-margin form statisticians call a
+    "Wald interval" (ADR-0016 -- see :func:`clustered_interval` for the
+    exact formula).
+
+    This choice is recorded directly on the estimate (as a ``StrEnum`` -- a
+    fixed set of named string values, rather than any arbitrary free-form
+    string) so that anything reading the result later can tell, without
+    guessing, which of the two methods produced the bounds. Using a fixed,
+    named set of values here, rather than any string that happens to be
+    convenient, follows the same "every status comes from a known, fixed
+    list" rule that ADR-0002 requires for every value written out to a
+    report.
     """
 
     WILSON = "wilson"
@@ -87,12 +126,25 @@ class IntervalMethod(StrEnum):
 
 
 def wilson_interval(*, successes: int, total: int) -> tuple[float | None, float | None]:
-    """Return the 95% Wilson score interval for ``successes / total``.
+    """Return a 95% confidence interval for a pass rate (``successes / total``).
 
-    The Wilson interval is preferred over the naive normal approximation
-    because it stays within ``[0, 1]`` and remains well-behaved at the
-    extremes (``successes == 0`` or ``successes == total``), where a naive
-    interval would incorrectly claim zero-width certainty.
+    A confidence interval is a range that's likely to contain the true
+    underlying rate, given that we only observed a limited number of
+    trials -- e.g. if 8 out of 10 samples passed, the true long-run pass
+    rate probably isn't exactly 80%, but a range like "50% to 95%" might be
+    a good bet for where it really falls. This function computes that
+    range using a specific, well-established formula called the "Wilson
+    score interval."
+
+    We use the Wilson formula instead of a simpler, more naive approach
+    (assuming the pass/fail rate follows a plain bell curve) because the
+    naive approach breaks down at the edges: if you got 0 out of 10, or 10
+    out of 10, the naive method would claim a range of exactly zero width
+    -- i.e. "we are 100% certain the true rate is exactly 0% (or 100%)" --
+    which is clearly overconfident given how little data we have. The
+    Wilson formula avoids that: it always stays within the valid
+    ``[0, 1]`` range and gives a sensible, non-zero-width answer even at
+    these extremes.
 
     Args:
         successes: Exact count of successes. Must satisfy
@@ -101,9 +153,10 @@ def wilson_interval(*, successes: int, total: int) -> tuple[float | None, float 
 
     Returns:
         A ``(lower_bound, upper_bound)`` tuple. Both are ``None`` when
-        ``total == 0`` -- an empty denominator has no defined confidence
-        interval, and must never be reported as a misleadingly certain
-        ``(0.0, 0.0)`` or similar.
+        ``total == 0`` -- with zero trials there's no data to build any
+        interval from, and returning something like ``(0.0, 0.0)`` here
+        would misleadingly look like a confident, certain answer instead
+        of "we don't know."
 
     Raises:
         ValueError: If ``successes`` is negative or exceeds ``total``.
@@ -125,37 +178,55 @@ def wilson_interval(*, successes: int, total: int) -> tuple[float | None, float 
     spread = z * ((p * (1 - p) / n) + (z**2) / (4 * n**2)) ** 0.5
     lower = (center - spread) / denominator
     upper = (center + spread) / denominator
-    # Clamp for floating-point safety only; the closed-form Wilson bound is
-    # mathematically guaranteed to lie within [0, 1] already.
+    # This clamp is only a safety net for tiny floating-point rounding
+    # errors; the Wilson formula above is mathematically guaranteed to
+    # already produce a value within [0, 1] on its own.
     return (max(0.0, lower), min(1.0, upper))
 
 
 def clustered_interval(*, cluster_means: Sequence[float]) -> tuple[float | None, float | None]:
-    """Return a 95% cluster-robust Wald interval over per-cluster means.
+    """Return a 95% confidence interval built from per-cluster averages,
+    for data where observations come in correlated groups rather than
+    being fully independent.
 
-    When ``attempts > 1``, repeated attempts sharing a ``sample_id`` are
-    correlated, not independent Bernoulli trials, so a Wilson interval over the
-    pooled per-attempt count treats each attempt as independent and reports a
-    narrower, more-certain interval than the data supports (pseudo-replication).
-    This instead treats each ``sample_id`` cluster as one observation -- its
-    mean -- and returns ``mean(cluster_means) +/- z * stdev(cluster_means) /
+    When ``attempts > 1``, the same question (``sample_id``) was attempted
+    more than once, and those repeated attempts tend to succeed or fail
+    together more than attempts at unrelated questions would -- they are
+    "correlated," not independent yes/no coin-flip trials (what
+    statisticians call "Bernoulli trials"). If we ignored that and fed the
+    pooled count of all attempts straight into :func:`wilson_interval`, it
+    would treat every attempt as if it were an independent data point, and
+    report an interval that's narrower (i.e. looks more certain) than the
+    data actually supports. Statisticians call this mistake
+    "pseudo-replication."
+
+    To avoid it, this function treats each ``sample_id``'s whole cluster
+    of attempts as a single observation -- specifically, that cluster's
+    average -- and builds the interval from those per-cluster averages
+    instead: ``mean(cluster_means) +/- z * stdev(cluster_means) /
     sqrt(m)``, where ``m`` is the number of clusters and ``z`` is the same
-    two-sided 95% critical value :func:`wilson_interval` uses. Cluster-robust
-    SE over few distinct ``sample_id``\\ s is still only approximate and should
-    not be over-trusted -- the same "never claim more certainty than the data
-    supports" caution that motivates Wilson over the naive normal approximation.
+    fixed 95%-confidence constant :func:`wilson_interval` uses. This kind
+    of "average plus-or-minus a margin" interval is called a "Wald
+    interval." Note that when there are only a few distinct ``sample_id``\\ s
+    to average over, this estimate of how much clusters typically vary
+    (their "standard error") is still only approximate and shouldn't be
+    over-trusted -- the same "never claim more certainty than the data
+    supports" caution that favors the Wilson interval over a naive one
+    elsewhere in this module.
 
     Args:
         cluster_means: One value per ``sample_id`` cluster (for a rate, that
             cluster's pass proportion, each in ``[0, 1]``).
 
     Returns:
-        A ``(lower_bound, upper_bound)`` tuple, clamped to ``[0, 1]`` for the
-        same floating-point safety :func:`wilson_interval` applies. Both are
-        ``None`` when ``m < 2`` -- the between-cluster variance is undefined
-        with a single cluster, and must never be reported as a misleadingly
-        certain zero-width interval, mirroring :func:`wilson_interval`'s
-        empty-denominator ``(None, None)`` case.
+        A ``(lower_bound, upper_bound)`` tuple, clamped to ``[0, 1]`` for
+        the same floating-point-rounding safety :func:`wilson_interval`
+        applies. Both are ``None`` when ``m < 2`` -- with only one
+        cluster, there's no way to measure how much clusters vary from
+        each other, so there's nothing to build a spread from. Returning
+        ``(None, None)`` here avoids reporting a misleadingly confident
+        zero-width interval, mirroring how :func:`wilson_interval` returns
+        ``(None, None)`` when there are zero trials to work with.
     """
     m = len(cluster_means)
     if m < 2:
@@ -166,15 +237,19 @@ def clustered_interval(*, cluster_means: Sequence[float]) -> tuple[float | None,
 
 
 class RateEstimate(FrozenModel):
-    """An exact binary rate with its 95% confidence interval.
+    """A pass/fail rate (e.g. "12 out of 20 passed") together with its 95%
+    confidence interval.
 
-    ``numerator``/``denominator`` are exact integers so a report can always
-    show precisely how many of how many, never a pre-rounded float alone.
-    ``interval_method`` records which construction produced ``lower_bound``/
-    ``upper_bound`` -- :attr:`IntervalMethod.WILSON` for the independent-trial
-    (``attempts == 1``) case, :attr:`IntervalMethod.CLUSTER_ROBUST` for the
-    repeated-attempt case (ADR-0016). Additive, optional, and default-``None``
-    so it stays within ``schema_version = "1"`` (ADR-0002).
+    ``numerator``/``denominator`` are kept as exact integers, so a report
+    can always show precisely how many passed out of how many were run,
+    rather than only a rounded-off percentage. ``interval_method`` records
+    which of the two methods in :class:`IntervalMethod` produced
+    ``lower_bound``/``upper_bound`` -- :attr:`IntervalMethod.WILSON` for
+    the case where each sample was attempted once,
+    :attr:`IntervalMethod.CLUSTER_ROBUST` for the case where samples were
+    attempted multiple times (ADR-0016). This field is additive, optional,
+    and defaults to ``None`` so that adding it doesn't break the frozen
+    ``schema_version = "1"`` wire format (ADR-0002).
     """
 
     numerator: int
@@ -186,21 +261,35 @@ class RateEstimate(FrozenModel):
 
 
 class ContinuousEstimate(FrozenModel):
-    """A continuous mean with its standard error and 95% confidence interval.
+    """The average of a numeric score (not just pass/fail), together with
+    its standard error and 95% confidence interval.
 
-    Carries the uncertainty design section 10 requires for a "mean" exactly as
-    :class:`RateEstimate` does for a rate. ``mean`` is always defined (the
-    estimate is only built when at least two scores exist); ``sem`` and the
-    bounds are ``None`` when the spread is undefined (a single cluster under the
-    cluster-robust regime), never a fabricated zero-width interval. Unlike a
-    rate, a score mean is not a probability, so the bounds are not clamped to
-    ``[0, 1]``. ``interval_method`` is :attr:`IntervalMethod.CLUSTER_ROBUST`
-    under repeated attempts and ``None`` for the flat, one-attempt SEM interval,
-    which corresponds to no named binary-rate method (ADR-0016). ``n`` is the
-    raw count of defined scores (``score_mean``'s denominator), not necessarily
-    ``sem``'s divisor: under :attr:`IntervalMethod.CLUSTER_ROBUST` the standard
-    error is computed over the distinct ``sample_id`` clusters, which may
-    number fewer than ``n``, so ``sem != stdev(scores) / sqrt(n)`` in general.
+    This is the score-mean equivalent of what :class:`RateEstimate` is for
+    a pass/fail rate -- both carry the same kind of "how uncertain is this
+    number" information that design section 10 requires. ``mean`` is
+    always present (this estimate is only built at all when there are at
+    least two scores to average). ``sem`` -- short for "standard error of
+    the mean," a measure of how much the average would likely wobble if
+    we'd tested a different sample of the same size -- and the confidence
+    bounds are ``None`` when that spread can't be measured (e.g. only a
+    single cluster under the cluster-robust method below); we return
+    ``None`` rather than fabricate a fake zero-width interval that would
+    look more certain than it is. Unlike a pass/fail rate, a score average
+    is not a probability, so its bounds are not forced into the ``[0, 1]``
+    range.
+
+    ``interval_method`` is :attr:`IntervalMethod.CLUSTER_ROBUST` when
+    samples were attempted more than once (see that enum for why), and
+    ``None`` for the plain, one-attempt-per-sample case -- there's no
+    separately-named method for that flat case the way ``WILSON`` names
+    one for rates (ADR-0016).
+
+    ``n`` is simply the count of scores that went into ``mean`` -- it is
+    *not* necessarily the same number used to divide when computing
+    ``sem``. Under :attr:`IntervalMethod.CLUSTER_ROBUST`, the standard
+    error is computed over the distinct ``sample_id`` clusters, and there
+    can be fewer clusters than there are individual scores (``n``) -- so
+    in general, ``sem`` is not simply ``stdev(scores) / sqrt(n)``.
     """
 
     mean: float
@@ -212,7 +301,8 @@ class ContinuousEstimate(FrozenModel):
 
 
 class ResourceDistribution(FrozenModel):
-    """Count/mean/p50/p95 summary for a resource metric (latency/tokens/cost).
+    """Count/mean/p50 (median)/p95 (95th-percentile) summary for a resource
+    metric (latency/tokens/cost).
 
     Built only from samples that actually reported a value for this metric;
     a target that never reports latency contributes nothing here rather
@@ -226,7 +316,9 @@ class ResourceDistribution(FrozenModel):
 
 
 class AggregateStats(FrozenModel):
-    """Recounted, provenance-independent statistics for one run (design §10)."""
+    """Freshly recounted statistics for one run, computed directly from the
+    run's own sample data rather than trusted from any attached summary
+    (design §10)."""
 
     total: int
     passed: int
@@ -248,12 +340,17 @@ class AggregateStats(FrozenModel):
 
 
 def _percentile(sorted_values: list[float], fraction: float) -> float:
-    """Nearest-rank percentile over an already-sorted, nonempty list.
+    """Return the requested percentile (e.g. p50, p95) from an
+    already-sorted, non-empty list, using the "nearest rank" method.
 
-    Uses the common "nearest rank" method (ceil(fraction * n), 1-indexed)
-    so p50/p95 always resolve to an actually-observed value rather than an
-    interpolated one, matching the exact/no-fabricated-values spirit of
-    Task 12 without requiring numpy.
+    "Nearest rank" means: rather than interpolating between two data
+    points to compute a percentile, we always pick an actual value that
+    was really observed in the data (computed as ``ceil(fraction * n)``,
+    counting positions starting from 1). This keeps p50/p95 as real,
+    observed measurements rather than made-up numbers in between two
+    measurements, matching this codebase's general preference for exact,
+    non-fabricated values (Task 12) -- and it does this without needing
+    numpy.
     """
     n = len(sorted_values)
     rank = max(1, math.ceil(fraction * n))
@@ -315,12 +412,16 @@ def _classify(sample: SampleResult) -> str:
 def _attempts_by_sample_id(samples: Sequence[SampleResult]) -> dict[str, list[SampleResult]]:
     """Group samples by ``sample.sample.sample_id`` (design §10, ADR-0016).
 
-    A manifest with ``attempts > 1`` produces one
-    :class:`~agentic_evalkit.models.SampleResult` per attempt, all sharing the
-    same sample ID. Both :func:`pass_at_k_by_sample` (per-sample ``pass@k``) and
-    the cluster-robust interval path (:func:`aggregate_run` under repeated
-    attempts) group by that ID, so the grouping lives here once rather than
-    being duplicated in each caller.
+    When a manifest specifies ``attempts > 1`` (the same question gets
+    attempted more than once), the run produces one
+    :class:`~agentic_evalkit.models.SampleResult` per attempt, all sharing
+    the same sample ID. Both :func:`pass_at_k_by_sample` (which computes,
+    per sample, the odds that at least one of ``k`` attempts would have
+    passed -- see :mod:`agentic_evalkit.stats.reliability` for what
+    "pass@k" means) and the cluster-robust interval path (used by
+    :func:`aggregate_run` under repeated attempts) need to group attempts
+    by sample ID, so that grouping logic lives here once instead of being
+    duplicated in each caller.
     """
     attempts_by_sample: dict[str, list[SampleResult]] = {}
     for sample in samples:
@@ -329,12 +430,14 @@ def _attempts_by_sample_id(samples: Sequence[SampleResult]) -> dict[str, list[Sa
 
 
 def _cluster_pass_proportions(samples: Sequence[SampleResult]) -> list[float]:
-    """Per-``sample_id`` fraction of attempts that graded PASS.
+    """For each ``sample_id``, the fraction of its attempts that graded PASS.
 
-    Each cluster is one observation for the cluster-robust interval; its value
-    is that cluster's PASS count over its attempt count, counted with the same
-    :func:`_classify` rule as the pooled ``passed`` total so the cluster means
-    stay consistent with the exact pooled numerator.
+    Each ``sample_id``'s fraction becomes one "cluster" observation used by
+    the cluster-robust interval described above: it's that cluster's PASS
+    count divided by its attempt count, using the exact same
+    :func:`_classify` rule used to compute the overall ``passed`` total --
+    so these per-cluster fractions are always consistent with that exact
+    total count.
     """
     return [
         sum(1 for attempt in attempts if _classify(attempt) == "passed") / len(attempts)
@@ -343,11 +446,14 @@ def _cluster_pass_proportions(samples: Sequence[SampleResult]) -> list[float]:
 
 
 def _cluster_mean_scores(samples: Sequence[SampleResult]) -> list[float]:
-    """Per-``sample_id`` mean of that cluster's defined grade scores.
+    """For each ``sample_id``, the average of that cluster's defined (i.e.
+    actually present) grade scores.
 
-    Only clusters with at least one defined numeric score contribute; a
-    ``sample_id`` whose every attempt lacked a score adds nothing (never a
-    fabricated ``0.0``), mirroring :func:`aggregate_run`'s score-mean denominator.
+    Only clusters that have at least one attempt with a real numeric score
+    count here; if every attempt for a given ``sample_id`` had no score at
+    all, that sample contributes nothing to the list (never a made-up
+    ``0.0``) -- the same rule :func:`aggregate_run` follows when deciding
+    what counts toward its own overall score-mean calculation.
     """
     means: list[float] = []
     for attempts in _attempts_by_sample_id(samples).values():
@@ -364,14 +470,22 @@ def _cluster_mean_scores(samples: Sequence[SampleResult]) -> list[float]:
 def _sem_interval(
     *, center: float, units: Sequence[float]
 ) -> tuple[float | None, float | None, float | None]:
-    """Return ``(sem, lower, upper)`` for a normal-approximation mean interval.
+    """Return ``(sem, lower, upper)``: the standard error and confidence
+    interval bounds for a mean, using the normal-distribution
+    approximation (mean plus-or-minus a margin based on the bell curve).
 
-    ``units`` are the observations whose sample standard deviation drives the
-    standard error: raw per-observation scores in the flat regime, or per-cluster
-    mean scores in the cluster-robust regime. Fewer than two units leaves the
-    spread undefined, so all three are ``None`` -- never a fabricated zero-width
-    interval, the same discipline :func:`wilson_interval` and
-    :func:`clustered_interval` keep for an undefined denominator/variance.
+    ``units`` are the individual observations used to measure how spread
+    out the data is (technically: their sample standard deviation is what
+    the standard error is computed from). Depending on which case we're
+    in, these are either the raw per-observation scores (when every sample
+    was attempted only once) or the per-cluster mean scores (in the
+    cluster-robust, repeated-attempts case -- see :class:`IntervalMethod`).
+    With fewer than two units, there's no way to measure spread at all, so
+    all three return values are ``None`` -- never a fabricated zero-width
+    interval. This is the same "say we don't know rather than fake a
+    confident answer" rule :func:`wilson_interval` and
+    :func:`clustered_interval` follow when their own denominator or
+    variance is undefined.
     """
     count = len(units)
     if count < 2:
@@ -386,17 +500,22 @@ def _score_estimate(
     score_mean: float | None,
     cluster_mean_scores: Sequence[float] | None,
 ) -> ContinuousEstimate | None:
-    """Build the SEM/CI estimate for the mean grade score, or ``None``.
+    """Build the full standard-error/confidence-interval estimate for the
+    mean grade score, or return ``None`` if there isn't enough data to
+    build one.
 
-    ``scores`` is every defined grade score (the exact list ``score_mean`` is
-    computed from); ``cluster_mean_scores`` is the per-``sample_id`` mean score
-    when ``attempts > 1`` (cluster-robust regime) or ``None`` for the flat,
-    one-attempt regime. Returns ``None`` when fewer than two scores are defined:
-    a single score has a mean but no spread, so no honest interval exists
-    (mirroring ``score_mean``'s own None-on-undefined discipline). The estimate's
-    ``mean`` is the exact pooled ``score_mean`` -- like ``RateEstimate.value``,
-    only the interval's derivation changes between regimes, never the point
-    estimate.
+    ``scores`` is every grade score that was actually recorded (exactly
+    the list that ``score_mean`` itself is computed from).
+    ``cluster_mean_scores`` is the per-``sample_id`` average score, used
+    when ``attempts > 1`` (the cluster-robust case), or ``None`` in the
+    plain one-attempt-per-sample case. This returns ``None`` when fewer
+    than two scores exist at all: a single score has an average but
+    nothing to measure spread from, so there's no honest interval to
+    report (the same "don't report undefined things" rule ``score_mean``
+    itself follows). The ``mean`` on the returned estimate is always the
+    exact overall ``score_mean`` -- exactly like ``RateEstimate.value``,
+    only *how the interval around it is built* changes between the two
+    cases, never the headline number itself.
     """
     n = len(scores)
     if n < 2 or score_mean is None:
@@ -418,30 +537,42 @@ def _score_estimate(
 
 
 def aggregate_run(run: EvalRunResult) -> AggregateStats:
-    """Recount every outcome and resource metric from ``run.samples``.
+    """Recount every outcome and every resource metric (latency, tokens,
+    cost) directly from ``run.samples`` -- the individual sample results
+    -- rather than from any pre-computed summary.
 
-    Never trusts ``run.summary``; every count here is derived solely from
-    ``run.samples`` so aggregation is correct even for a run whose attached
-    summary is stale.
+    This never trusts ``run.summary``: every count returned here is
+    derived solely by walking ``run.samples`` one by one, so the result is
+    correct even for a run whose attached summary turns out to be stale or
+    wrong.
 
-    When ``run.manifest.attempts > 1``, repeated attempts at one ``sample_id``
-    are correlated, so ``pass_rate``'s bounds (and ``score_estimate``'s) are
-    computed cluster-robustly over per-``sample_id`` clusters
-    (:func:`clustered_interval`) rather than over the pooled per-attempt count,
-    and ``pass_rate.interval_method`` records which construction was used.
-    ``numerator``/``denominator``/``value`` stay the exact pooled counts either
-    way -- only the interval's derivation changes. Cluster-robust SE over few
-    distinct ``sample_id``\\ s remains approximate and should not be over-trusted.
+    When ``run.manifest.attempts > 1`` (each question was attempted more
+    than once), repeated attempts at the same ``sample_id`` tend to
+    succeed or fail together, so they aren't fully independent data
+    points. In that case, ``pass_rate``'s confidence interval (and
+    ``score_estimate``'s) is built using the cluster-robust method over
+    per-``sample_id`` groups (:func:`clustered_interval`) instead of
+    treating every individual attempt as independent, and
+    ``pass_rate.interval_method`` records which of the two methods was
+    actually used. Either way, the exact counts
+    (``numerator``/``denominator``/``value``) stay the same -- only how
+    the surrounding confidence interval is calculated changes. Note that
+    when there are only a few distinct ``sample_id``\\ s to work with, this
+    cluster-robust interval is still only an approximation and shouldn't
+    be over-trusted.
 
     Args:
         run: The complete run to aggregate.
 
     Returns:
-        Exact outcome counts, a Wilson- or cluster-robust-bounded pass rate, a
-        score mean (and matching ``score_estimate`` SEM/CI) over only the samples
-        with a defined numeric grade score, and count/mean/p50/p95 resource
-        distributions for whichever of latency/input-tokens/output-tokens/cost
-        were actually reported.
+        Exact outcome counts; a pass rate with a confidence interval built
+        either the Wilson way or the cluster-robust way (see
+        :class:`IntervalMethod`); a mean grade score (and a matching
+        ``score_estimate`` with its own standard error and confidence
+        interval), computed only over the samples that actually have a
+        numeric grade score; and count/mean/p50/p95 resource-usage
+        summaries for whichever of latency, input tokens, output tokens,
+        or cost were actually reported.
     """
     counts = {
         "passed": 0,
@@ -479,8 +610,10 @@ def aggregate_run(run: EvalRunResult) -> AggregateStats:
     passed = counts["passed"]
     attempts = run.manifest.attempts
     if attempts > 1:
-        # Repeated attempts at one sample_id are correlated: cluster-robust
-        # bounds over per-sample_id pass proportions, not pooled Wilson.
+        # Repeated attempts at the same sample_id are correlated with each
+        # other, so we use cluster-robust bounds over per-sample_id pass
+        # proportions here, instead of a pooled Wilson interval that would
+        # (wrongly) treat every attempt as independent.
         lower, upper = clustered_interval(cluster_means=_cluster_pass_proportions(run.samples))
         interval_method = IntervalMethod.CLUSTER_ROBUST
     else:
@@ -525,29 +658,39 @@ def aggregate_run(run: EvalRunResult) -> AggregateStats:
 
 
 def pass_at_k_by_sample(run: EvalRunResult, *, k: int) -> dict[str, float]:
-    """Return each sample's ``pass@k`` estimate over its actually-run attempts.
+    """Return each sample's ``pass@k`` estimate, computed from its actual attempts.
 
-    Groups ``run.samples`` by ``sample.sample.sample_id`` (a manifest with
-    ``attempts > 1`` produces one :class:`~agentic_evalkit.models.SampleResult`
-    per attempt, all sharing the same sample ID) and calls
-    :func:`~agentic_evalkit.stats.reliability.pass_at_k` once per group with
-    ``total_attempts`` set to that group's actual attempt count and
-    ``successful_attempts`` set to how many of them graded
-    :attr:`~agentic_evalkit.models.GradeStatus.PASS`.
+    "pass@k" answers: out of ``k`` attempts at the same question, what's
+    the probability that at least one of them succeeds? It's a standard
+    way of scoring a system that's allowed multiple tries at the same task
+    (see :mod:`agentic_evalkit.stats.reliability` for the full explanation
+    and formula).
 
-    A sample whose group has fewer than ``k`` attempts is silently omitted
-    (never fabricated as ``0.0`` or ``1.0``): ``pass_at_k`` requires
-    ``1 <= k <= total_attempts``, and a sample that was not actually
-    attempted ``k`` times has no defined ``pass@k`` estimate.
+    This groups ``run.samples`` by ``sample.sample.sample_id`` (a manifest
+    with ``attempts > 1`` produces one
+    :class:`~agentic_evalkit.models.SampleResult` per attempt, all sharing
+    the same sample ID), then calls
+    :func:`~agentic_evalkit.stats.reliability.pass_at_k` once per group,
+    using that group's actual attempt count as ``total_attempts`` and how
+    many of those attempts graded
+    :attr:`~agentic_evalkit.models.GradeStatus.PASS` as
+    ``successful_attempts``.
+
+    A sample whose group ran fewer than ``k`` attempts is silently left
+    out of the result (never given a made-up value like ``0.0`` or
+    ``1.0``): ``pass_at_k`` requires ``1 <= k <= total_attempts``, and a
+    sample that wasn't actually attempted ``k`` times simply has no
+    defined ``pass@k`` value to report.
 
     Args:
         run: The complete run to compute per-sample ``pass@k`` for.
-        k: Number of attempts hypothetically sampled per sample; typically
-            ``run.manifest.attempts`` (every sample's full attempt budget).
+        k: Number of attempts to hypothetically sample per question;
+            typically set to ``run.manifest.attempts`` (i.e. every
+            sample's full attempt budget).
 
     Returns:
         A mapping from ``sample_id`` to its ``pass@k`` estimate, covering
-        only sample IDs whose attempt count is at least ``k``.
+        only the sample IDs that were attempted at least ``k`` times.
     """
     attempts_by_sample = _attempts_by_sample_id(run.samples)
 
@@ -568,22 +711,25 @@ def pass_at_k_by_sample(run: EvalRunResult, *, k: int) -> dict[str, float]:
 
 
 def build_report_aggregates(run: EvalRunResult) -> dict[str, JsonValue]:
-    """Compute the full ``aggregates`` payload a report should carry for ``run``.
+    """Compute the full ``aggregates`` payload that a report should carry for ``run``.
 
-    Combines :func:`aggregate_run` (exact outcome counts, the Wilson-bounded
-    pass rate, and latency/token/cost distributions) with
-    :func:`pass_at_k_by_sample` (only when ``run.manifest.attempts > 1`` --
-    with a single attempt per sample, ``pass@1`` over one attempt is exactly
-    the pass/fail bit already in ``aggregate_run``'s counts, so reporting it
-    a second time would be redundant, not informative) into the one
-    JSON-compatible mapping every :class:`~agentic_evalkit.reporters.base.Reporter`
+    This combines :func:`aggregate_run` (exact outcome counts, the pass
+    rate with its confidence interval, and latency/token/cost
+    distributions) with :func:`pass_at_k_by_sample` -- but only when
+    ``run.manifest.attempts > 1``. With just a single attempt per sample,
+    "pass@1" (succeeding in your one and only attempt) is exactly the same
+    as the plain pass/fail count ``aggregate_run`` already produces, so
+    reporting it a second time would be redundant rather than genuinely
+    new information. The two are merged into the one JSON-compatible
+    mapping that every :class:`~agentic_evalkit.reporters.base.Reporter`
     accepts as its optional ``aggregates`` argument.
 
-    Never fabricates a ``pass_at_k`` entry when no sample actually ran ``k``
-    attempts: if :func:`pass_at_k_by_sample` returns an empty mapping (e.g.
-    ``manifest.attempts > 1`` was configured but every sample errored before
-    any attempt count could reach ``k``), the ``"pass_at_k"`` key is omitted
-    entirely rather than reporting a mean of zero samples.
+    This never invents a ``pass_at_k`` entry when no sample actually
+    completed ``k`` attempts: if :func:`pass_at_k_by_sample` comes back
+    empty (for example, ``manifest.attempts > 1`` was configured, but
+    every sample errored out before reaching ``k`` completed attempts),
+    the ``"pass_at_k"`` key is left out of the result entirely, rather
+    than reporting a meaningless "average of zero samples."
     """
     aggregates = cast("dict[str, JsonValue]", aggregate_run(run).model_dump(mode="json"))
 

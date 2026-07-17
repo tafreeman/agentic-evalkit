@@ -1,14 +1,19 @@
 """``agentic-evalkit datasets ...``: curated/search/inspect/preview/pull.
 
 Every command in this module goes through the same
-:class:`~agentic_evalkit.datasets.catalog.DatasetCatalog` a Python caller
-would use (design §11.2): there is no CLI-only shortcut path to a provider.
-``curated`` works fully offline (it only reads the built-in preset table);
-``search``, ``inspect``, and ``preview`` build a real catalog (with the
-content-addressed cache backing ``--offline``) and display the resolved
-revision/config/split the same way a manifest run would pin them. ``pull``
-writes an immutable cache entry for one exact page -- it is a snapshot, not
-a "sync to latest" operation, matching design §6.3's cache-identity model.
+:class:`~agentic_evalkit.datasets.catalog.DatasetCatalog` class that a
+Python caller using this as a library (rather than the CLI) would use
+(design §11.2) -- there's no separate, CLI-only shortcut that reaches a
+dataset provider directly. ``curated`` works fully offline because it only
+reads a built-in, hardcoded table of presets -- no network call involved.
+``search``, ``inspect``, and ``preview`` build a real catalog object, backed
+by a cache that's keyed by a hash of its contents (which is what makes
+``--offline`` mode possible), and then display exactly which dataset
+revision/config/split got resolved -- the same exact, fixed identifiers a
+manifest-driven eval run would lock in and use. ``pull`` writes one exact
+page of data into the cache as a permanent, unchangeable entry -- it's a
+one-time snapshot, never a "keep this updated" operation, matching design
+§6.3's model where a cache entry's identity is fixed forever once written.
 """
 
 from __future__ import annotations
@@ -44,19 +49,25 @@ app.add_typer(datasets_app, name="datasets")
 T = TypeVar("T")
 
 _CACHE_DIR_NAME = "agentic-evalkit"
-#: Subdirectory of the cache root reserved for the resolution-identity cache
-#: (ADR-0011), kept physically separate from the page cache's own digest
-#: fan-out directories so the two caches' entries can never collide.
+#: Subdirectory of the cache root set aside for the "resolution" cache
+#: (ADR-0011) -- this caches the answer to "which exact revision/config/
+#: split does this dataset reference currently point to?", kept separate
+#: from the page cache below, which stores the actual downloaded data (split
+#: across many hash-prefixed subdirectories so no single directory ends up
+#: with too many files). Keeping the two caches in physically separate
+#: directories means their entries can never accidentally collide.
 _RESOLUTION_CACHE_SUBDIR = "resolutions"
 
 
 def default_cache_dir() -> Path:
-    """Return the platform user-cache directory for agentic-evalkit (design §6.3).
+    """Return the platform's standard user-cache directory for agentic-evalkit (design §6.3).
 
-    Stdlib-only, cross-platform resolution (no third-party cache-dir
-    dependency): honors ``AGENTIC_EVALKIT_CACHE_DIR`` first (mainly for
-    tests and CI isolation), then the platform convention -- ``%LOCALAPPDATA%``
-    on Windows, ``$XDG_CACHE_HOME`` or ``~/.cache`` elsewhere.
+    Resolved using only the Python standard library, with no third-party
+    "find the cache dir" package. Honors the ``AGENTIC_EVALKIT_CACHE_DIR``
+    environment variable first (mainly so tests and CI can point this
+    somewhere isolated), then falls back to each platform's own convention:
+    ``%LOCALAPPDATA%`` on Windows, or ``$XDG_CACHE_HOME``/``~/.cache`` on
+    Linux/macOS.
     """
     override = os.environ.get("AGENTIC_EVALKIT_CACHE_DIR")
     if override:
@@ -103,55 +114,73 @@ def parse_dataset_locator(locator: str) -> DatasetRef:
 
 
 def build_catalog(*, offline: bool) -> DatasetCatalog:
-    """Build a real ``DatasetCatalog`` wired to the local + Hugging Face providers.
+    """Build a real ``DatasetCatalog``, connected to the local and Hugging Face dataset providers.
 
-    Uses :func:`default_cache_dir` (design §6.3's standalone default) so
-    ``--offline`` runs can serve exact previously-cached pages, plus a
-    :class:`~agentic_evalkit.datasets.resolution_cache.ResolutionCache`
-    rooted at the same cache directory's ``resolutions/`` subdirectory
-    (ADR-0011) so ``--offline`` runs can also resolve a dataset that was
-    resolved online at least once (e.g. via ``datasets pull``) without
-    contacting the provider again.
+    Uses :func:`default_cache_dir` (the same default the library uses on its
+    own, per design §6.3) so that ``--offline`` runs can still serve pages
+    that were already downloaded and cached from an earlier, online run. It
+    also builds a
+    :class:`~agentic_evalkit.datasets.resolution_cache.ResolutionCache`,
+    rooted in that same cache directory's ``resolutions/`` subdirectory
+    (ADR-0011). That second cache remembers *which exact version* a dataset
+    reference resolved to, so an ``--offline`` run can reuse a resolution
+    that succeeded online at least once before (e.g. via ``datasets pull``)
+    without needing to contact the provider again just to re-confirm it.
 
-    ``offline`` is accepted here (rather than dropped) purely to keep every
-    call site's shape uniform -- ``DatasetCatalog`` itself takes ``offline``
-    per-call, never at construction time (ADR-0010; see
-    ``agentic_evalkit.datasets.catalog``'s module docstring), so this
-    function has nothing to *do* with the flag beyond accepting it. The bug
-    this task fixes was never this parameter's mere existence -- it was
-    every caller below silently failing to forward its own ``offline``
-    value into the ``DatasetCatalog`` method calls it makes. Each command
-    function below now does that forwarding explicitly.
+    This function accepts an ``offline`` parameter (rather than dropping it)
+    only to keep every caller's function signature uniform.
+    ``DatasetCatalog`` itself takes ``offline`` separately on each
+    individual method call, never once at construction time (ADR-0010; see
+    the module docstring of ``agentic_evalkit.datasets.catalog`` for why) --
+    so this function has nothing to actually *do* with the flag beyond
+    accepting and holding it. A past bug here was never that this parameter
+    existed pointlessly: it was that every caller below was silently
+    forgetting to pass its own ``offline`` value through to the actual
+    ``DatasetCatalog`` method calls it made, so ``--offline`` silently did
+    nothing in places. Each command function below now passes that value
+    through explicitly.
     """
     cache = DatasetCache(default_cache_dir())
     resolution_cache = ResolutionCache(default_cache_dir() / _RESOLUTION_CACHE_SUBDIR)
     client = httpx.AsyncClient(timeout=30.0)
-    # HfApi structurally satisfies datasets.huggingface's private _HubClient
-    # protocol (verified at runtime by that module's own tests via
-    # @runtime_checkable isinstance checks) but mypy cannot prove it: HfApi's
-    # real methods use enumerated keyword-only parameters where _HubClient's
-    # protocol methods use **kwargs. _HubClient itself is private
-    # (module-internal, not exported) so it cannot be imported here to
-    # annotate against directly -- cast through Any, mirroring the identical
-    # cast datasets/huggingface.py's own HuggingFaceDatasetProvider.create()
-    # uses internally for this exact same mismatch.
+    # HfApi has all the right methods/behavior to satisfy
+    # datasets.huggingface's private _HubClient Protocol ("structural"
+    # typing: Python doesn't require HfApi to explicitly declare that it
+    # implements _HubClient, just to have matching methods) -- and that
+    # module's own tests confirm this at runtime with an isinstance() check
+    # against the @runtime_checkable protocol. But mypy can't verify it
+    # statically: HfApi's actual methods declare their keyword arguments by
+    # name, while _HubClient's protocol methods are declared with a generic
+    # **kwargs. We also can't just annotate against _HubClient directly,
+    # because it's private to that other module (not exported), so it can't
+    # be imported here. So we cast through Any instead -- mirroring the
+    # identical workaround datasets/huggingface.py's own
+    # HuggingFaceDatasetProvider.create() uses internally for this exact
+    # same mismatch.
     hf_provider = HuggingFaceDatasetProvider(client=client, hub=cast("Any", HfApi()))
     local_provider = LocalDatasetProvider(allowed_roots=(Path.cwd(),))
-    # Both providers satisfy DatasetProvider structurally at runtime
-    # (confirmed via isinstance against the @runtime_checkable protocol in
-    # Task 5/6's own test suites); mypy's dict-literal check does not always
-    # narrow concrete-class values to a Protocol type even with this
-    # annotated dict, so each value is cast explicitly rather than left to
-    # infer incorrectly as the narrower concrete-class union.
+    # Both providers satisfy the DatasetProvider Protocol structurally at
+    # runtime (confirmed via isinstance() against the @runtime_checkable
+    # protocol, in Task 5/6's own test suites). But even with the type
+    # annotation on this dict, mypy doesn't always widen concrete-class
+    # values up to the Protocol type on its own -- left alone, it would
+    # infer this dict's value type as the narrower "either
+    # LocalDatasetProvider or HuggingFaceDatasetProvider" union instead of
+    # DatasetProvider. So each value below is cast explicitly to avoid that
+    # wrong, narrower inference.
     providers: dict[str, DatasetProvider] = {
         "local": cast("DatasetProvider", local_provider),
         "huggingface": cast("DatasetProvider", hf_provider),
     }
-    # This CLI supplies the genuine "local"/"huggingface" built-in providers
-    # itself (it is not loading third-party plugins here), so the
-    # collision guard that stops a *plugin* from shadowing a built-in name
-    # does not apply -- pass an empty reserved-name tuple rather than
-    # tripping PluginCompatibilityError on our own built-ins.
+    # This function is registering the CLI's own genuine "local" and
+    # "huggingface" providers -- it is not loading any third-party plugins
+    # here. DatasetCatalog has a safety check elsewhere that normally stops a
+    # third-party plugin from registering a provider under a name that
+    # collides with ("shadows") a built-in one. That check doesn't apply to
+    # this case, since these ARE the built-ins, not a plugin trying to
+    # impersonate one -- so we pass an empty tuple of "reserved" names here,
+    # rather than accidentally tripping that same safety check
+    # (PluginCompatibilityError) against our own code.
     return DatasetCatalog(
         providers=providers,
         cache=cache,
@@ -194,12 +223,15 @@ def curated(
         )
         return
     table = Table(title="Curated dataset presets")
-    # Name/Dataset/Adapter/Grader are lookup keys a user copies verbatim
+    # Name/Dataset/Adapter/Grader are values a user is meant to copy exactly
     # into other commands (e.g. "agentic-evalkit init --preset <name>"), so
-    # they must never truncate even on a narrow terminal; only the
-    # free-text Readiness column is allowed to wrap. Every cell is dynamic,
-    # provider/preset-derived text, so every cell is wrapped with
-    # safe_text to render literally rather than be re-parsed as markup.
+    # none of them may ever get cut off, even in a narrow terminal window --
+    # only the free-form, human-readable Readiness column is allowed to wrap
+    # onto multiple lines. Every cell's text ultimately comes from a
+    # provider or preset (it's not a literal string we wrote ourselves), so
+    # every cell is wrapped in safe_text() -- this displays the text exactly
+    # as-is, instead of Rich trying to interpret something like "[bold]"
+    # inside it as a markup tag.
     table.add_column("Name", no_wrap=True)
     table.add_column("Dataset", no_wrap=True)
     table.add_column("Readiness")
@@ -313,11 +345,16 @@ def preview(
         catalog = build_catalog(offline=offline)
 
         async def _run() -> tuple[ResolvedDataset, SamplePage]:
-            # Both the resolve and the preview must honor --offline: a
-            # network-requiring provider's resolve() would otherwise still
-            # make a live call even though the visible page-fetch below
-            # already correctly rejected/served from cache. Without this,
-            # `preview --offline` was only half-hermetic (ADR-0010).
+            # Both the resolve() call and the page-preview call below need
+            # to respect --offline. Without this, resolve() -- which may
+            # need to make a live network call to a provider like Hugging
+            # Face to figure out things like the latest revision -- would
+            # still go over the network even when --offline was passed,
+            # even though the actual page-fetch right after it already
+            # correctly refused to make a live call (serving from cache
+            # instead). That made `preview --offline` only halfway offline:
+            # one of its two steps could still silently reach the network
+            # (ADR-0010).
             resolved = await catalog.resolve(ref, offline=offline)
             page = await catalog.preview(ref, resolved, offset=offset, limit=limit, offline=offline)
             return resolved, page
@@ -354,10 +391,12 @@ def pull(
     ] = "table",
     debug: Annotated[bool, typer.Option("--debug", help="Show full tracebacks on error.")] = False,
 ) -> None:
-    """Resolve and cache one exact page as an immutable cache entry.
+    """Resolve a dataset locator and cache one exact page of it, permanently.
 
-    ``pull`` records a snapshot at the resolved revision; it never means
-    "keep this dataset up to date" after the call returns (design §6.3).
+    ``pull`` records a frozen snapshot at whatever revision it resolves to
+    right now. It does not mean "keep this dataset up to date" after the
+    call returns -- the cached copy will not automatically refresh later
+    just because the dataset changes upstream (design §6.3).
     """
     base_ref = run_cli_command(lambda: parse_dataset_locator(locator), debug=debug)
     ref = base_ref.model_copy(

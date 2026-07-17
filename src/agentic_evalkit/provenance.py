@@ -1,27 +1,33 @@
-"""Deterministic fingerprint helpers for run provenance (design §5.6).
+"""Functions that compute "fingerprints" -- hashes proving what code/environment/target ran.
 
-Design §5.6 states that :class:`~agentic_evalkit.models.EvalRunManifest`
-pins "execution target and target fingerprint" and "environment and code
-fingerprints." Before this module existed, ``environment_fingerprint`` and
-``code_fingerprint`` were declared fields that nothing in the package ever
-populated -- every real run carried ``None`` in both, and there was no
-``target_fingerprint`` field at all, only a ``target_fingerprint_policy``
-describing how one *should* be enforced. This module is the missing
-generator: it turns each pinned-provenance promise into an actual,
-reproducible value.
+Design §5.6.
 
-Every function here is stdlib-only, deterministic, and side-effect free
-beyond reading interpreter/package metadata through
-:mod:`importlib.metadata`: no filesystem or network I/O, no wall-clock
-timestamps, no randomness. Calling a function twice with the same inputs
-(and the same installed environment) always returns the same digest, which
-is the entire point -- a fingerprint that is not reproducible is not a
-fingerprint.
+Design §5.6 says that an :class:`~agentic_evalkit.models.EvalRunManifest`
+should record a fingerprint for the execution target, plus fingerprints for
+the environment and the code that produced the run -- so that later, you can
+prove two runs are actually comparable (same code, same environment, same
+target) before treating their results as apples-to-apples. Before this
+module existed, that was only a promise: the ``environment_fingerprint`` and
+``code_fingerprint`` fields existed on the manifest, but nothing ever filled
+them in -- every real run just left them as ``None``. There wasn't even a
+``target_fingerprint`` field yet, only a ``target_fingerprint_policy``
+describing how one *should* eventually be enforced. This module is what
+actually computes those values, so the promise gets kept.
 
-Each digest is rendered as ``"sha256:" + <64 lowercase hex characters>``
-over the *canonical JSON* encoding of its inputs (``json.dumps`` with
-``sort_keys=True`` and compact ``(",", ":")`` separators), so key order in
-the source mapping never affects the result.
+Every function below only uses Python's standard library, is deterministic
+(the same input always gives the same output), and has no side effects
+beyond reading the interpreter's and installed packages' metadata via
+:mod:`importlib.metadata` -- no reading files, no network calls, no
+current-time timestamps, no random numbers. Call any function here twice
+with the same inputs, on the same installed environment, and you always get
+back the identical hash. That's the entire point: a "fingerprint" that
+changes between calls for no reason would be useless as a proof of identity.
+
+Each fingerprint is a string of the form ``"sha256:" + <64 hex characters>``
+-- a SHA-256 hash of the input data, first converted to JSON in a
+"canonical" way (sorted keys, no extra whitespace) so that the same logical
+data always produces the exact same JSON text, and therefore the exact same
+hash, regardless of what order the fields happened to be in originally.
 """
 
 from __future__ import annotations
@@ -36,27 +42,31 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-#: Distribution name used to resolve the installed agentic-evalkit version.
-#: Matches the ``[project].name`` in ``pyproject.toml`` and the lookup
-#: already performed in ``agentic_evalkit/__init__.py``.
+#: The package name used to look up the installed agentic-evalkit version.
+#: This matches the ``[project].name`` entry in ``pyproject.toml``, and the
+#: same lookup already done in ``agentic_evalkit/__init__.py``.
 _PACKAGE_DISTRIBUTION_NAME = "agentic-evalkit"
 
-#: Version reported when the package's own distribution metadata cannot be
-#: found (e.g. running from a source checkout without an installed egg-info).
-#: Chosen so it is obviously a placeholder rather than a real release, while
-#: still being a valid, stable string for hashing.
+#: The version string used when we can't find the package's installation
+#: metadata at all (for example, running straight from a source checkout
+#: that was never pip-installed). Deliberately looks like a placeholder
+#: rather than a real version number, while still being a valid, stable
+#: string that can be hashed just like a real version would be.
 _UNKNOWN_PACKAGE_VERSION = "0+unknown"
 
 
 def _canonical_json(payload: object) -> str:
-    """Render ``payload`` as compact, key-sorted JSON for stable hashing.
+    """Convert ``payload`` to JSON text in a fixed, predictable way, so hashing it is reliable.
 
-    ``sort_keys=True`` makes the encoding insensitive to the input
-    mapping's key order; the compact ``(",", ":")`` separators remove
-    incidental whitespace differences. ``default=str`` lets non-JSON-native
-    values (e.g. a caller passing a ``Path`` or an enum) still hash
-    deterministically instead of raising, since fingerprint inputs are
-    caller-supplied config data, not validated wire models.
+    ``sort_keys=True`` means the key order in the original dict never
+    changes the output text. The compact ``(",", ":")`` separators strip
+    out incidental spacing differences that don't change the meaning.
+    ``default=str`` means that if the caller passes something that isn't
+    naturally JSON-shaped (like a ``Path`` object or an enum member), it
+    just gets converted to its string form instead of causing an error --
+    this is fine here because fingerprint inputs are plain, caller-supplied
+    configuration values, not this package's own strictly validated data
+    models.
     """
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -68,13 +78,14 @@ def _sha256_fingerprint(payload: object) -> str:
 
 
 def _installed_package_version() -> str:
-    """Resolve the installed agentic-evalkit version, or a stable fallback.
+    """Look up the installed agentic-evalkit version, or fall back to a fixed placeholder.
 
-    Falls back to :data:`_UNKNOWN_PACKAGE_VERSION` on
-    :class:`~importlib.metadata.PackageNotFoundError` rather than raising,
-    so fingerprinting never fails a run merely because the package is not
-    installed in the conventional way (e.g. a vendored or editable
-    checkout without distribution metadata).
+    If :class:`~importlib.metadata.PackageNotFoundError` is raised --
+    meaning Python can't find installation metadata for this package -- this
+    returns :data:`_UNKNOWN_PACKAGE_VERSION` instead of letting the error
+    propagate. That way, fingerprinting never breaks a run just because the
+    package happened to be installed in an unusual way (for example, run
+    directly from a source checkout without a proper install step).
     """
     try:
         return version(_PACKAGE_DISTRIBUTION_NAME)
@@ -83,14 +94,16 @@ def _installed_package_version() -> str:
 
 
 def compute_environment_fingerprint() -> str:
-    """Fingerprint the interpreter/platform/package identity of this process.
+    """Compute a fingerprint of the Python interpreter, platform, and installed package version.
 
-    Covers the Python version triple, interpreter implementation name,
-    ``sys.platform``, machine architecture, and the installed
-    agentic-evalkit version -- the minimal set needed to tell whether two
-    runs executed under a materially different interpreter or platform.
-    It does not cover installed third-party dependency versions or OS
-    build/kernel details; those are out of scope for this helper.
+    Includes the Python version (major.minor.patch), which Python
+    implementation this is (e.g. CPython vs. PyPy), the OS platform
+    identifier, the machine's CPU architecture, and the installed
+    agentic-evalkit version -- enough information to tell whether two runs
+    happened under meaningfully different interpreters or platforms. It
+    deliberately does not cover the versions of third-party dependencies or
+    detailed OS/kernel build information -- that level of detail is outside
+    what this helper tries to capture.
     """
     payload = {
         "python_version": tuple(sys.version_info[:3]),
@@ -120,15 +133,17 @@ def compute_code_fingerprint() -> str:
 
 
 def compute_target_fingerprint(target_config: Mapping[str, object]) -> str:
-    """Fingerprint a resolved target's canonical configuration.
+    """Fingerprint the configuration of a resolved execution target.
 
-    ``target_config`` is caller-supplied (e.g. a CLI target block's
-    ``model_dump()``), so encoding uses ``default=str`` rather than
-    requiring every value to already be JSON-native; it is a mapping, not
-    the wire ``EvalRunManifest`` itself, so callers can fingerprint the
-    exact resolved target shape they constructed. Sorting keys before
-    hashing (``json.dumps(..., sort_keys=True)``) means two mappings with
-    the same key/value pairs in a different order always hash identically,
-    while any actual value change -- however small -- changes the digest.
+    ``target_config`` is supplied by the caller (for example, the dict you
+    get from calling ``model_dump()`` on a CLI target block), so this
+    accepts a plain mapping rather than requiring every value to already be
+    JSON-friendly -- and rather than requiring the full ``EvalRunManifest``
+    object itself. That means callers can fingerprint exactly the resolved
+    target shape they built, whatever it looks like. Because keys are
+    sorted before hashing (``json.dumps(..., sort_keys=True)``), two
+    mappings with the same key/value pairs listed in a different order
+    always produce the same fingerprint -- but changing even one value,
+    however small, changes the resulting hash.
     """
     return _sha256_fingerprint(dict(target_config))

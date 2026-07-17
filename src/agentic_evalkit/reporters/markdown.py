@@ -1,8 +1,16 @@
-"""Human-readable Markdown reporter (design §11.3, plan Task 13).
+"""Human-readable Markdown reporter (design doc section 11.3, plan Task 13).
 
-Renders identity, provenance, compatibility fingerprints, outcome counts,
-and a per-sample evidence table from the same fields the JSON envelope
-carries, so a reviewer can read a run's evidence without JSON tooling.
+Renders a run as Markdown: an identity section, provenance (which dataset
+was used; which "adapter" -- the code that converts a raw dataset row into
+this project's standard sample format -- prepared it; which grader judged
+the results; and which target -- the system under test -- produced them),
+"compatibility fingerprints" (short hash-like identifiers that capture
+exactly which code version and which environment produced the run, so you
+can tell whether two runs are even safe to compare), outcome counts, and a
+table of per-sample evidence. All of it comes from the same fields the
+JSON envelope carries -- this is just a friendlier rendering of the same
+data -- so a reviewer can read a run's evidence in a text editor or browser
+instead of needing JSON tooling.
 """
 
 from __future__ import annotations
@@ -61,7 +69,12 @@ def _mapping(aggregates: dict[str, JsonValue], key: str) -> dict[str, JsonValue]
 
 
 def _number(value: JsonValue | None, *, digits: int = 4) -> str:
-    """Fixed-precision float, or ``"-"`` for an absent/non-numeric value."""
+    """Format ``value`` as a fixed-precision decimal, or "-" if it's missing or not a real number.
+
+    (Booleans are deliberately excluded even though Python treats them as a
+    kind of ``int`` -- we don't want ``True``/``False`` rendered as
+    "1.0000"/"0.0000" in a report.)
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "-"
     return f"{value:.{digits}f}"
@@ -115,14 +128,28 @@ def _pass_at_k_row(aggregates: dict[str, JsonValue]) -> str | None:
 
 
 def _aggregates_table(aggregates: dict[str, JsonValue]) -> list[str]:
-    """Render the aggregates payload as a Markdown table, never a raw dict repr.
+    """Render the run's summary statistics as a Markdown table, not a raw Python dict.
 
-    Reads the stable keys :func:`agentic_evalkit.stats.build_report_aggregates`
-    produces -- the Wilson-or-cluster-robust pass rate, the score mean and its
-    ``score_estimate`` interval, and (only when a repeated-attempt run produced
-    one) ``pass_at_k`` -- formatting each as a row and reusing this file's
-    ``"-"``-for-absent idiom (see ``_sample_row``) rather than fabricating a
-    value for a metric the run did not define.
+    (Just inserting the raw dict into the report as text would look like
+    ``{'pass_rate': {...}}`` -- technically correct but unreadable. This
+    turns it into a proper table instead.)
+
+    Reads the fixed set of keys that
+    :func:`agentic_evalkit.stats.build_report_aggregates` always produces:
+    the pass rate, together with a 95% confidence interval around it (a
+    range expressing how much uncertainty the sample size leaves -- computed
+    using either a "Wilson" interval, a standard technique that stays
+    accurate even with small sample counts, or a "cluster-robust" one, which
+    widens the range to account for samples that aren't fully independent of
+    each other, such as repeated attempts on the same problem); the mean
+    score and its own confidence interval (``score_estimate``); and, present
+    only when the run attempted each sample more than once, ``pass_at_k``
+    (the fraction of samples solved by at least one of ``k`` attempts -- a
+    common way to measure how reliably a system succeeds when given
+    multiple tries). Each of these becomes one table row. When a metric
+    wasn't computed for this run, its row shows ``"-"`` (the same convention
+    ``_sample_row`` uses elsewhere in this file) instead of inventing a
+    value like ``0``, which could be misread as an actual measured result.
     """
     rows = [_pass_rate_row(aggregates), _score_row(aggregates), _pass_at_k_row(aggregates)]
     body = [row for row in rows if row is not None]

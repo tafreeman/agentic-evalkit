@@ -1,24 +1,31 @@
-"""Harness request/result contracts and executor protocol (design §7, ADR-0005).
+"""Harness request/result data shapes and executor protocol (design §7, ADR-0005).
 
-Benchmark adapters project records and define artifact/oracle policy; a
-``HarnessExecutor`` performs authoritative, isolated verification (for
-example, applying a patch and running a benchmark's real test suite inside a
-container). A missing or unavailable harness must return a typed
-``unavailable`` result rather than a substitute score — an advisory grader
-can never impersonate an authoritative benchmark result (ADR-0005).
+Benchmark adapters turn raw dataset rows into samples and decide what output
+format and answer-key rules apply to them. A ``HarnessExecutor`` is the piece
+that does the real, authoritative check -- for example, actually applying a
+code patch and running the benchmark's real test suite inside an isolated
+container, rather than just guessing whether the patch looks right. If the
+harness can't run at all (not installed, Docker not running, etc.), the code
+must clearly report a typed "unavailable" result instead of quietly making up
+a score. In other words: a lower-confidence, advisory-only grader (like an AI
+judge's opinion) can never be reported as if it were the official,
+authoritative benchmark result -- that rule comes from ADR-0005.
 
-This module defines the versioned wire contracts (``HarnessRequest``,
-``HarnessResult``), the ``HarnessExecutor`` protocol, and two concrete
-executors:
+This module defines the versioned data shapes sent to and returned from a
+harness (``HarnessRequest``, ``HarnessResult`` -- "versioned" so the format
+can change later without breaking old data), the ``HarnessExecutor``
+interface itself, and two concrete implementations:
 
-- ``UnavailableHarnessExecutor``: deterministic, production-safe executor
-  used when an optional harness capability (e.g. ``agentic-evalkit[swebench]``)
-  is not installed. It always reports ``status="unavailable"``.
-- ``FakeHarnessExecutor``: **test-only**. It returns caller-configured
-  resolved/unresolved/error results and exists solely so contract tests can
-  exercise grading and reporting code paths without a real, containerized
-  harness. Production code must never construct this class outside of
-  ``tests/``.
+- ``UnavailableHarnessExecutor``: a simple, predictable, production-safe
+  stand-in used when an optional harness feature (e.g. the
+  ``agentic-evalkit[swebench]`` installable extra) is not installed. It
+  always reports ``status="unavailable"`` -- it never pretends to grade
+  anything.
+- ``FakeHarnessExecutor``: **test-only**. You configure it ahead of time
+  with the exact resolved / unresolved / error result it should return, so
+  automated tests can exercise the grading and reporting logic without
+  needing a real, container-based harness running. Production code must
+  never construct this class outside of the ``tests/`` directory.
 """
 
 from collections.abc import Mapping
@@ -31,13 +38,16 @@ from agentic_evalkit.models.base import FrozenModel
 
 
 class HarnessStatus(StrEnum):
-    """The outcome of one harness execution attempt (design §7.1).
+    """The outcome of one attempt to run the harness (design §7.1).
 
-    ``UNAVAILABLE`` means the harness capability itself could not run (for
-    example, the optional extra is not installed, or a container image is
-    missing) — it is categorically distinct from ``ERROR`` (the harness ran
-    but hit an infrastructure failure) and from a completed run that simply
-    did not resolve the issue (``resolved=False`` with ``COMPLETED``).
+    ``UNAVAILABLE`` means the harness itself never got to run at all -- for
+    example, the optional package extra isn't installed, or a required
+    container image is missing. This is a different situation from
+    ``ERROR`` (the harness started running but hit an infrastructure
+    problem partway through), and different again from a harness that ran
+    successfully to completion but simply found the issue was not fixed
+    (that's ``resolved=False`` together with status ``COMPLETED`` -- a
+    normal, successful "no" verdict, not a failure).
     """
 
     COMPLETED = "completed"
@@ -46,13 +56,15 @@ class HarnessStatus(StrEnum):
 
 
 class HarnessRequest(FrozenModel):
-    """A single, versioned request to run authoritative benchmark verification.
+    """One versioned request asking a harness to authoritatively check a result.
 
-    ``prediction`` carries the benchmark-specific prediction payload (for
-    SWE-bench Verified, the official three-key export from
+    ``prediction`` holds the actual answer/patch being checked, in whatever
+    shape that specific benchmark's official tooling expects (for SWE-bench
+    Verified, this is the official three-field export produced by
     :meth:`agentic_evalkit.benchmarks.swebench.SweBenchVerifiedAdapter.export_prediction`).
-    ``source`` and ``environment`` carry provenance/environment metadata the
-    harness needs but that is not itself part of the prediction contract.
+    ``source`` and ``environment`` carry extra context the harness needs to
+    do its job -- like where the data came from, or what environment to run
+    in -- but which is not itself part of what's being graded.
     """
 
     benchmark: str
@@ -65,15 +77,17 @@ class HarnessRequest(FrozenModel):
 
 
 class HarnessResult(FrozenModel):
-    """The outcome of one harness execution attempt (design §7.1).
+    """The outcome of one harness run (design §7.1).
 
-    ``resolved`` is intentionally tri-state: ``True`` means the harness
-    authoritatively confirmed the issue is resolved, ``False`` means the
-    harness authoritatively confirmed it is not, and ``None`` means no
-    authoritative resolution verdict is available (for example, the harness
+    ``resolved`` deliberately has three possible states, not two: ``True``
+    means the harness actually confirmed the issue is fixed, ``False`` means
+    it actually confirmed the issue is still broken, and ``None`` means
+    there is no real verdict at all yet -- for example, because the harness
     was ``unavailable`` or hit an infrastructure ``error`` before it could
-    verify anything). A generic grade can never be converted to
-    ``resolved=True`` without a real ``HarnessResult`` behind it.
+    finish checking. This matters because some other, more approximate
+    grade (like an AI's guess) must never get silently converted into
+    ``resolved=True`` -- only a genuine ``HarnessResult`` produced by really
+    running the check can set it to ``True``.
     """
 
     status: HarnessStatus
@@ -87,21 +101,24 @@ class HarnessResult(FrozenModel):
 
 @runtime_checkable
 class HarnessExecutor(Protocol):
-    """The authoritative-verification boundary (design §7.1, ADR-0005)."""
+    """The interface for anything that can perform real, authoritative
+    verification (design §7.1, ADR-0005) -- as opposed to an approximate or
+    advisory grade."""
 
     async def execute(self, request: HarnessRequest) -> HarnessResult: ...
 
 
 class UnavailableHarnessExecutor:
-    """Deterministic executor for when a harness capability is not installed.
+    """A simple, predictable stand-in used when a harness isn't installed.
 
     Every call to :meth:`execute` returns a ``status="unavailable"``
-    :class:`HarnessResult` whose message includes ``install_hint`` (for
-    example, ``"install agentic-evalkit[swebench]"``) so callers and reports
-    can tell users exactly how to unlock authoritative grading, instead of
-    silently reporting a failed or absent result (design §7.1, "Missing
-    authoritative SWE-bench capability returns `unavailable`, never a
-    substitute score.").
+    :class:`HarnessResult`, and its message includes ``install_hint`` (for
+    example, ``"install agentic-evalkit[swebench]"``) so that callers and
+    reports can tell the user exactly what to install to get real,
+    authoritative grading -- instead of silently reporting something that
+    looks like a failure or just leaving the result blank (design §7.1:
+    "Missing authoritative SWE-bench capability returns `unavailable`, never
+    a substitute score.").
     """
 
     def __init__(self, install_hint: str) -> None:
@@ -119,15 +136,15 @@ class UnavailableHarnessExecutor:
 
 
 class FakeHarnessExecutor:
-    """Test-only, deterministic ``HarnessExecutor`` (design §7.1).
+    """A test-only, predictable stand-in ``HarnessExecutor`` (design §7.1).
 
-    Production code must never import or construct this class; it exists
-    exclusively so unit and contract tests can exercise grading/reporting
-    logic against resolved, unresolved, and infrastructure-error harness
-    outcomes without a real containerized harness. Configure it with a
-    mapping from ``sample_id`` to the exact :class:`HarnessResult` it should
-    return for that sample, or a single default result to return for every
-    request.
+    Production code must never import or construct this class. It exists
+    only so unit and contract tests can exercise the grading and reporting
+    logic against every possible outcome -- resolved, unresolved, and
+    infrastructure error -- without needing a real, container-based harness
+    to run. Configure it either with a mapping from ``sample_id`` to the
+    exact :class:`HarnessResult` that sample should get back, or with a
+    single default result to return for every request.
     """
 
     def __init__(

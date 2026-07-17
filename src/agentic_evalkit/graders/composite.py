@@ -1,11 +1,22 @@
-"""Schema and composite objective graders (design §9, plan Task 10 Steps 2/4).
+"""Graders that check output structure, and combine other graders into one verdict.
 
-``CompositeGrader`` runs its component graders, preserves every child
-result, computes the weighted mean over the *available* numeric sub-scores
-(missing/abstained/unavailable scores are excluded from the mean, never
-treated as zero), and fails with ``hard_gate=True`` when any hard-gated
-component fails. A component grader that itself raises surfaces as
-``GradeStatus.ERROR``, not a silent zero.
+Design §9, plan Task 10 Steps 2/4.
+
+``CompositeGrader`` is how several graders get combined into a single
+overall result. It runs every component grader, keeps every one of their
+individual results (nothing is discarded), and combines their numeric
+scores into one weighted average -- but only over the components that
+actually produced a usable number. A component that couldn't produce a
+score (because it abstained, errored, or was unavailable) is left out of
+that average entirely; it is never counted as a zero, which would unfairly
+drag the average down. If any component marked as a "hard gate" (see
+``WeightedGrader`` below) fails, the whole composite fails
+(``hard_gate=True``) no matter how well the other components scored -- a
+hard-gated failure can never be averaged away by good scores elsewhere.
+And if a component grader raises an exception instead of returning a
+result, that shows up as an explicit ``GradeStatus.ERROR`` for that
+component, never as a silent zero score that could be mistaken for a real
+failing grade.
 """
 
 from datetime import UTC, datetime
@@ -22,16 +33,17 @@ from agentic_evalkit.models import (
     NormalizedExecutionResult,
 )
 
-# Statuses that represent "this component did not produce a definitive
-# grade" rather than a hard pass/fail. Their scores are excluded from the
-# composite's weighted mean.
+# Statuses meaning "this component didn't produce a definitive grade" --
+# as opposed to a clear pass or fail. A component whose status is one of
+# these has its score left out of the composite's weighted average
+# entirely (see `_weighted_mean` below), rather than being counted as zero.
 _NON_DEFINITIVE_STATUSES = frozenset(
     {GradeStatus.ABSTAIN, GradeStatus.ERROR, GradeStatus.UNAVAILABLE}
 )
 
 
 class SchemaGrader:
-    """Validates ``NormalizedExecutionResult.output`` against a Pydantic ``TypeAdapter``."""
+    """Checks ``NormalizedExecutionResult.output``'s fields/types via a Pydantic ``TypeAdapter``."""
 
     def __init__(self, *, name: str, adapter: TypeAdapter[Any]) -> None:
         self._name = name
@@ -75,7 +87,7 @@ class SchemaGrader:
 
 
 class WeightedGrader:
-    """Pairs a component ``Grader`` with a composite weight and hard-gate flag."""
+    """Wraps a component ``Grader`` with its weight and its ``hard_gate`` flag."""
 
     def __init__(self, grader: Grader, *, weight: float, hard_gate: bool) -> None:
         if weight < 0:
@@ -86,12 +98,15 @@ class WeightedGrader:
 
 
 class CompositeGrader:
-    """Combines multiple graders under a noncompensable hard-gate policy.
+    """Combines graders into one verdict; a hard-gate failure can't be outweighed elsewhere.
 
     Args:
-        name: Stable grader identifier reported on the composite ``GradeResult``.
-        graders: Ordered ``WeightedGrader`` components. Order is preserved in
-            evidence so reports can show each component's contribution.
+        name: A stable label for this grader, recorded on the composite's
+            ``GradeResult`` so you can tell which grader produced it.
+        graders: The component graders, each wrapped in a ``WeightedGrader``,
+            in the order they should be evaluated. That order is preserved
+            in the evidence so a report can show exactly how much each
+            component contributed to the final result.
     """
 
     def __init__(self, *, name: str, graders: tuple[WeightedGrader, ...]) -> None:
@@ -118,11 +133,15 @@ class CompositeGrader:
                     "score": child.score,
                     "weight": component.weight,
                     "hard_gate": component.hard_gate,
-                    # The child's own evidence rides along so a composite
-                    # report keeps each component's audit trail (e.g. the
-                    # grounded-citation per-check breakdown, ADR-0012) --
-                    # making the docstring's "preserves every child result"
-                    # claim true for evidence, not just status/score.
+                    # Each component's own detailed evidence rides along
+                    # here too, not just its status/score, so a report built
+                    # from this composite result still has the full detail
+                    # behind each component (for example, the
+                    # grounded-citation grader's per-check breakdown --
+                    # ADR-0012). This is what makes the class docstring's
+                    # "preserves every child result" promise actually true:
+                    # without this line, only the summary numbers would
+                    # survive, not the reasoning behind them.
                     "evidence": child.evidence,
                 }
                 for component, child in zip(self._graders, child_results, strict=True)
@@ -142,9 +161,11 @@ class CompositeGrader:
             )
 
         if total_weight == 0.0:
-            # No component produced a definitive numeric score: the composite
-            # cannot claim a pass/fail verdict, so it reports unavailable
-            # rather than fabricating a zero-weighted average.
+            # None of the components produced a usable numeric score (they
+            # all abstained, errored, or were unavailable). With nothing to
+            # average, the composite has no basis for a pass/fail verdict,
+            # so it reports "unavailable" instead of making up a fake
+            # average out of zero real scores.
             return GradeResult(
                 sample_id=sample.sample_id,
                 grader=self._name,
@@ -156,14 +177,21 @@ class CompositeGrader:
                 created_at=now,
             )
 
-        # `_weighted_mean` guarantees `weighted_score is not None` whenever
-        # `total_weight != 0.0` (the branch above already returned otherwise);
-        # `cast` documents that proven invariant without a runtime check that
-        # `assert` would strip under `python -O`.
+        # At this point `weighted_score` can't actually be `None`:
+        # `_weighted_mean` only returns `None` together with `total_weight ==
+        # 0.0`, and that case already returned above. We could double-check
+        # this with an `assert`, but Python silently removes `assert`
+        # statements when run with the `-O` (optimize) flag, so an `assert`
+        # here wouldn't reliably catch a bug if one ever crept in. `cast` is
+        # different: it's purely a hint for the type checker (mypy) that has
+        # no effect at runtime, so it just tells mypy "trust us, this is a
+        # float" without depending on a check that might silently not run.
         weighted_score = cast("float", weighted_score)
         status = GradeStatus.PASS if weighted_score >= 1.0 else GradeStatus.PARTIAL
-        # A composite whose weighted mean is exactly 0 with no failed hard
-        # gate is still a definitive fail signal.
+        # Even though no hard-gated component failed, a weighted average of
+        # exactly 0 still means every component that counted toward the
+        # score scored zero -- that's a clear failure, not "partial
+        # credit," so it's reported as FAIL rather than PARTIAL.
         if weighted_score == 0.0:
             status = GradeStatus.FAIL
 
@@ -185,9 +213,11 @@ class CompositeGrader:
         try:
             return await component.grader.grade(sample, execution)
         except Exception as error:
-            # Deliberately broad: any component-grader failure must surface
-            # as an explicit ERROR result rather than propagate and abort
-            # the whole composite.
+            # Catching `Exception` broadly here is deliberate: if any single
+            # component grader blows up, that shouldn't crash the entire
+            # composite grading run. Instead, it becomes one explicit ERROR
+            # result for this component, and grading continues normally for
+            # every other component and sample.
             return GradeResult(
                 sample_id=sample.sample_id,
                 grader="unknown",

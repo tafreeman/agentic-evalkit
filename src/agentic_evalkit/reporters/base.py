@@ -1,10 +1,16 @@
-"""Reporter protocol and redaction policy shared by every reporter format.
+"""Shared contract for every report format, plus the rules for hiding secrets in a report.
 
-Reporters consume a completed :class:`~agentic_evalkit.models.EvalRunResult`
-only; they never execute targets, grade samples, or perform aggregation
-(design §11.3). Redaction happens once, immutably, before any reporter sees
-the model, so every output format observes the same redacted evidence
-(design §12).
+A reporter's only job is to take a finished evaluation run (an
+:class:`~agentic_evalkit.models.EvalRunResult` -- the full record of what
+happened during one evaluation) and write it out as a file. A reporter never
+runs the system under test, never decides whether a sample passed or failed,
+and never computes summary statistics -- all of that already happened before
+a reporter ever sees the data (see design doc section 11.3). Secret-scrubbing
+("redaction") happens exactly once, producing a fresh copy of the data rather
+than editing it in place, before any reporter runs -- so every output format
+(JSON, HTML, etc.) starts from the same already-cleaned data and none of them
+can accidentally leak something that should have been hidden (see design doc
+section 12).
 """
 
 from __future__ import annotations
@@ -28,24 +34,33 @@ _REDACTED = "[REDACTED]"
 class RedactionPolicy(FrozenModel):
     """Declares what must never appear in a rendered report.
 
-    ``evidence_keys`` names grade-evidence dictionary keys to drop entirely.
-    ``secret_patterns`` are regular expressions; any matching substring found
-    in a string evidence value is replaced with ``"[REDACTED]"`` rather than
-    dropping the whole value, so surrounding context survives.
+    ``evidence_keys`` lists specific keys inside a grade's "evidence" data
+    (the extra details a grader records to justify its verdict -- things
+    like reasoning text or retrieved snippets) that should be deleted
+    outright. ``secret_patterns`` are regular expressions describing what a
+    secret looks like; any matching substring found inside a piece of
+    evidence text is replaced with the literal text ``"[REDACTED]"`` instead
+    of deleting the whole value, so the rest of the surrounding text stays
+    readable.
     """
 
     evidence_keys: tuple[str, ...] = ()
     secret_patterns: tuple[str, ...] = ()
 
 
-#: Conservative default applied at the CLI report boundaries (``run`` writes
-#: the canonical JSON through it; ``report`` re-applies it before rendering).
-#: Patterns target well-known credential shapes only -- Hugging Face user
-#: tokens, OpenAI-style secret keys, and HTTP bearer/authorization values --
-#: with length guards so ordinary evidence text (words that merely start with
-#: "hf_" or "sk-") is never mangled. Library callers are unaffected: reporters
-#: apply no policy themselves, and callers compose their own via
-#: :func:`apply_redaction`.
+#: The safe-by-default policy used at the two places the command-line tool
+#: writes a report (the ``run`` command writes the main JSON report through
+#: it, and the ``report`` command re-applies it before turning that JSON into
+#: another format). Its patterns only catch well-known secret formats --
+#: Hugging Face access tokens (which start with "hf_"), OpenAI-style secret
+#: keys (which start with "sk-"), and HTTP "Authorization: Bearer ..."
+#: header values -- and each pattern requires a minimum length, so an
+#: ordinary word that merely happens to start with "hf_" or "sk-" is never
+#: mistaken for a real secret and mangled. This default only applies to the
+#: CLI: if you use this library directly in your own code, no redaction
+#: happens automatically -- reporters never apply a policy on their own, so
+#: you must call :func:`apply_redaction` yourself with whatever policy you
+#: want (this default one, or your own).
 DEFAULT_REDACTION_POLICY = RedactionPolicy(
     secret_patterns=(
         r"hf_[A-Za-z0-9]{16,}",
@@ -58,12 +73,16 @@ DEFAULT_REDACTION_POLICY = RedactionPolicy(
 
 @runtime_checkable
 class Reporter(Protocol):
-    """A pure function from a completed run to a written report file.
+    """The shared interface every report format implements: turn a finished run into a written file.
 
-    Implementations must not mutate ``run``; every reporter renders from an
-    immutable model, optionally decorated with ``aggregates`` supplied by a
-    caller that already ran ``agentic_evalkit.stats`` (this package never
-    imports that module itself).
+    A reporter must not modify the ``run`` object it's given -- it only
+    reads from it. Callers may also hand in ``aggregates``: pre-computed
+    summary statistics (for example, a pass rate together with a margin of
+    error showing how much to trust it) that were calculated separately by
+    the ``agentic_evalkit.stats`` module. This package deliberately never
+    imports ``agentic_evalkit.stats`` itself -- that computation is kept out
+    of the reporters entirely, so a caller who wants those numbers in the
+    report has to compute them first and pass them in.
     """
 
     def write(
@@ -127,18 +146,24 @@ def _redact_grade(
 def _redact_execution(
     execution: NormalizedExecutionResult, *, patterns: tuple[re.Pattern[str], ...]
 ) -> NormalizedExecutionResult:
-    """Redact secret-shaped substrings from a system-under-test's raw output.
+    """Scrub secret-looking text out of the raw output produced by the system being evaluated.
 
-    Unlike grade evidence, ``output``/``structured_output``/``error`` are the
-    target's own words, not the harness's -- there is no meaningful
-    ``evidence_keys``-style drop list for keys the harness doesn't define, so
-    only pattern substitution applies here, never key removal. Without this,
-    an output that happens to embed a credential-shaped value is written to
-    the canonical report unredacted regardless of the spill threshold: the
-    spill boundary (``EvalRunner._spill_large_output``) only redacts bytes
-    that are about to leave the in-memory result as an oversized artifact,
-    and small/never-spilled outputs reach the report exactly as the target
-    returned them until this function also covers them.
+    Grade evidence (see ``_redact_grade`` above) is data our own harness
+    generates, so we can define a fixed list of keys to strip out entirely
+    (``evidence_keys``). The ``output``, ``structured_output``, and ``error``
+    fields handled here are different: they're free-form text written by
+    whatever system is under test, not by us, so there's no fixed set of
+    keys to drop -- all we can do is scan the text for secret-shaped
+    patterns and blank out any matches.
+
+    This function matters even though very large outputs get special
+    handling elsewhere: an output too big to keep inline gets written out to
+    its own separate file instead (see ``EvalRunner._spill_large_output``),
+    and that separate step does its own redaction of the bytes it moves out.
+    But an ordinary, small output that's never moved out that way would
+    otherwise reach the final report exactly as the tested system produced
+    it, secrets and all -- this function is what redacts those
+    normal-sized outputs before they're written.
     """
     if not patterns:
         return execution
@@ -175,16 +200,21 @@ def _redact_sample(
 
 
 def apply_redaction(run: EvalRunResult, policy: RedactionPolicy) -> EvalRunResult:
-    """Return a new :class:`EvalRunResult` with ``policy`` applied.
+    """Return a new, redacted copy of ``run`` with ``policy`` applied.
 
-    Covers both the harness's own grade evidence (key removal via
-    ``evidence_keys``, plus pattern substitution) and each execution's raw
-    ``output``/``structured_output``/``error`` fields -- the system-under-
-    test's own words, pattern-substituted only, since there is no harness-
-    defined key list for content the harness didn't author.
+    Two kinds of data get cleaned, for the two reasons explained on
+    ``_redact_grade`` and ``_redact_execution`` above: the harness's own
+    grade evidence (where whole keys can be dropped via ``evidence_keys``,
+    plus pattern-based scrubbing), and each sample's raw
+    ``output``/``structured_output``/``error`` fields -- the tested
+    system's own words, which only get pattern-based scrubbing since
+    there's no fixed list of keys to drop from free-form text.
 
-    ``run`` is never mutated (design ADR-0002); this always returns a fresh
-    model built with ``model_copy``, even when the policy removes nothing.
+    ``run`` itself is left completely untouched (per ADR-0002, which
+    requires every model in this codebase to be treated as read-only once
+    created, never modified in place). This function always returns a
+    brand-new object built with ``model_copy``, even in the edge case where
+    the policy doesn't actually redact anything.
     """
     evidence_keys = frozenset(policy.evidence_keys)
     patterns = tuple(re.compile(pattern) for pattern in policy.secret_patterns)

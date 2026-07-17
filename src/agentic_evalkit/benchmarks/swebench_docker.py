@@ -1,30 +1,45 @@
 """Container-backed SWE-bench harness executor (ADR-0014, design §7.1).
 
-``SweBenchDockerHarnessExecutor`` is the concrete
-:class:`~agentic_evalkit.benchmarks.harness.HarnessExecutor` that turns the
-prediction-export-only SWE-bench Verified preset into an authoritatively
-gradable one: it drives the official ``swebench`` package in Docker and maps
-its per-instance report onto a :class:`HarnessResult`.
+``SweBenchDockerHarnessExecutor`` is the actual, working implementation of
+:class:`~agentic_evalkit.benchmarks.harness.HarnessExecutor` for SWE-bench.
+On its own, the SWE-bench Verified adapter can only export a prediction file
+in the right format -- it can't tell you whether a fix actually worked. This
+class is what adds that real, authoritative grading: it runs the official
+``swebench`` Python package inside Docker, then takes the report that
+package produces for one task and converts it into this project's own
+:class:`HarnessResult` format.
 
-Two design rules keep it safe and testable:
+Two design rules keep this class safe to import and easy to test:
 
-- **Importable with zero extras.** Nothing from ``docker`` or ``swebench`` is
-  imported at module load; the real integrations are lazy, inside the default
-  preflight/evaluator callables, so ``benchmarks`` and ``cli.runs`` import
-  cleanly on a base install and the grader simply reports ``UNAVAILABLE`` at
-  run time.
-- **Injected seams.** ``preflight`` (capability probe) and ``evaluator``
-  (the official-harness call) are constructor-injected, so hermetic unit
-  tests drive every UNAVAILABLE / ERROR / resolved-True / resolved-False
-  branch with fakes and never touch a Docker daemon. Only the two default
-  callables talk to Docker/``swebench``, and only the opt-in live workflow
-  (``.github/workflows/live-swebench.yml``) exercises them.
+- **You can import this file even without Docker or ``swebench`` installed.**
+  Nothing from the ``docker`` or ``swebench`` packages is imported when this
+  module is first loaded -- those imports only happen lazily, inside the
+  default "preflight" and "evaluator" functions described below, and only
+  once someone actually calls them. That means the rest of the codebase
+  (``benchmarks``, ``cli.runs``) can import this module cleanly even on a
+  bare install that skips the optional SWE-bench extra, and only discovers
+  the capability is missing at the moment it's actually used -- at which
+  point it just reports ``UNAVAILABLE``.
+- **The real Docker/network calls are swappable.** The two things this class
+  needs to do its job -- checking whether the harness is even able to run
+  (``preflight``), and actually invoking the official harness
+  (``evaluator``) -- are passed in through the constructor instead of being
+  hard-coded. That means ordinary, fully offline unit tests can supply fake
+  versions of both and walk through every possible outcome (unavailable,
+  error, resolved-true, resolved-false) without ever needing a real Docker
+  daemon. Only the two real, default versions of these functions actually
+  talk to Docker and ``swebench``, and those only ever run under the
+  separate, opt-in live workflow (``.github/workflows/live-swebench.yml``),
+  never in the normal test suite.
 
-Fidelity discipline (design §7.1): an infrastructure failure -- image pull,
-timeout, OOM, a malformed report -- becomes ``HarnessStatus.ERROR`` with
-``resolved=None``, never a guessed verdict; capability absence becomes
-``HarnessStatus.UNAVAILABLE``. Only a report that actually carries a
-``resolved`` field yields ``COMPLETED``.
+Being strictly honest about what actually happened (design §7.1): an
+infrastructure problem -- failing to download a Docker image, a timeout,
+running out of memory, a report that doesn't parse -- always becomes
+``HarnessStatus.ERROR`` with ``resolved=None``. It is never turned into a
+guessed pass/fail verdict. Similarly, the harness simply not being available
+becomes ``HarnessStatus.UNAVAILABLE``. Only an official report that actually
+contains a ``resolved`` field is allowed to produce
+``HarnessStatus.COMPLETED``.
 """
 
 from __future__ import annotations
@@ -58,9 +73,10 @@ DEFAULT_INSTALL_HINT = "install agentic-evalkit[swebench] and start a Docker dae
 
 _DEFAULT_DATASET_NAME = "princeton-nlp/SWE-bench_Verified"
 
-#: Keys of the official ``get_eval_report`` per-instance report we surface as
-#: grading evidence (everything except the ``resolved`` verdict itself, which
-#: maps to ``HarnessResult.resolved``).
+#: The fields from the official ``get_eval_report`` per-instance report that
+#: we copy into our own result as supporting evidence -- everything except
+#: the ``resolved`` verdict itself, which instead becomes
+#: ``HarnessResult.resolved``.
 _REPORT_EVIDENCE_KEYS = (
     "patch_is_None",
     "patch_exists",
@@ -68,27 +84,31 @@ _REPORT_EVIDENCE_KEYS = (
     "tests_status",
 )
 
-#: Callable that reports why the harness capability is unavailable, or
-#: ``None`` when it is ready.
+#: A function that checks whether the harness is able to run at all. Returns
+#: a reason string explaining why it can't, or ``None`` if everything's ready.
 PreflightProbe = Callable[[], "str | None"]
-#: Callable that runs the official harness for one request and returns its
-#: per-instance ``get_eval_report``-shaped report.
+#: A function that actually runs the official harness for one request and
+#: returns its report, shaped like the official ``get_eval_report`` output
+#: for a single instance.
 Evaluator = Callable[[HarnessRequest], Mapping[str, JsonValue]]
 
 
 class SweBenchDockerHarnessExecutor:
-    """Runs the official SWE-bench harness in Docker (ADR-0014).
+    """Runs the official SWE-bench harness inside Docker (ADR-0014).
 
     Args:
-        install_hint: Actionable message surfaced on ``UNAVAILABLE``.
-        dataset_name: Hugging Face dataset the official harness resolves
-            instances against (the default evaluator passes it through).
-        preflight: Capability probe; returns a reason string when the harness
-            cannot run, else ``None``. Defaults to the real docker+swebench
-            probe. Injected in tests.
-        evaluator: Runs the official harness for one request and returns its
-            per-instance report. Defaults to the real subprocess invocation.
-            Injected in tests.
+        install_hint: The actionable message shown to users when this
+            reports ``UNAVAILABLE``, telling them what to install/start.
+        dataset_name: The Hugging Face dataset name the official harness
+            looks up each instance's details in (the default evaluator just
+            passes this straight through to it).
+        preflight: A function that checks whether the harness can run at
+            all; it returns a reason string if not, or ``None`` if it's
+            ready to go. Defaults to the real check against Docker and
+            ``swebench``. Tests substitute a fake version of this.
+        evaluator: A function that runs the official harness for one
+            request and returns its per-instance report. Defaults to the
+            real subprocess call. Tests substitute a fake version of this.
     """
 
     def __init__(
@@ -105,8 +125,10 @@ class SweBenchDockerHarnessExecutor:
         self._evaluator = evaluator or self._run_official_harness
 
     async def execute(self, request: HarnessRequest) -> HarnessResult:
-        # The default preflight pings the Docker daemon (blocking I/O); run it
-        # off the event loop so a slow/hung daemon never freezes concurrent runs.
+        # The default preflight check pings the Docker daemon, which is a
+        # blocking network/IO call. We run it in a background thread (rather
+        # than directly on the async event loop) so that a slow or stuck
+        # Docker daemon can never freeze other runs happening concurrently.
         unavailable_reason = await asyncio.to_thread(self._preflight)
         if unavailable_reason is not None:
             return HarnessResult(
@@ -120,8 +142,10 @@ class SweBenchDockerHarnessExecutor:
         try:
             report = await asyncio.to_thread(self._evaluator, request)
         except Exception as error:
-            # Infrastructure failure is never a task failure (ADR-0008): no
-            # verdict is invented, the cause is preserved for the report.
+            # An infrastructure failure (the tooling itself breaking) is a
+            # completely different thing from the task genuinely failing
+            # (ADR-0008) -- so we don't invent a pass/fail verdict here. We
+            # just record what went wrong so it's visible in the report.
             return HarnessResult(
                 status=HarnessStatus.ERROR,
                 resolved=None,
@@ -133,12 +157,14 @@ class SweBenchDockerHarnessExecutor:
     def _run_official_harness(  # pragma: no cover - live Docker path, opt-in workflow only
         self, request: HarnessRequest
     ) -> Mapping[str, JsonValue]:
-        """Drive ``swebench.harness.run_evaluation`` for one instance.
+        """Actually invoke ``swebench.harness.run_evaluation`` for one instance.
 
-        Live-only: exercised by ``tests/live/test_swebench_harness_live.py``
-        under the opt-in Docker workflow, never by the hermetic suite (which
-        injects ``evaluator``). Delegates to the official package rather than
-        reimplementing patch application or test execution.
+        This only ever runs for real inside
+        ``tests/live/test_swebench_harness_live.py``, as part of the opt-in
+        Docker workflow -- never as part of the normal, fully offline test
+        suite (which instead injects a fake ``evaluator``). It calls out to
+        the official ``swebench`` package to do the actual work, rather than
+        reimplementing patch-applying or test-running logic itself.
         """
         instance_id = str(request.prediction["instance_id"])
         with tempfile.TemporaryDirectory(prefix="agentic-evalkit-swebench-") as tmp:
@@ -146,7 +172,12 @@ class SweBenchDockerHarnessExecutor:
             predictions_path = work_dir / "predictions.json"
             predictions_path.write_text(json.dumps([dict(request.prediction)]), encoding="utf-8")
             run_id = docker_safe_run_id(request.sample_id)
-            completed = subprocess.run(  # noqa: S603 -- list-form, no shell, framework-controlled args
+            # This subprocess call is safe even though ruff's security linter
+            # flags subprocess calls by default (rule S603): the command is
+            # passed as a list, not a shell string, so there's no
+            # shell-injection risk, and every argument below is built by
+            # this code itself, never taken from raw, unvalidated user input.
+            completed = subprocess.run(  # noqa: S603
                 [
                     sys.executable,
                     "-m",
@@ -163,8 +194,10 @@ class SweBenchDockerHarnessExecutor:
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
-                # Harness/Docker logs can carry non-UTF-8 bytes or ANSI escapes;
-                # never let decoding a log crash the run.
+                # Harness and Docker logs can contain bytes that aren't valid
+                # UTF-8, or ANSI color-escape codes. We'd rather show
+                # slightly garbled text than have decoding a log line crash
+                # the run.
                 errors="replace",
                 timeout=request.timeout_seconds,
                 check=True,
@@ -173,13 +206,16 @@ class SweBenchDockerHarnessExecutor:
 
 
 def docker_safe_run_id(sample_id: str) -> str:
-    """Build a Docker-safe SWE-bench ``run_id`` from a sample id.
+    """Turn a sample id into a ``run_id`` that Docker will actually accept.
 
-    The official harness threads ``run_id`` into container/image naming, and
-    Docker names reject characters like ``:`` -- exactly what the CLI's
-    ``swebench-verified:<instance_id>`` sample ids contain, which would fail
-    every real Docker-backed run at container creation. Every character
-    outside ``[A-Za-z0-9_.-]`` is replaced with ``-`` (Codex review, P1).
+    The official harness uses ``run_id`` as part of the name it gives
+    containers and images, but Docker names don't allow characters like
+    ``:`` -- and this project's own sample ids look like
+    ``swebench-verified:<instance_id>``, colon included. Left as-is, every
+    real Docker-backed run would fail right at container creation. So here,
+    every character that isn't a letter, digit, underscore, dot, or hyphen
+    gets replaced with a hyphen instead (flagged as a priority-1 fix in a
+    Codex code review).
     """
     safe = re.sub(r"[^A-Za-z0-9_.-]", "-", sample_id)
     return f"agentic-evalkit-{safe}"
@@ -188,12 +224,16 @@ def docker_safe_run_id(sample_id: str) -> str:
 def swebench_prediction(
     sample: EvalSample, execution: NormalizedExecutionResult
 ) -> dict[str, JsonValue]:
-    """Build the official SWE-bench prediction from an executed sample.
+    """Build an official-format SWE-bench prediction from a completed run.
 
-    The system under test emits its unified diff as ``model_patch`` (or
-    ``patch``) in the normalized output; this exports the official three-key
-    prediction through the adapter. A benchmark-neutral ``HarnessPredictor``
-    (``graders.harness.HarnessPredictor``), so grading policy stays generic.
+    The system under test is expected to emit its code fix as a unified
+    diff, under either the ``model_patch`` or ``patch`` key in its
+    normalized output. This function pulls that patch out and exports it,
+    through the adapter, as the official three-field SWE-bench prediction.
+    Its shape matches the generic ``HarnessPredictor`` interface
+    (``graders.harness.HarnessPredictor``), which is what lets the general
+    grading logic stay benchmark-neutral instead of hard-coding SWE-bench
+    specifics.
     """
     output = execution.output or {}
     raw_patch = output.get("model_patch")
@@ -205,21 +245,32 @@ def swebench_prediction(
 
 
 def _result_from_report(report: Mapping[str, JsonValue], request: HarnessRequest) -> HarnessResult:
-    """Map an official per-instance report onto a ``HarnessResult``.
+    """Convert one official per-instance report into a ``HarnessResult``.
 
-    A report lacking a ``resolved`` field is not an authoritative verdict and
-    surfaces as ``ERROR`` rather than a fabricated pass/fail.
+    If the report doesn't even contain a ``resolved`` field, then it isn't
+    a real, authoritative verdict at all -- so this reports ``ERROR``
+    instead of inventing a pass or fail.
     """
     if "resolved" not in report:
         return HarnessResult(
             status=HarnessStatus.ERROR,
             resolved=None,
             message=f"harness report for {request.sample_id!r} has no 'resolved' field",
-            # A plain comprehension, not "unnecessary": it feeds mypy's
-            # bidirectional inference the expected `JsonValue` element type,
-            # which a bare `sorted(report)` call (typed independently as
-            # `list[str]`, invariant-incompatible with `list[JsonValue]`)
-            # does not get.
+            # This looks like it could be simplified to plain `sorted(report)`,
+            # and a linter would normally flag the comprehension below as
+            # unnecessary -- but keeping it as a comprehension here is
+            # deliberate, not a mistake. `report` is typed as
+            # `Mapping[str, JsonValue]`, so `sorted(report)` on its own would
+            # be typed as `list[str]`. But the dict field we're building here
+            # (`error: dict[str, JsonValue] | None`) needs a `list[JsonValue]`
+            # in that slot, and mypy treats `list[str]` and `list[JsonValue]`
+            # as incompatible with each other -- even though every individual
+            # `str` is a valid `JsonValue`, Python's type system won't let a
+            # `list[str]` stand in for a `list[JsonValue]`, because lists are
+            # mutable ("invariance"). Writing it as a comprehension instead
+            # lets mypy check each element against the `JsonValue` type the
+            # surrounding dict already expects, instead of rejecting a
+            # `list[str]` outright.
             error={"report_keys": [key for key in sorted(report)]},  # noqa: C416
         )
     resolved = bool(report["resolved"])
@@ -243,10 +294,13 @@ def _result_from_report(report: Mapping[str, JsonValue], request: HarnessRequest
 
 
 def _default_preflight() -> str | None:  # pragma: no cover - probes real Docker/swebench
-    """Report why the SWE-bench Docker harness cannot run, or ``None`` if ready.
+    """Explain why the SWE-bench Docker harness can't run, or return ``None`` if it's ready.
 
-    Lazy imports keep this module importable on a base install; each failure
-    yields an actionable reason string rather than raising.
+    The imports of ``docker`` and ``swebench`` happen here, inside the
+    function, rather than at the top of the module -- that is exactly what
+    keeps this module importable even on a base install that doesn't have
+    those packages. Each way this check can fail returns a clear, actionable
+    reason string instead of letting an exception escape.
     """
     try:
         import docker  # type: ignore
@@ -266,17 +320,24 @@ def _default_preflight() -> str | None:  # pragma: no cover - probes real Docker
 def _read_instance_report(  # pragma: no cover - live Docker path only
     work_dir: Path, instance_id: str, *, stdout: str
 ) -> Mapping[str, JsonValue]:
-    """Locate and parse the official harness's per-instance report JSON.
+    """Find and parse the official harness's report for this one instance.
 
-    The harness writes an evaluation report under the working directory; this
-    finds the single instance's entry (``get_eval_report`` shape). Raising
-    here surfaces as ``HarnessStatus.ERROR`` in :meth:`execute`.
+    The harness writes its evaluation report as JSON files somewhere under
+    the working directory; this searches for them and pulls out the single
+    entry for this instance (in the same shape the official
+    ``get_eval_report`` function produces). If nothing is found, this raises
+    an exception, which :meth:`execute` turns into ``HarnessStatus.ERROR``.
     """
     candidates = sorted(work_dir.rglob("*.json"))
     for candidate in candidates:
         try:
-            # errors="replace": a report file with stray non-UTF-8 bytes must
-            # not raise UnicodeDecodeError (a ValueError, not caught below).
+            # We pass errors="replace" here because a report file that
+            # happens to contain a stray non-UTF-8 byte must not blow up
+            # with a UnicodeDecodeError. That error is a subclass of
+            # ValueError, which the `except` clause below does NOT catch (it
+            # only catches OSError and JSONDecodeError) -- so left
+            # unhandled, a decoding error here would crash the whole harness
+            # run instead of just being skipped like a bad JSON file is.
             payload = json.loads(candidate.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
             continue

@@ -1,13 +1,20 @@
 """Local filesystem dataset provider (design §6.1, plan Task 5).
 
-Reads JSON, JSONL, CSV, and YAML files from an allow-listed set of root
-directories. Every row is validated as ``dict[str, JsonValue]`` and given a
-zero-based string row ID and a canonical-JSON SHA-256 digest. The dataset
-``revision`` is the SHA-256 of the raw file bytes, so any byte-level change
-to the source file is a different, immutable revision.
+Reads dataset files in JSON, JSONL, CSV, or YAML format, but only from a
+fixed, pre-approved list of root directories (an "allow list") -- this
+provider will never read arbitrary paths on disk. Every row read from a
+file is checked to make sure it's a JSON object (``dict[str, JsonValue]``),
+and each row gets two identifiers: a row number (as a string, starting at
+0) and a SHA-256 hash of its own contents in a standardized ("canonical")
+JSON form, so that identical row content always produces the identical
+hash. The dataset's ``revision`` field is the SHA-256 hash of the raw
+file's bytes -- so if even one byte of the source file changes, that
+counts as a completely different, new "revision" of the dataset.
 
-Local roots are not recursively indexed, so ``search`` always returns an
-empty successful page; discovery of local files is a caller responsibility.
+This provider does not scan its directories to build a search index, so
+its ``search`` method always returns an empty (but successful) result --
+figuring out which local files exist is left up to whoever is calling this
+code.
 """
 
 from __future__ import annotations
@@ -40,13 +47,17 @@ _SUPPORTED_SUFFIXES: Final[frozenset[str]] = frozenset({".json", ".jsonl", ".csv
 
 
 def _canonical_digest(row: dict[str, JsonValue]) -> str:
-    """SHA-256 of the canonical (sorted-key, compact) JSON of one row."""
+    """Compute the SHA-256 hash of one row, after converting it to a
+    standardized ("canonical") JSON form -- keys sorted alphabetically, no
+    extra whitespace -- so that two rows with identical data always hash to
+    the same value."""
     canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _validate_row(value: object, *, path: Path, index: int) -> dict[str, JsonValue]:
-    """Ensure a decoded row is a JSON object; raise DatasetSchemaMismatch otherwise."""
+    """Check that a decoded row is a JSON object (a Python dict with string
+    keys); raise DatasetSchemaMismatch if it isn't."""
     if not isinstance(value, dict):
         raise DatasetSchemaMismatch(
             message=f"row {index} in {path} is not a JSON object",
@@ -167,12 +178,15 @@ def _rows_to_records(rows: list[dict[str, JsonValue]]) -> tuple[SourceRecord, ..
 class LocalDatasetProvider:
     """Dataset provider for local JSON/JSONL/CSV/YAML files (design §6.1).
 
-    Every method here is pure filesystem I/O (``Path.read_bytes``,
-    directory checks) -- there is no code path in this class that ever
-    opens a socket. ``requires_network = False`` (ADR-0010) declares that
-    structurally, so :class:`~agentic_evalkit.datasets.catalog.DatasetCatalog`
-    can safely route ``offline=True`` calls straight through to this
-    provider instead of rejecting them.
+    Every method in this class only reads from the local filesystem (e.g.
+    ``Path.read_bytes``, checking whether a directory exists) -- nothing in
+    this class ever makes a network call. The class-level flag
+    ``requires_network = False`` records that fact so other code can rely on
+    it (ADR-0010 is the design decision that introduced this flag). Because
+    of that flag, :class:`~agentic_evalkit.datasets.catalog.DatasetCatalog`
+    knows it's safe to send this provider requests made with
+    ``offline=True`` (i.e. "don't touch the network") instead of blocking
+    them the way it would for a provider that might need the network.
     """
 
     api_version: Final[str] = "1"
@@ -201,7 +215,9 @@ class LocalDatasetProvider:
         limit: int = 20,
         cursor: str | None = None,
     ) -> SearchPage:
-        """Local roots are not recursively indexed, so this is always empty."""
+        """Always returns an empty result: this provider doesn't build a
+        search index over its local root directories, so it has nothing to
+        search through."""
         return SearchPage(hits=(), cursor=None, total_hits=0)
 
     async def resolve(self, ref: DatasetRef) -> ResolvedDataset:

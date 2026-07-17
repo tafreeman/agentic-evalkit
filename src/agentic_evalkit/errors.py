@@ -1,19 +1,28 @@
-"""Typed, stable, dependency-free error hierarchy for agentic-evalkit.
+"""The complete set of error types this package can raise.
 
-This module intentionally imports nothing beyond the standard library so it
-can be safely imported by every other module in the package (including
-``agentic_evalkit.models``) without creating a dependency cycle.
+Every way things can go wrong inside agentic-evalkit -- a missing dataset, a
+crashed target, a bad manifest -- is represented here as its own exception
+class, all inheriting from one shared base: :class:`AgenticEvalkitError`.
+This module deliberately imports nothing beyond Python's standard library
+(no pydantic, no third-party packages), so any other module in the package
+-- including ``agentic_evalkit.models`` -- can import from it without risking
+a circular import (module A importing module B which tries to import module
+A again).
 
-Every framework failure is a subclass of :class:`AgenticEvalkitError`. Each
-subclass carries a stable, snake_case ``code`` derived from its class name,
-a human-readable ``message``, and an optional ``context`` mapping used for
-structured diagnostic detail. Context values that must never be written to
-logs or reports (tokens, credentials, and similar secrets) are wrapped with
-:meth:`AgenticEvalkitError.secret` and are excluded from both ``str()`` and
-``repr()`` of the error.
+Each exception carries three things: a ``code`` (a short, stable,
+machine-readable label auto-generated from the class name -- e.g.
+``DatasetNotFound`` becomes ``"dataset_not_found"``), a ``message`` (a
+human-readable explanation), and an optional ``context`` dict with extra
+structured detail useful for debugging. If any of that context data is
+sensitive (an API token, a credential), wrap it with
+:meth:`AgenticEvalkitError.secret` first -- doing so keeps it out of both
+``str()`` and ``repr()`` of the error, so it can never accidentally end up
+printed to a log or a report.
 
-Per ADR-0003, this hierarchy is defined completely in this task. Downstream
-tasks import from here; they never add new subclasses to this module.
+Per ADR-0003 (an architecture decision recorded early in this project), this
+file is meant to hold the *entire* error hierarchy, once and for all. Other
+modules only ever import exceptions from here -- they don't define new
+exception classes of their own.
 """
 
 from __future__ import annotations
@@ -21,8 +30,11 @@ from __future__ import annotations
 import re
 from typing import Final, Union
 
-# A minimal JSON-compatible value type, defined locally rather than imported
-# from pydantic, so this module stays stdlib-only per ADR-0003 / Task 3.
+# A stand-in type for "any value that JSON can represent" (None, a bool, an
+# int, a float, a string, or nested tuples/dicts of these). We define it
+# ourselves here instead of importing pydantic's equivalent, because this
+# module is only allowed to use the Python standard library (see the
+# module docstring above, and ADR-0003).
 JsonValue = Union[
     None,
     bool,
@@ -59,20 +71,20 @@ _CAMEL_BOUNDARY: Final[re.Pattern[str]] = re.compile(r"(?<!^)(?=[A-Z])")
 
 
 def _default_code(class_name: str) -> str:
-    """Derive a stable snake_case error code from a class name.
+    """Turn a class name like ``DatasetNotFound`` into ``dataset_not_found``.
 
-    ``DatasetNotFound`` -> ``dataset_not_found``. This is computed once from
-    the class name rather than hardcoded per subclass so the code can never
-    drift from the class it names.
+    This is computed automatically from the class name, instead of writing
+    a separate code string by hand for every exception class, so the code
+    can never fall out of sync with the class it's naming.
     """
     return _CAMEL_BOUNDARY.sub("_", class_name).lower()
 
 
 class SecretValue:
-    """Wraps a context value that must never be serialized into error text.
+    """Wraps a value so it never shows up in an error's printed text.
 
-    Use :meth:`AgenticEvalkitError.secret` to construct one rather than
-    instantiating this class directly.
+    Call :meth:`AgenticEvalkitError.secret` to create one of these -- don't
+    construct this class directly.
     """
 
     __slots__ = ("_value",)
@@ -92,15 +104,18 @@ class SecretValue:
 
 
 class AgenticEvalkitError(Exception):
-    """Base class for every typed agentic-evalkit failure.
+    """Base class every agentic-evalkit exception inherits from.
 
     Attributes:
-        code: Stable, snake_case identifier for this error type. Defaults to
-            a value derived from the concrete subclass name and should not
-            change across releases within a schema/major version.
-        message: Human-readable description of the failure.
-        context: Structured diagnostic detail. Values wrapped with
-            :meth:`secret` are redacted from ``str()`` and ``repr()``.
+        code: A short, stable, machine-readable label for this error type
+            (e.g. ``"dataset_not_found"``). By default it's generated from
+            the subclass's name and shouldn't change between releases, so
+            other code (or another program reading these errors) can safely
+            check ``error.code`` without it silently changing later.
+        message: A human-readable explanation of what went wrong.
+        context: A dict of extra structured detail about the failure. Any
+            value wrapped with :meth:`secret` is hidden -- it will not
+            appear in ``str()`` or ``repr()`` output.
     """
 
     def __init__(
@@ -117,7 +132,7 @@ class AgenticEvalkitError(Exception):
 
     @staticmethod
     def secret(value: JsonValue) -> SecretValue:
-        """Mark a context value as secret so it is redacted from error text."""
+        """Mark a context value as secret so it never appears in error text."""
         return SecretValue(value)
 
     def _redacted_context(self) -> dict[str, JsonValue]:
@@ -144,11 +159,11 @@ class DatasetNotFound(AgenticEvalkitError):
 
 
 class DatasetConfigRequired(AgenticEvalkitError):
-    """The dataset has multiple configs and none could be uniquely inferred."""
+    """The dataset has multiple named variants ("configs") and none could be uniquely inferred."""
 
 
 class DatasetSplitNotFound(AgenticEvalkitError):
-    """The requested split does not exist for the resolved dataset/config."""
+    """The requested split (e.g. "train") does not exist for this resolved dataset/config."""
 
 
 class DatasetAccessDenied(AgenticEvalkitError):
@@ -160,7 +175,7 @@ class DatasetLicenseRejected(AgenticEvalkitError):
 
 
 class DatasetIntegrityError(AgenticEvalkitError):
-    """Cached or retrieved dataset bytes failed checksum/identity validation."""
+    """Cached/downloaded dataset bytes don't match their expected checksum -- possibly corrupted."""
 
 
 class DatasetSchemaMismatch(AgenticEvalkitError):
@@ -180,33 +195,36 @@ class DatasetRateLimited(AgenticEvalkitError):
 
 
 class OfflineCacheMiss(AgenticEvalkitError):
-    """Offline mode requested a page/dataset with no exact cache entry.
+    """Running in offline mode, but the data we need isn't in the local cache yet.
 
     Attributes:
-        retryable: Discriminates two distinct offline failures that a caller
-            (and a human reading a CLI error message) must not conflate:
+        retryable: Tells the caller (and a human reading the CLI error)
+            whether trying again could ever work. There are two very
+            different situations here, and it's important not to mix them
+            up:
 
-            - ``True`` -- "warm the cache and retry": a plain cache miss for
-              an otherwise cacheable key. Going online once (e.g. dropping
-              ``--offline`` for one run, or an explicit ``datasets pull``)
-              and then repeating the *exact same* offline call succeeds,
-              because the operation's cache identity model has a stable key
-              for this request shape.
-            - ``False`` -- "categorically uncacheable": the requested
-              operation has no stable cache key at all for this call shape
-              (free-text search, an unbacked resolution, unpaginated
-              iteration, or no cache configured on the catalog) or the
-              provider genuinely requires network access it was asked not to
-              use. No amount of prior or future warming makes the *same*
-              offline call succeed; a different action (changing what is
-              asked for, or accepting a network round trip) is required.
+            - ``True`` -- "just go online once, then retry": this is a
+              plain, ordinary cache miss. The thing being asked for *does*
+              have a stable cache key, we just don't have it saved locally
+              yet. Going online for one run (e.g. removing ``--offline``, or
+              running an explicit ``datasets pull``) and then repeating the
+              exact same offline command afterward will succeed.
+            - ``False`` -- "this can never be cached, retrying won't help":
+              the request has no stable cache key to begin with -- for
+              example, a free-text search, a lookup with no cache backing
+              it, reading results page-by-page without a fixed page key, or
+              no cache configured at all -- or the provider simply requires
+              a live network call no matter what. Repeating the identical
+              offline request will never succeed; the caller has to either
+              ask for something different or allow a network request.
 
-            Defaults to ``True`` because the most common raise site --
-            :meth:`agentic_evalkit.datasets.cache.DatasetCache.read` finding
-            no manifest/payload for an otherwise-cacheable key -- is exactly
-            the retryable case. Raise sites that know better (see
-            :mod:`agentic_evalkit.datasets.catalog`) pass ``retryable=False``
-            explicitly.
+            Defaults to ``True`` because the most common place this error is
+            raised -- :meth:`agentic_evalkit.datasets.cache.DatasetCache.read`
+            not finding a saved entry for a key that normally *is* cacheable
+            -- is exactly the retryable case. The few call sites that know
+            they're in the second, non-retryable situation (see
+            :mod:`agentic_evalkit.datasets.catalog`) explicitly pass
+            ``retryable=False``.
     """
 
     def __init__(
@@ -225,7 +243,7 @@ class OfflineCacheMiss(AgenticEvalkitError):
 
 
 class PluginCompatibilityError(AgenticEvalkitError):
-    """An extension entry point failed to load or declared an incompatible API."""
+    """A plugin failed to load, or its plugin-API version isn't one this package supports."""
 
 
 # --- Execution target errors (design §8) -------------------------------------
@@ -243,14 +261,14 @@ class TargetTimeout(AgenticEvalkitError):
 
 
 class GraderError(AgenticEvalkitError):
-    """A grader failed to produce a result for reasons other than the sample."""
+    """The grader broke producing a result -- a bug in grading, not a verdict on the sample."""
 
 
 # --- Statistics / comparability errors (design §10) ---------------------------
 
 
 class IncompatibleRuns(AgenticEvalkitError):
-    """Two runs are not comparable (dataset, adapter, grader, or policy differs)."""
+    """Two runs can't be compared -- they used a different dataset, adapter, grader, or policy."""
 
 
 # --- Manifest errors ------------------------------------------------------------

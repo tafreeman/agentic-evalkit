@@ -1,10 +1,18 @@
-"""Exact/normalized-match objective grader (design §9, plan Task 10 Step 4).
+"""A grader checking whether the AI's answer matches the expected one, after normalizing formatting.
 
-``ExactMatchGrader`` deliberately takes an *injected* extractor callable
-instead of importing one from ``agentic_evalkit.benchmarks``: this package
-owns grading policy only, not benchmark projection. A benchmark adapter
-(e.g. GSM8K's ``extract_final_answer``) is wired in by the caller through
-``EvalSample.grader`` / ``GraderSpec`` in a later task.
+Design §9, plan Task 10 Step 4.
+
+``ExactMatchGrader`` deliberately doesn't know how to pull "the actual
+answer" out of a raw execution output by itself. Instead, the caller hands
+it a small function (an "extractor") that does that extraction, and this
+grader just calls it. This keeps a firm boundary: this package (``graders``)
+only owns the policy of *how to compare* two answers and decide pass/fail;
+it has no knowledge of any specific benchmark's output format. For example,
+GSM8K (a benchmark of grade-school math word problems) has its own
+``extract_final_answer`` function that knows how to pull the final numeric
+answer out of a full written solution -- that function gets handed to this
+grader by the caller (wired up via ``EvalSample.grader`` / ``GraderSpec`` in
+a later task), instead of this module importing GSM8K-specific code itself.
 """
 
 import re
@@ -20,19 +28,24 @@ from agentic_evalkit.models import (
     NormalizedExecutionResult,
 )
 
-# Matches a decimal number, optionally thousands-separated with commas, so
-# "1,234" and "1234" and "5.0" canonicalize to the same numeric string.
+# Matches a decimal number, optionally with commas every three digits (like
+# "1,234"), so that "1,234" and "1234" and "5.0" all get rewritten to the
+# same normalized numeric string (see `_canonicalize_number` below).
 _NUMERIC_PATTERN = re.compile(r"^-?\d{1,3}(,\d{3})*(\.\d+)?$|^-?\d+(\.\d+)?$")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
 def _canonicalize(text: str, *, case_fold: bool) -> str:
-    """Normalize Unicode form, whitespace, casing, and numeric shape.
+    """Rewrite ``text`` into a normalized form, so equivalent, differently-formatted answers match.
 
-    Order matters: Unicode normalization first (so later regexes see a
-    stable form), then whitespace collapsing, then optional case folding,
-    then numeric canonicalization last (it only fires on the fully
-    normalized string).
+    Four steps, applied in this order because each one depends on the
+    previous one having already run: first normalize the Unicode encoding
+    (so the pattern-matching below sees a predictable, stable form), then
+    collapse any run of whitespace into a single space, then optionally
+    lowercase everything (only when ``case_fold=True``), and finally --
+    only once the text is already in this cleaned-up form -- try to rewrite
+    it as a normalized number (see ``_canonicalize_number`` below), so that,
+    for example, "5.0" and "5" end up identical.
     """
     normalized = unicodedata.normalize("NFC", text)
     normalized = _WHITESPACE_PATTERN.sub(" ", normalized).strip()
@@ -55,15 +68,20 @@ def _canonicalize_number(text: str) -> str:
 
 
 class ExactMatchGrader:
-    """Compares an extracted execution output against ``EvalSample.reference``.
+    """Grades a sample by comparing the AI's extracted answer against the expected reference answer.
 
     Args:
-        name: Stable grader identifier reported on every ``GradeResult``.
-        extractor: Injected callable that pulls the comparable text out of
-            ``NormalizedExecutionResult.output``. Kept generic
-            (``Mapping[str, object] -> str``) so this module never imports
-            benchmark-specific extraction logic.
-        case_fold: When ``True``, comparison is case-insensitive.
+        name: A stable label for this grader, recorded on every
+            ``GradeResult`` so you can tell which grader produced it.
+        extractor: A function, supplied by the caller, that pulls the
+            comparable piece of text out of
+            ``NormalizedExecutionResult.output`` (the AI's raw output).
+            Kept as a generic function signature
+            (``Mapping[str, object] -> str``) specifically so this module
+            never has to import any benchmark-specific extraction code
+            itself -- see the module docstring above.
+        case_fold: When ``True``, the comparison ignores letter casing
+            (e.g. "Paris" would match "paris").
     """
 
     def __init__(

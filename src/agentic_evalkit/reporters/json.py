@@ -1,10 +1,19 @@
-"""Canonical JSON reporter (design §11.3, plan Task 13).
+"""Canonical JSON reporter (design doc section 11.3, plan Task 13).
 
-The JSON envelope is the framework's single source of truth for a run: every
-other reporter format (JSONL, Markdown, HTML) derives its content from the
-same fields this module writes. Output is deterministic — sorted keys, fixed
-indentation, and an atomic replace — so two renders of the same frozen run
-with the same ``generated_at`` are byte-identical.
+This module produces the "canonical" report: the one official JSON
+structure (we call it the "envelope") that holds everything about a run --
+provenance, manifest, summary, samples, and so on. Every other report format
+(JSONL, Markdown, HTML) pulls its content from these same fields rather than
+deciding independently what to include, so this module is the single place
+that defines what a report contains.
+
+The JSON text itself is produced the same way every time: keys are always
+sorted alphabetically, indentation is fixed, and the file is written
+atomically (to a temporary file, then renamed into place, so a crash
+mid-write can never leave a half-written file behind). Because of this,
+running the reporter twice on the same frozen run data with the same
+``generated_at`` timestamp produces two files that are byte-for-byte
+identical, not just equivalent in meaning.
 """
 
 from __future__ import annotations
@@ -48,15 +57,22 @@ def build_envelope(
     aggregates: dict[str, JsonValue] | None = None,
     generated_at: str | None = None,
 ) -> dict[str, JsonValue]:
-    """Build the canonical JSON envelope dict for ``run``.
+    """Build the canonical JSON envelope (the full run-report dict) for ``run``.
 
-    Shared by :class:`JsonReporter` and any other reporter (JSONL, HTML)
-    that needs the same provenance-carrying structure without duplicating
-    field selection.
+    Used by :class:`JsonReporter` itself, and also imported by the other
+    reporters (JSONL, HTML) so they can reuse the exact same structure --
+    including the "provenance" fields that record exactly what produced
+    this run (which dataset and revision, which grader, which code version,
+    and so on) -- instead of each format re-deciding which fields to
+    include.
     """
-    # model_dump(mode="json") always produces JSON-compatible data at
-    # runtime; the cast bridges pydantic's broad `Any` dump type to the
-    # precise recursive `JsonValue` alias this envelope is typed with.
+    # Pydantic's `model_dump(mode="json")` really does return plain,
+    # JSON-safe data (dicts, lists, strings, numbers) at runtime -- but its
+    # type stubs only promise the loose type `Any`, which tells a type
+    # checker nothing useful. `cast()` below doesn't change the data at
+    # all; it just tells the type checker to trust that this `Any` is
+    # actually a `JsonValue` (the precise type used everywhere else in this
+    # envelope), so the rest of the file can be checked accurately.
     manifest_payload = cast("JsonValue", run.manifest.model_dump(mode="json"))
     resolved_dataset_payload = cast("JsonValue", run.resolved_dataset.model_dump(mode="json"))
     summary_payload = cast("JsonValue", run.summary.model_dump(mode="json"))

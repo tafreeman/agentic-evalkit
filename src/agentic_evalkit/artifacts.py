@@ -1,18 +1,25 @@
-"""Content-addressed artifact store for run outputs and logs (plan Task 11, Step 1).
+"""Stores large run outputs and logs on disk, keyed by the hash of their contents.
 
-``ArtifactStore`` persists immutable blobs (large execution outputs, target
-logs, harness evidence) outside the in-memory run result, keyed by the
-SHA-256 digest of their bytes. Two writes of identical content therefore
-always resolve to the same reference and only occupy storage once. Every
-blob has a JSON sidecar recording its media type, byte count, creation
-time, and redaction status, so a report renderer can describe an artifact
-without reading its payload.
+Plan Task 11, Step 1.
 
-Writes are atomic: content is written to a temporary file in the same
-directory as its final destination, flushed, and then moved into place with
-:meth:`Path.replace`, so a reader never observes a partially written blob.
-Each store enforces a configured maximum blob size so a runaway target or
-harness cannot exhaust disk by way of a single artifact.
+``ArtifactStore`` saves immutable chunks of data ("blobs") -- things like a
+large execution output, a target's logs, or other evidence gathered during a
+run -- to disk, instead of keeping them in memory as part of the run result.
+Each blob is named after the SHA-256 hash of its own bytes (this pattern is
+called "content-addressed storage"). One consequence: if you store the same
+content twice, you get back the same reference both times, and it's only
+saved to disk once -- no duplicate storage. Alongside each blob, a small JSON
+"sidecar" file records its media type, size in bytes, when it was created,
+and whether it was redacted -- so something rendering a report can describe
+an artifact without having to open and read the (possibly huge) blob itself.
+
+Writes are atomic, meaning a reader can never see a half-written file: the
+data is first written to a temporary file in the same directory, flushed to
+disk, and only then renamed into its final location with
+:meth:`Path.replace` (a rename is a single, all-or-nothing filesystem
+operation). Each store also enforces a maximum blob size, so that a target
+or harness that misbehaves and tries to write something huge can't fill up
+the disk with one single artifact.
 """
 
 from __future__ import annotations
@@ -36,11 +43,13 @@ class ArtifactStoreLimitExceeded(ValueError):
 
 
 class ArtifactRef(FrozenModel):
-    """An opaque, content-addressed reference to a stored artifact.
+    """Points at one stored artifact, without exposing how the store is organized internally.
 
-    Equality and the reported ``digest`` are the SHA-256 content hash, so two
-    references built from identical bytes always compare equal regardless of
-    how many times the caller called :meth:`ArtifactStore.put_bytes`.
+    The ``digest`` field (and therefore equality between two ``ArtifactRef``
+    instances) is just the SHA-256 hash of the artifact's bytes. That means
+    two references built from identical content are always equal to each
+    other, no matter how many separate times :meth:`ArtifactStore.put_bytes`
+    was called to store that content.
     """
 
     digest: str
@@ -49,7 +58,7 @@ class ArtifactRef(FrozenModel):
 
 
 class ArtifactMetadata(FrozenModel):
-    """The sidecar record stored alongside every artifact payload."""
+    """The small companion record ("sidecar") stored alongside every artifact's actual data."""
 
     digest: str
     media_type: str
@@ -63,14 +72,16 @@ def _digest_of(data: bytes) -> str:
 
 
 class ArtifactStore:
-    """Persists immutable, content-addressed blobs under a root directory.
+    """Saves immutable blobs to disk under a root directory, named by the hash of their content.
 
     Args:
-        root: Directory the store writes payload and sidecar files under.
-            Created (including parents) if it does not already exist.
-        max_bytes: Largest payload this store accepts. Defaults to 16 MiB.
-            A ``put_bytes`` call for a larger payload raises
-            :class:`ArtifactStoreLimitExceeded` before anything is written.
+        root: The directory the store writes payload and sidecar files
+            into. Created automatically (including any missing parent
+            directories) if it doesn't already exist.
+        max_bytes: The largest payload this store will accept. Defaults to
+            16 MiB. Calling ``put_bytes`` with anything larger raises
+            :class:`ArtifactStoreLimitExceeded` immediately, before writing
+            any data.
     """
 
     def __init__(self, root: Path, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> None:
@@ -79,12 +90,13 @@ class ArtifactStore:
         self._max_bytes = max_bytes
 
     def put_bytes(self, data: bytes, *, media_type: str, redacted: bool = False) -> ArtifactRef:
-        """Store ``data`` and return a content-addressed reference to it.
+        """Save ``data`` to the store and return a reference to it.
 
-        Storing identical bytes twice (even with a different ``media_type``
-        or ``redacted`` flag on the second call) returns a reference with the
-        same digest and reuses the existing payload and sidecar written by
-        the first call; the store never rewrites an existing digest.
+        If you store the exact same bytes twice -- even passing a different
+        ``media_type`` or ``redacted`` value the second time -- you get back
+        a reference with the same digest both times, reusing the payload and
+        sidecar file the first call already wrote. The store never
+        overwrites an existing entry for a digest it has already seen.
         """
         if len(data) > self._max_bytes:
             raise ArtifactStoreLimitExceeded(
