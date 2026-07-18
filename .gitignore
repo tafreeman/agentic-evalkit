@@ -35,3 +35,11 @@ CLAUDE.md
 coverage  and quality reports/
 examples/http_agent/artifacts/
 examples/http_agent/*.json
+# Local eval-run artifacts at repo root (can contain prompts/tool args)
+agentic-evalkit-runs/
+# Secret-adjacent defensive patterns (none tracked today; belt-and-braces)
+*.pem
+*.key
+id_rsa*
+.pypirc
+.npmrc
