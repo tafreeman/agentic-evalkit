@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADR-0019 (retract unshipped entry-point plugin discovery) and ADR-0020
   (Wilson lower-bound judge floor, response envelope, gating-scoped probe).
 
+### Dependencies
+
+- Widened `rich` upper bound to `<16` (v15 released).
+- Widened `pytest` upper bound to `<10` (v9 released).
+- Widened `pytest-asyncio` upper bound to `<2` (v1 released).
+- Widened `pytest-cov` upper bound to `<8` (v6 and v7 released).
+- Widened `mypy` upper bound to `<3` (v2 released).
+
 ### Changed
 
 - A `JudgeClient` that raises (for example a network transport error) now
