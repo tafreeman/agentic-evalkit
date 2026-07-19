@@ -1,7 +1,6 @@
 # agentic-evalkit
 
-`agentic-evalkit` helps teams answer a practical question: did an AI agent
-perform well enough, and what evidence supports that result?
+`agentic-evalkit` evaluates whether an AI agent performed well enough — and produces the evidence for that verdict.
 
 Use it from the command line or Python to run repeatable evaluations, apply
 objective checks, compare results, and generate reports for review. It can
@@ -13,26 +12,23 @@ tested support for calibrated judge evidence while leaving model-provider
 selection to the caller. The built-in reference judge is deterministic and
 advisory only; it cannot approve a release.
 
-**Why not just use promptfoo, Inspect, DeepEval, Braintrust, or LangSmith?**
-Those tools are great at the *workflow* side of evals — running lots of
-prompts, wiring checks into CI, tracking experiments over time. If that's
-your job, use one of them. This package is built for a narrower, stricter
-problem: making sure you can actually trust the result you get. Concretely,
-that means an AI judge has to prove it agrees with real human-labeled
-answers before it's allowed to approve anything; two runs are only
-compared once we can prove they ran under matching conditions; a bug in
-your own code is never confused with the AI simply getting the answer
-wrong; a fuzzy AI opinion can never override a hard requirement like "the
-code must compile"; and test questions that leaked into the AI's training
-data get caught before they inflate a score. The tools above don't treat
-these as first-class problems. See [docs/prior-art.md](docs/prior-art.md)
-for the full comparison and the reasoning behind building this instead of
-adopting one of them.
+**Why not promptfoo, Inspect, DeepEval, Braintrust, or LangSmith?**
+Those tools handle the *workflow* side of evals — running lots of prompts,
+wiring checks into CI, tracking experiments over time. Use one of them for
+that. This package solves a narrower, stricter problem: trusting the
+result you get.
 
-Start with the [quickstart guide](docs/guides/quickstart.md). For design
-boundaries and comparisons with other tools, see the
-[architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md)
-and [prior-art review](docs/prior-art.md).
+- An AI judge has to prove it agrees with real human-labeled answers before it's allowed to approve anything
+- Two runs are only compared once we can prove they ran under matching conditions
+- A bug in your own code is never confused with the AI simply getting the answer wrong
+- A fuzzy AI opinion can never override a hard requirement like "the code must compile"
+- Test questions that leaked into the AI's training data get caught before they inflate a score
+
+None of the tools above treat these as first-class problems. Full
+comparison and reasoning: [docs/prior-art.md](docs/prior-art.md).
+
+Start with the [quickstart guide](docs/guides/quickstart.md). Design
+boundaries: [architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md).
 
 ## Quickstart
 
