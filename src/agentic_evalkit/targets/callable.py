@@ -124,6 +124,16 @@ class CallableTarget:
         output: dict[str, JsonValue] | None = None,
         error: dict[str, JsonValue] | None = None,
     ) -> NormalizedExecutionResult:
+        if error is not None and "code" not in error:
+            # Same stable taxonomy codes the runner's isolation path records
+            # (TargetTimeout/TargetFailure), so ``error["code"]`` has one
+            # schema regardless of which layer produced the error result.
+            error = {
+                **error,
+                "code": (
+                    "target_timeout" if status is ExecutionStatus.TIMEOUT else "target_failure"
+                ),
+            }
         return NormalizedExecutionResult(
             sample_id=sample.sample_id,
             attempt=attempt,

@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it). The run now finishes and `RunCompleted` still fires; `CancelledError`
   is deliberately still not caught, so cancellation propagates unchanged
   (ADR-0020, ADR-0008).
+- The built-in target adapters (`CallableTarget`, `HttpTarget`,
+  `SubprocessTarget`) now record the same `target_failure`/`target_timeout`
+  taxonomy `code` on their `error` dicts, so `execution.error["code"]` has
+  one schema regardless of whether the adapter or the runner's isolation
+  layer produced the error result.
 - The reversed-order position-bias probe is issued only on the gating path
   (`gate=True` with a usable calibration); advisory and uncalibrated judge
   grading now makes exactly one judge call per sample instead of two
