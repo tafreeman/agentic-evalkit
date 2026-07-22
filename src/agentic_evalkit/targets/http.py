@@ -307,7 +307,13 @@ class HttpTarget:
         request_headers: dict[str, str] | None = None,
         response_status: int | None = None,
     ) -> NormalizedExecutionResult:
-        error: dict[str, JsonValue] = {"type": error_type, "message": message}
+        # Same stable taxonomy codes the runner's isolation path records, so
+        # ``error["code"]`` has one schema regardless of the producing layer.
+        error: dict[str, JsonValue] = {
+            "type": error_type,
+            "code": ("target_timeout" if status is ExecutionStatus.TIMEOUT else "target_failure"),
+            "message": message,
+        }
         environment_metadata: dict[str, JsonValue] = {}
         if request_headers is not None:
             environment_metadata["request_headers"] = dict(request_headers)

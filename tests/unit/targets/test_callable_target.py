@@ -168,3 +168,29 @@ def test_target_failure_and_target_timeout_are_importable_from_errors() -> None:
     """
     assert issubclass(TargetTimeout, Exception)
     assert issubclass(TargetFailure, Exception)
+
+
+@pytest.mark.asyncio
+async def test_callable_target_error_results_carry_the_taxonomy_code() -> None:
+    """The adapters' ``error["code"]`` uses the same stable taxonomy codes the
+    runner's isolation path records (TargetTimeout/TargetFailure), so a
+    consumer dispatching on ``execution.error["code"]`` sees one schema
+    regardless of which layer produced the error result.
+    """
+
+    def raiser(value: dict[str, object]) -> dict[str, object]:
+        raise RuntimeError("boom")
+
+    async def slow(value: dict[str, object]) -> dict[str, object]:
+        await asyncio.sleep(1.0)
+        return {}
+
+    errored = await CallableTarget(raiser, name="raiser").execute(
+        _sample(), attempt=1, timeout_seconds=1.0
+    )
+    timed_out = await CallableTarget(slow, name="slow").execute(
+        _sample(), attempt=1, timeout_seconds=0.05
+    )
+    assert errored.error is not None and timed_out.error is not None
+    assert errored.error["code"] == TargetFailure(message="x").code
+    assert timed_out.error["code"] == TargetTimeout(message="x").code

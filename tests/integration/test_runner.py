@@ -1029,3 +1029,246 @@ async def test_run_completes_when_the_judge_raises_on_one_sample(tmp_path: Path)
     event_names = [type(event).__name__ for event in events]
     assert "RunCompleted" in event_names
     assert "RunFailed" not in event_names
+
+
+# --- one raising target/grader must not take down the whole run either -------
+#
+# The judge-transport isolation above (ADR-0020) originally lived only inside
+# ``JudgeGrader``. That left an asymmetry: a *judge* client that raised was
+# isolated to one graded ERROR sample, but if the ``ExecutionTarget`` itself or
+# any grader's ``grade`` raised, the runner had no ``try``/``except`` around
+# ``target.execute``/``grader.grade`` -- so one raising sample cancelled every
+# in-flight sibling through the ``TaskGroup``, discarded already-completed
+# results, and propagated an uncaught ``ExceptionGroup`` (which is not an
+# ``AgenticEvalkitError``, so the CLI's documented exit-code mapping never saw
+# it). The runner now applies the same per-sample isolation symmetrically at
+# the target and grader boundaries, wiring the exported ``TargetFailure`` /
+# ``TargetTimeout`` / ``GraderError`` taxonomy into the resulting error record.
+# The tests below prove that survival end to end through the real
+# ``EvalRunner``, mirroring the judge test above.
+
+
+class _RaisingOnOneSampleTarget:
+    """A fake execution target that raises for exactly one ``sample_id`` and
+    returns a normal ``COMPLETED`` result for every other sample.
+
+    This proves, end to end through the real ``EvalRunner``, that a target
+    that raises for one sample is isolated to that one sample (recorded as
+    an ``ExecutionStatus.ERROR`` result, which then skips grading per
+    requirement 6) instead of cancelling every in-flight sibling and
+    aborting the whole run -- symmetric with ``_RaisingOnOneSampleJudge``
+    above.
+    """
+
+    def __init__(self, *, raising_sample_id: str) -> None:
+        self._raising_sample_id = raising_sample_id
+
+    async def execute(
+        self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
+    ) -> NormalizedExecutionResult:
+        if sample.sample_id == self._raising_sample_id:
+            raise RuntimeError("execution target unreachable")
+        now = datetime.now(UTC)
+        return NormalizedExecutionResult(
+            sample_id=sample.sample_id,
+            attempt=attempt,
+            output={"answer": sample.reference},
+            status=ExecutionStatus.COMPLETED,
+            started_at=now,
+            finished_at=now,
+        )
+
+
+class _RaisingOnOneSampleGrader:
+    """A fake grader that raises for exactly one ``sample_id`` and grades
+    every other sample normally.
+
+    The runner-level counterpart to ``_RaisingOnOneSampleJudge``: it proves a
+    grader whose ``grade`` raises is isolated to that one sample (recorded as
+    ``GradeStatus.ERROR``) instead of aborting the run. Unlike the judge case
+    (which ``JudgeGrader`` isolates internally), this is an arbitrary grader
+    whose raise is only survivable because the *runner* now wraps
+    ``grader.grade``.
+    """
+
+    def __init__(self, *, raising_sample_id: str) -> None:
+        self._raising_sample_id = raising_sample_id
+
+    async def grade(self, sample: EvalSample, execution: NormalizedExecutionResult) -> GradeResult:
+        if sample.sample_id == self._raising_sample_id:
+            raise RuntimeError("grader backend unreachable")
+        now = datetime.now(UTC)
+        return GradeResult(
+            sample_id=sample.sample_id,
+            grader="raising-on-one@1",
+            status=GradeStatus.PASS,
+            score=1.0,
+            created_at=now,
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_completes_when_the_target_raises_on_one_sample(tmp_path: Path) -> None:
+    """When the execution target raises for just one of several concurrently
+    running samples, that must not abort the whole run. Instead: the run
+    still finishes, the one affected sample is recorded as an
+    ``ExecutionStatus.ERROR`` result carrying the wrapped ``TargetFailure``
+    taxonomy (``code == "target_failure"``) and skips grading, every other
+    sample's completed result survives intact, and no ``RunFailed`` event
+    ever fires. This is the symmetric counterpart to
+    ``test_run_completes_when_the_judge_raises_on_one_sample``.
+    """
+    events: list[RunEvent] = []
+
+    def _sink(event: RunEvent) -> None:
+        events.append(event)
+
+    runner = EvalRunner(
+        catalog=_catalog_with_two_records(),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={"fake": _RaisingOnOneSampleTarget(raising_sample_id="identity:1")},
+        graders={"exact@1": _ExactFixtureGrader()},
+        artifact_store=_artifact_store(tmp_path),
+    )
+    result = await runner.run(_manifest(concurrency=2), event_sink=_sink)
+
+    assert result.summary.total == 2
+    assert result.summary.errors == 1
+    assert result.summary.passed == 1
+    by_id = {sample.sample.sample_id: sample for sample in result.samples}
+
+    errored = by_id["identity:1"]
+    assert errored.execution.status is ExecutionStatus.ERROR
+    assert errored.execution.error is not None
+    assert errored.execution.error["type"] == "RuntimeError"
+    assert errored.execution.error["code"] == "target_failure"
+    assert errored.grade is None  # an ERROR execution never reaches grading (requirement 6)
+
+    survivor = by_id["identity:0"]
+    assert survivor.execution.status is ExecutionStatus.COMPLETED
+    assert survivor.grade is not None
+    assert survivor.grade.status is GradeStatus.PASS  # already-completed work survived
+
+    event_names = [type(event).__name__ for event in events]
+    assert "RunCompleted" in event_names
+    assert "RunFailed" not in event_names
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_completes_when_the_grader_raises_on_one_sample(tmp_path: Path) -> None:
+    """When a grader's ``grade`` raises for just one of several concurrently
+    running samples, that must not abort the whole run. Instead: the run
+    still finishes, the one affected sample is graded ``GradeStatus.ERROR``
+    (its execution stays ``COMPLETED`` -- the execution succeeded, grading
+    broke) carrying the wrapped ``GraderError`` taxonomy, every other
+    sample is graded normally, and no ``RunFailed`` event ever fires.
+    """
+    events: list[RunEvent] = []
+
+    def _sink(event: RunEvent) -> None:
+        events.append(event)
+
+    runner = EvalRunner(
+        catalog=_catalog_with_two_records(),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={"fake": _AlwaysCompletedTarget()},
+        graders={"exact@1": _RaisingOnOneSampleGrader(raising_sample_id="identity:1")},
+        artifact_store=_artifact_store(tmp_path),
+    )
+    result = await runner.run(_manifest(concurrency=2), event_sink=_sink)
+
+    assert result.summary.total == 2
+    assert result.summary.errors == 1
+    assert result.summary.passed == 1
+    by_id = {sample.sample.sample_id: sample for sample in result.samples}
+
+    errored = by_id["identity:1"]
+    assert errored.execution.status is ExecutionStatus.COMPLETED  # execution ran; grading broke
+    assert errored.grade is not None
+    assert errored.grade.status is GradeStatus.ERROR
+    assert errored.grade.hard_gate is False
+    assert errored.grade.evidence["grader_error"] == "RuntimeError"
+    assert errored.grade.evidence["grader_error_code"] == "grader_error"
+
+    survivor = by_id["identity:0"]
+    assert survivor.grade is not None
+    assert survivor.grade.status is GradeStatus.PASS  # already-completed work survived
+
+    event_names = [type(event).__name__ for event in events]
+    assert "RunCompleted" in event_names
+    assert "RunFailed" not in event_names
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_maps_a_raising_target_timeout_to_a_timeout_result(tmp_path: Path) -> None:
+    """A target that raises ``TimeoutError`` (rather than returning a
+    ``TIMEOUT`` status itself) is isolated to that one sample and mapped to
+    an ``ExecutionStatus.TIMEOUT`` result carrying the wrapped
+    ``TargetTimeout`` taxonomy (``code == "target_timeout"``), counted as an
+    operational timeout -- never a task failure.
+    """
+
+    class _TimingOutTarget:
+        async def execute(
+            self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
+        ) -> NormalizedExecutionResult:
+            raise TimeoutError("execution target exceeded its deadline")
+
+    runner = EvalRunner(
+        catalog=_FakeCatalog(_records(1)),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={"fake": _TimingOutTarget()},
+        graders={"exact@1": _ExactFixtureGrader()},
+        artifact_store=_artifact_store(tmp_path),
+    )
+    result = await runner.run(_manifest())
+
+    assert result.summary.total == 1
+    assert result.summary.timeouts == 1
+    assert result.summary.failed == 0
+    execution = result.samples[0].execution
+    assert execution.status is ExecutionStatus.TIMEOUT
+    assert execution.error is not None
+    assert execution.error["code"] == "target_timeout"
+    assert result.samples[0].grade is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_isolated_target_error_message_is_redacted_and_bounded(tmp_path: Path) -> None:
+    """The exception message the runner records on an isolated per-sample
+    error result can echo target-controlled text, so it gets the same
+    redact-then-bound treatment ADR-0018 gives judge candidate output: a
+    planted ``hf_`` token is stripped under the default redaction policy,
+    and an oversized message is truncated. This proves one raising target
+    can neither leak a secret into the stored result nor bloat it with an
+    unbounded message.
+    """
+
+    class _RaisingWithSecretTarget:
+        async def execute(
+            self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
+        ) -> NormalizedExecutionResult:
+            padding = "x" * 9000
+            raise RuntimeError(f"token={_PLANTED_TOKEN} {padding}")
+
+    runner = EvalRunner(
+        catalog=_FakeCatalog(_records(1)),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={"fake": _RaisingWithSecretTarget()},
+        graders={"exact@1": _ExactFixtureGrader()},
+        artifact_store=_artifact_store(tmp_path),
+    )
+    result = await runner.run(_manifest())
+
+    execution = result.samples[0].execution
+    assert execution.status is ExecutionStatus.ERROR
+    assert execution.error is not None
+    message = execution.error["message"]
+    assert isinstance(message, str)
+    assert _PLANTED_TOKEN not in message  # secret-shaped substring redacted
+    assert "[REDACTED]" in message
+    assert "truncated" in message  # oversized message was bounded

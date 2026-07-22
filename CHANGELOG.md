@@ -44,6 +44,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `evidence["judge_transport_error"]` instead of aborting the entire run,
   and a transport failure does not consume the parse-retry budget
   (ADR-0020, ADR-0008).
+- `EvalRunner` now applies that same per-sample fault isolation at the
+  `ExecutionTarget` and `Grader` boundaries, symmetrically with the judge
+  path. An `ExecutionTarget.execute` that raises is recorded as that one
+  sample's `ExecutionStatus.ERROR` result (`ExecutionStatus.TIMEOUT` for a
+  `TimeoutError`); a `Grader.grade` that raises becomes that sample's
+  `GradeStatus.ERROR`. Each carries the exported
+  `TargetFailure`/`TargetTimeout`/`GraderError` taxonomy `code` plus a
+  redacted, bounded message (ADR-0018 order). Previously either raise
+  cancelled every in-flight sample through the `TaskGroup`, discarded
+  already-completed results, and propagated an uncaught `ExceptionGroup`
+  (not an `AgenticEvalkitError`, so the CLI's exit-code mapping never saw
+  it). The run now finishes and `RunCompleted` still fires; `CancelledError`
+  is deliberately still not caught, so cancellation propagates unchanged
+  (ADR-0020, ADR-0008).
+- The built-in target adapters (`CallableTarget`, `HttpTarget`,
+  `SubprocessTarget`) now record the same `target_failure`/`target_timeout`
+  taxonomy `code` on their `error` dicts, so `execution.error["code"]` has
+  one schema regardless of whether the adapter or the runner's isolation
+  layer produced the error result.
 - The reversed-order position-bias probe is issued only on the gating path
   (`gate=True` with a usable calibration); advisory and uncalibrated judge
   grading now makes exactly one judge call per sample instead of two

@@ -154,12 +154,13 @@ def _exit_code_for_error(error: AgenticEvalkitError) -> ExitCode:
 
     Falls back to :attr:`ExitCode.INFRASTRUCTURE_ERROR` (5) for any
     ``AgenticEvalkitError`` subclass that isn't explicitly listed in
-    ``_ERROR_EXIT_CODES`` above -- for example, ``TargetFailure``,
-    ``TargetTimeout``, or ``GraderError`` raised while a run was otherwise
-    in progress. Those all represent a run that successfully started and
-    reached execution, but then hit an infrastructure-level problem partway
-    through, which is exactly what exit code 5 ("evaluation completed with
-    infrastructure errors") means.
+    ``_ERROR_EXIT_CODES`` above. Note that a target or grader raising for an
+    individual sample never reaches this lookup: the runner isolates those
+    per sample (recording ``TargetFailure``/``TargetTimeout``/``GraderError``
+    taxonomy codes on that sample's ERROR result while the run completes),
+    and the ``run`` command then exits 5 based on the completed summary's
+    error/timeout counts. This fallback covers run-level infrastructure
+    failures raised outside per-sample execution.
     """
     for error_type, code in _ERROR_EXIT_CODES.items():
         if isinstance(error, error_type):

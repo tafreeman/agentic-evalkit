@@ -328,7 +328,13 @@ class SubprocessTarget:
         message: str,
         stderr_bytes: bytes | None = None,
     ) -> NormalizedExecutionResult:
-        error: dict[str, JsonValue] = {"type": error_type, "message": message}
+        # Same stable taxonomy codes the runner's isolation path records, so
+        # ``error["code"]`` has one schema regardless of the producing layer.
+        error: dict[str, JsonValue] = {
+            "type": error_type,
+            "code": ("target_timeout" if status is ExecutionStatus.TIMEOUT else "target_failure"),
+            "message": message,
+        }
         if stderr_bytes:
             # Turn the raw bytes into text so it reads naturally in
             # reports. By the time execution reaches here, `stderr_bytes`
