@@ -82,6 +82,29 @@ Every wire change is additive; `schema_version` stays `"1"` (ADR-0002).
   gate-blocking reason, never a propagated exception. `asyncio.CancelledError`
   (a `BaseException`, not an `Exception`) is deliberately not caught, so run
   cancellation still propagates.
+- **Runner-level symmetric target/grader isolation (amendment).** The
+  transport-exception isolation above originally lived only inside
+  `JudgeGrader`, leaving an asymmetry: `EvalRunner` wrapped neither
+  `target.execute` nor `grader.grade`, so a raise from an arbitrary
+  `ExecutionTarget` or `Grader` cancelled every in-flight sibling through the
+  `TaskGroup`, discarded already-completed results, and propagated an uncaught
+  `ExceptionGroup` — which, not being an `AgenticEvalkitError`, bypassed the
+  CLI's documented exit-code mapping. `EvalRunner._execute_isolated` and
+  `_grade_isolated` now apply the same per-sample treatment at those two
+  boundaries: a raising `execute` becomes that sample's
+  `ExecutionStatus.ERROR` result (`ExecutionStatus.TIMEOUT` for a
+  `TimeoutError`, which on 3.11+ is `asyncio.TimeoutError`), and a raising
+  `grade` becomes that sample's `GradeStatus.ERROR`. The exported
+  `TargetFailure`/`TargetTimeout`/`GraderError` taxonomy is wired in: each
+  error record carries the wrapper's stable `code` and a message redacted then
+  bounded under the ADR-0018 order (`grader_error`/`grader_error_code`/
+  `grader_error_message` on grade evidence; `type`/`code`/`message` on the
+  execution `error`). Only `Exception` is caught, so `CancelledError` still
+  tears the run down exactly as before. This closes the fault-isolation
+  asymmetry: one raising sample no longer aborts the run, `RunCompleted` still
+  fires, and every other sample's completed result survives — the target and
+  grader boundaries now behave symmetrically with the judge boundary and with
+  the operational-vs-task separation ADR-0008 requires.
 - **Gating-scoped probe.** The reversed-order probe is issued only when
   `gate=True` **and** the calibration is usable (no calibration failure), so the
   advisory path makes exactly one judge call per sample. It is not additionally
@@ -154,6 +177,15 @@ Every wire change is additive; `schema_version` stays `"1"` (ADR-0002).
   limits as first-class non-gating outcomes rather than as raises or fabricated
   verdicts, closing the operational-vs-task conflation ADR-0008 warns against at
   the judge boundary specifically.
+- The runner-level amendment makes any raising `ExecutionTarget`/`Grader`
+  survivable, not just a raising `JudgeClient`. `NormalizedExecutionResult.error`
+  may now carry runner-authored `type`/`code`/`message` keys, and
+  `GradeResult.evidence` may carry `grader_error`/`grader_error_code`/
+  `grader_error_message`, each redacted and bounded before persistence like the
+  judge keys above. Callers that previously saw an uncaught `ExceptionGroup`
+  escape `EvalRunner.run` on a target/grader raise now receive a completed
+  `EvalRunResult` whose affected sample is an operational `ERROR`/`TIMEOUT`
+  (never a task `FAIL`), counted in `RunSummary.errors`/`.timeouts`.
 
 ## Validation
 
@@ -180,6 +212,22 @@ Every wire change is additive; `schema_version` stays `"1"` (ADR-0002).
   drives a full `EvalRunner` run where the judge raises on one sample: the run
   finishes (no `RunFailed`), the affected sample grades `ERROR` with
   `judge_transport_error` evidence, and the other sample grades normally.
+- `tests/integration/test_runner.py` proves the runner-level amendment
+  symmetrically: `test_run_completes_when_the_target_raises_on_one_sample`
+  (a raising `execute` on one of two concurrent samples → that sample is
+  `ExecutionStatus.ERROR` with `code == "target_failure"`, the other's
+  completed result survives, no `RunFailed`),
+  `test_run_completes_when_the_grader_raises_on_one_sample` (a raising
+  `grade` → that sample is `GradeStatus.ERROR` with `grader_error` evidence,
+  the other grades normally),
+  `test_run_maps_a_raising_target_timeout_to_a_timeout_result` (a raised
+  `TimeoutError` → `ExecutionStatus.TIMEOUT`, `code == "target_timeout"`), and
+  `test_isolated_target_error_message_is_redacted_and_bounded` (a planted
+  `hf_` token in the raise is stripped and an oversized message truncated on
+  the recorded error). The existing cancellation tests
+  (`test_cancellation_during_the_run_emits_exactly_one_run_failed`,
+  `test_cancelling_the_run_marks_pending_samples_cancelled`) still pass,
+  confirming `CancelledError` is not swallowed by the new isolation.
 - `tests/contract/test_adrs.py` adds `"0020"` to `REQUIRED_ADR_PREFIXES`, so
   this ADR's shape (seven headings, canonical order, `Accepted`, no
   contradicting phrases) is enforced identically to every other ADR, and

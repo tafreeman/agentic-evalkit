@@ -33,7 +33,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import uuid4
 
-from agentic_evalkit.errors import JsonValue, ManifestValidationError
+from agentic_evalkit.errors import (
+    GraderError,
+    JsonValue,
+    ManifestValidationError,
+    TargetFailure,
+    TargetTimeout,
+)
 from agentic_evalkit.events import (
     DatasetResolved,
     ExecutionCompleted,
@@ -52,6 +58,7 @@ from agentic_evalkit.models import (
     EvalSample,
     ExecutionStatus,
     GradeResult,
+    GradeStatus,
     NormalizedExecutionResult,
     ResolvedDataset,
     RunSummary,
@@ -73,6 +80,15 @@ if TYPE_CHECKING:
 #: JSON-serialized ``EvalRunResult``, while still letting you go fetch the
 #: full content later if you need it.
 _LARGE_OUTPUT_THRESHOLD_BYTES = 8192
+
+#: The most characters of a raising target's/grader's exception message the
+#: runner keeps on a per-sample error result. An exception message can echo
+#: target- or grader-controlled text, so the message is first stripped of
+#: secret-shaped substrings (``self._redaction_policy``) and then capped at
+#: this length -- mirroring the redact-then-bound treatment ADR-0018 applies
+#: to judge candidate output, so one raising sample can neither leak a secret
+#: nor bloat the stored result with an unbounded message.
+_MAX_ERROR_MESSAGE_CHARS = 8192
 
 EventSink = Callable[[RunEvent], None]
 
@@ -393,6 +409,7 @@ class EvalRunner:
                     attempt=attempt,
                     target=target,
                     grader=grader,
+                    grader_name=manifest.grader,
                     timeout_seconds=manifest.timeout_seconds,
                     sink=sink,
                 )
@@ -411,6 +428,7 @@ class EvalRunner:
         attempt: int,
         target: ExecutionTarget,
         grader: Grader,
+        grader_name: str,
         timeout_seconds: float | None,
         sink: EventSink,
     ) -> SampleResult:
@@ -436,6 +454,20 @@ class EvalRunner:
         stripped-out ``output=None`` placeholder just because the real
         output happened to be large. Spilling only affects how the final
         result gets stored, never what the grader is allowed to see.
+
+        Both the execute step and the grade step are fault-isolated per
+        sample (``_execute_isolated``/``_grade_isolated``): if the target
+        or the grader raises while working on *this* sample, that raise is
+        converted into this sample's own error result
+        (``ExecutionStatus.ERROR``/``GradeStatus.ERROR``) rather than being
+        allowed to escape. Because this coroutine therefore never raises for
+        an ordinary target/grader failure, the surrounding ``TaskGroup``
+        (see ``_execute_all``) never cancels the other in-flight samples, no
+        already-completed result is discarded, and ``RunCompleted`` still
+        fires. This makes the target and grader boundaries symmetric with
+        the judge-transport isolation ADR-0020 already applied inside
+        ``JudgeGrader``. ``asyncio.CancelledError`` is deliberately *not*
+        isolated (see the helpers), so cancelling a run still cancels it.
         """
         sink(
             SampleStarted(
@@ -446,7 +478,9 @@ class EvalRunner:
             )
         )
 
-        execution = await target.execute(sample, attempt=attempt, timeout_seconds=timeout_seconds)
+        execution = await self._execute_isolated(
+            sample=sample, attempt=attempt, target=target, timeout_seconds=timeout_seconds
+        )
         sink(
             ExecutionCompleted(
                 run_id=run_id,
@@ -459,7 +493,9 @@ class EvalRunner:
 
         grade: GradeResult | None = None
         if execution.status is ExecutionStatus.COMPLETED:
-            grade = await grader.grade(sample, execution)
+            grade = await self._grade_isolated(
+                sample=sample, execution=execution, grader=grader, grader_name=grader_name
+            )
             sink(
                 GradeCompleted(
                     run_id=run_id,
@@ -485,6 +521,149 @@ class EvalRunner:
             )
         )
         return SampleResult(sample=sample, execution=execution, grade=grade)
+
+    async def _execute_isolated(
+        self,
+        *,
+        sample: EvalSample,
+        attempt: int,
+        target: ExecutionTarget,
+        timeout_seconds: float | None,
+    ) -> NormalizedExecutionResult:
+        """Run one attempt, converting a raising ``target.execute`` into an error result.
+
+        Per-sample fault isolation, symmetric with the judge-transport
+        isolation of ADR-0020: if the execution target raises, only this one
+        sample is affected -- it is recorded as an ``ExecutionStatus.TIMEOUT``
+        result for a ``TimeoutError`` (``asyncio.TimeoutError`` is the same
+        builtin on 3.11+), or an ``ExecutionStatus.ERROR`` result otherwise
+        -- instead of the raise escaping to cancel every other in-flight
+        sample. Only ``Exception`` is caught: ``asyncio.CancelledError`` is a
+        ``BaseException``, not an ``Exception``, so cancelling a run still
+        actually cancels it (mirroring ``_judge_with_bounded_retries``).
+        """
+        started_at = self._clock()
+        try:
+            return await target.execute(sample, attempt=attempt, timeout_seconds=timeout_seconds)
+        except Exception as error:
+            return self._target_error_result(
+                sample=sample,
+                attempt=attempt,
+                error=error,
+                started_at=started_at,
+                finished_at=self._clock(),
+            )
+
+    def _target_error_result(
+        self,
+        *,
+        sample: EvalSample,
+        attempt: int,
+        error: Exception,
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> NormalizedExecutionResult:
+        """Build the ``ERROR``/``TIMEOUT`` execution result for a target that raised.
+
+        The exported error taxonomy is wired in here: a ``TimeoutError``
+        becomes a :class:`~agentic_evalkit.errors.TargetTimeout`, anything
+        else a :class:`~agentic_evalkit.errors.TargetFailure`. That wrapper's
+        stable ``code`` (``"target_timeout"``/``"target_failure"``) and its
+        redacted, bounded message are what get recorded on the result's
+        ``error`` field, alongside the original exception's type name.
+        """
+        message = self._safe_error_message(error)
+        wrapped: TargetTimeout | TargetFailure
+        if isinstance(error, TimeoutError):
+            wrapped = TargetTimeout(message=message)
+            status = ExecutionStatus.TIMEOUT
+        else:
+            wrapped = TargetFailure(message=message)
+            status = ExecutionStatus.ERROR
+        return NormalizedExecutionResult(
+            sample_id=sample.sample_id,
+            attempt=attempt,
+            output=None,
+            status=status,
+            error={
+                "type": type(error).__name__,
+                "code": wrapped.code,
+                "message": wrapped.message,
+            },
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
+    async def _grade_isolated(
+        self,
+        *,
+        sample: EvalSample,
+        execution: NormalizedExecutionResult,
+        grader: Grader,
+        grader_name: str,
+    ) -> GradeResult:
+        """Grade one execution, converting a raising ``grader.grade`` into an ERROR grade.
+
+        Symmetric with ``_execute_isolated`` and ADR-0020: a grader that
+        raises yields a single ``GradeStatus.ERROR`` result for this one
+        sample rather than aborting the whole run. This isolates *arbitrary*
+        graders -- ``JudgeGrader`` isolates its own transport failures
+        internally, but a plain grader whose ``grade`` raises is only
+        survivable because the runner wraps the call here. As in
+        ``_execute_isolated``, ``asyncio.CancelledError`` is not caught.
+        """
+        try:
+            return await grader.grade(sample, execution)
+        except Exception as error:
+            return self._grader_error_result(sample=sample, error=error, grader_name=grader_name)
+
+    def _grader_error_result(
+        self, *, sample: EvalSample, error: Exception, grader_name: str
+    ) -> GradeResult:
+        """Build the ``GradeStatus.ERROR`` grade for a grader that raised.
+
+        Wraps the raise in a :class:`~agentic_evalkit.errors.GraderError` so
+        the error taxonomy is actually used, and records -- mirroring the
+        ADR-0020 ``judge_transport_error`` convention -- the original
+        exception's type (``grader_error``), the wrapper's stable ``code``
+        (``grader_error_code``), and a redacted, bounded message
+        (``grader_error_message``). ``hard_gate`` is always ``False``: a
+        grader breaking is never allowed to gate a release.
+        """
+        wrapped = GraderError(message=self._safe_error_message(error))
+        return GradeResult(
+            sample_id=sample.sample_id,
+            grader=grader_name,
+            status=GradeStatus.ERROR,
+            hard_gate=False,
+            evidence={
+                "grader_error": type(error).__name__,
+                "grader_error_code": wrapped.code,
+                "grader_error_message": wrapped.message,
+            },
+            created_at=self._clock(),
+        )
+
+    def _safe_error_message(self, error: Exception) -> str:
+        """Redact secret-shaped substrings from ``str(error)`` and cap its length.
+
+        Mirrors the redact-then-truncate order (and truncation marker)
+        ADR-0018 applies to judge candidate output: the runner's own
+        configured secret patterns are stripped first (reusing the same
+        ``_compiled_secret_patterns``/``_redact`` this module already uses
+        for spilling), then the message is bounded at
+        ``_MAX_ERROR_MESSAGE_CHARS``. An exception message can echo target-
+        or grader-controlled text, so it is never persisted raw.
+        """
+        message = str(error)
+        patterns = self._compiled_secret_patterns()
+        if patterns:
+            message = _redact(message, patterns)
+        if len(message) > _MAX_ERROR_MESSAGE_CHARS:
+            omitted = len(message) - _MAX_ERROR_MESSAGE_CHARS
+            kept = message[:_MAX_ERROR_MESSAGE_CHARS]
+            message = f"{kept}...[truncated, {omitted} chars omitted]"
+        return message
 
     def _spill_large_output(
         self, execution: NormalizedExecutionResult
