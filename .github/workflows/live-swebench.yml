@@ -7,12 +7,18 @@ name: Live SWE-bench harness
 # only place in CI that installs the swebench extra and requires a Docker
 # daemon (present on GitHub-hosted ubuntu-latest runners).
 #
-# It never converts a missing capability into a passing run: the live tests
-# skip only when the swebench extra / Docker daemon is genuinely absent. The
-# gold patch is the dataset's own reference solution (no fixture file needed),
-# so a scheduled or dispatched run with Docker actually validates the harness
-# -- it does not pass vacuously. An optional instance_id input pins a specific
-# instance; otherwise the first dataset row is used.
+# It never converts a missing capability into a passing run. The live tests
+# themselves skip when the swebench extra / Docker daemon is genuinely absent,
+# which is the right behaviour for a developer running them on a laptop -- but
+# on this workflow's ubuntu-latest runner Docker and the extra are always
+# present, so here a skip means a broken environment or a bogus instance_id
+# input, never an acceptable absence of capability. The final step therefore
+# reads the JUnit report and fails the job unless both design §7.1 fidelity
+# tests actually executed and passed, so an all-skip run can no longer exit 0.
+# The gold patch is the dataset's own reference solution (no fixture file
+# needed), so a scheduled or dispatched run with Docker actually validates the
+# harness -- it does not pass vacuously. An optional instance_id input pins a
+# specific instance; otherwise the first dataset row is used.
 
 on:
   workflow_dispatch:
@@ -45,7 +51,72 @@ jobs:
       - name: Sync locked environment with the swebench extra
         run: uv sync --all-groups --extra swebench --locked
 
+      # The JUnit report goes to RUNNER_TEMP, not the workspace, so a generated
+      # report can never be picked up by a later step or committed.
       - name: Live SWE-bench harness tests
+        id: live-tests
         env:
           AGENTIC_EVALKIT_SWEBENCH_INSTANCE: ${{ inputs.instance_id }}
-        run: uv run pytest tests/live/test_swebench_harness_live.py -m live -v
+        run: uv run pytest tests/live/test_swebench_harness_live.py -m live -v --junitxml="$RUNNER_TEMP/live-swebench-junit.xml"
+
+      # Without this the job is a false-green waiting to happen: pytest exits 0
+      # when every test skips, and the live tests have three skip paths (no
+      # docker SDK, no datasets package, unknown instance_id). A typo'd
+      # workflow_dispatch instance_id alone was enough to report success while
+      # proving nothing. Runs whenever the step above ran at all, so a skipped
+      # run is caught even though pytest was happy with it.
+      - name: Assert the fidelity tests actually ran
+        if: ${{ always() && steps.live-tests.outcome != 'skipped' }}
+        run: |
+          uv run --no-sync python - "$RUNNER_TEMP/live-swebench-junit.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          # The two design 7.1 fidelity assertions: a gold patch must resolve
+          # and a non-fixing patch must not, both through the real execute().
+          REQUIRED = (
+              "test_gold_patch_resolves_through_the_real_execute_path",
+              "test_non_fixing_patch_does_not_resolve_through_the_same_path",
+          )
+
+          report = Path(sys.argv[1])
+          if not report.is_file():
+              sys.exit(
+                  f"FIDELITY GATE FAILED: no JUnit report at {report} -- pytest never "
+                  "got far enough to record a result for the live SWE-bench tests."
+              )
+
+          outcomes = {}
+          for case in ET.parse(report).getroot().iter("testcase"):
+              name = case.get("name", "")
+              if name not in REQUIRED:
+                  continue
+              verdict, detail = "passed", ""
+              for tag in ("skipped", "failure", "error"):
+                  node = case.find(tag)
+                  if node is not None:
+                      verdict = tag
+                      detail = node.get("message", "") or (node.text or "").strip()
+                      break
+              outcomes[name] = (verdict, detail)
+
+          problems = []
+          for name in REQUIRED:
+              verdict, detail = outcomes.get(name, ("never ran", "absent from the JUnit report"))
+              if verdict != "passed":
+                  problems.append(f"  - {name}: {verdict}" + (f" -- {detail}" if detail else ""))
+
+          if problems:
+              sys.exit(
+                  "FIDELITY GATE FAILED: the SWE-bench fidelity tests did not both pass, "
+                  "so this run proves nothing about the harness (design 7.1).\n"
+                  + "\n".join(problems)
+                  + "\nDocker and the swebench extra are always present on this runner, so a "
+                  "skipped test here means a broken environment or an instance_id input that "
+                  "is not in princeton-nlp/SWE-bench_Verified -- never an acceptable missing "
+                  "capability."
+              )
+
+          print(f"Fidelity gate passed: all {len(REQUIRED)} SWE-bench fidelity tests executed and passed.")
+          PY
