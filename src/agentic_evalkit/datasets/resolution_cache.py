@@ -46,6 +46,7 @@ import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from agentic_evalkit.datasets._cache_io import read_entry_bytes
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
 from agentic_evalkit.models import ResolvedDataset
 from agentic_evalkit.models.base import FrozenModel
@@ -209,16 +210,29 @@ class ResolutionCache:
         """Return the previously-resolved dataset saved under ``key``, after
         verifying it is intact.
 
+        Concurrency: exactly as in
+        :meth:`agentic_evalkit.datasets.cache.DatasetCache.read`, the
+        existence check and the read below are two separate operations, and a
+        writer republishing this same entry can land between them -- which on
+        Windows briefly makes the file impossible to open even though it is
+        present. That window is retried a bounded number of times inside
+        :func:`agentic_evalkit.datasets._cache_io.read_entry_bytes`, and a
+        failure that outlasts the retries is reported through the two typed
+        errors below, never as a raw operating-system error.
+
         Raises:
             OfflineCacheMiss: no entry has been saved for this exact key
-                yet (``retryable=True`` signals that this isn't a permanent
-                failure -- resolving this exact request online, or running
-                ``datasets pull``, would create the missing entry).
+                yet, or the entry was still absent after the bounded retries
+                described above (``retryable=True`` signals that this isn't
+                a permanent failure -- resolving this exact request online,
+                or running ``datasets pull``, would create the missing
+                entry).
             DatasetIntegrityError: an entry exists, but something about it
                 is wrong -- its saved key doesn't match ``key``, its
-                payload is missing or malformed, or its checksum doesn't
-                match. This is never silently treated as if the entry were
-                simply missing, since that would hide a real problem.
+                payload is missing or malformed, its checksum doesn't
+                match, or it stayed unreadable across every retry. This is
+                never silently treated as if the entry were simply missing,
+                since that would hide a real problem.
         """
         entry_path = self._entry_path(key)
         digest = key.digest()
@@ -230,8 +244,15 @@ class ResolutionCache:
                 retryable=True,
             )
 
+        raw_record = read_entry_bytes(
+            entry_path,
+            entry_label="cached resolution",
+            digest=digest,
+            dataset_id=key.dataset_id,
+        )
+
         try:
-            record = json.loads(entry_path.read_text(encoding="utf-8"))
+            record = json.loads(raw_record.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise DatasetIntegrityError(
                 message=f"cached resolution for digest {digest} is not valid JSON",

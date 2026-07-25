@@ -47,6 +47,7 @@ import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
+from agentic_evalkit.datasets._cache_io import read_entry_bytes
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
 from agentic_evalkit.models.base import FrozenModel
 
@@ -207,15 +208,26 @@ class DatasetCache:
         """Return the payload bytes saved under ``key``, after verifying
         they are intact.
 
+        Concurrency: a writer may be republishing this same key while this
+        read is in progress, which on Windows can briefly make an otherwise
+        healthy file impossible to open. That momentary condition is retried
+        a bounded number of times inside
+        :func:`agentic_evalkit.datasets._cache_io.read_entry_bytes` rather
+        than surfacing as a raw operating-system error; if it outlasts those
+        retries it is reported through the two typed errors below, so those
+        two remain this method's complete failure vocabulary.
+
         Raises:
             OfflineCacheMiss: neither a manifest nor a payload file exists
                 for this exact key (this method never falls back to a
                 partial or approximate match -- it's this exact key or
-                nothing).
+                nothing), or one of them was still unopenable-because-absent
+                after the bounded retries described above.
             DatasetIntegrityError: a manifest file exists, but something
                 about it doesn't check out -- its recorded key doesn't
                 match ``key``, or the payload's on-disk byte count or
-                checksum doesn't match what the manifest says it should be.
+                checksum doesn't match what the manifest says it should be,
+                or the file exists but stayed unreadable across every retry.
         """
         manifest_path = self.manifest_path(key)
         payload_path = self.payload_path(key)
@@ -227,8 +239,23 @@ class DatasetCache:
                 context={"digest": digest, "dataset_id": key.dataset_id},
             )
 
+        # The existence check above and the two reads below are separate
+        # operations, so a writer republishing this key can land between them
+        # and make an open fail even though the file is right there. Both
+        # reads therefore go through ``read_entry_bytes``, which retries past
+        # that momentary window and, if the failure outlasts it, still reports
+        # one of this method's two documented error types rather than letting
+        # a raw OS error escape to the caller. See ``_cache_io`` for exactly
+        # which errors are treated as the race and which are left to surface.
+        raw_manifest = read_entry_bytes(
+            manifest_path,
+            entry_label="cache manifest",
+            digest=digest,
+            dataset_id=key.dataset_id,
+        )
+
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(raw_manifest.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise DatasetIntegrityError(
                 message=f"cache manifest for digest {digest} is not valid JSON",
@@ -242,7 +269,12 @@ class DatasetCache:
                 context={"digest": digest, "dataset_id": key.dataset_id},
             )
 
-        payload = payload_path.read_bytes()
+        payload = read_entry_bytes(
+            payload_path,
+            entry_label="cache payload",
+            digest=digest,
+            dataset_id=key.dataset_id,
+        )
 
         expected_byte_count = manifest.get("byte_count")
         if expected_byte_count != len(payload):
