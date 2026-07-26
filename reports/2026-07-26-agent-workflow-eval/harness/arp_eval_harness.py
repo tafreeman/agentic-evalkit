@@ -324,7 +324,16 @@ class JsonlCatalog:
             for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        self._digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        # Hash the parsed records, not the file's bytes. Hashing bytes made the
+        # dataset identity depend on the checkout's line endings: this suite was
+        # built on Windows, so the raw file hashed to f6cb6d74... while the
+        # committed LF blob hashes to 94918c71..., and a POSIX reproduction of
+        # an identical corpus would be rejected by ``compare_runs`` as a
+        # different dataset. A canonical serialization of the rows is invariant
+        # to line endings, key order, and insignificant whitespace -- it changes
+        # when the *records* change, which is what the revision claims to mean.
+        canonical = json.dumps(self._rows, sort_keys=True, separators=(",", ":"))
+        self._digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def __len__(self) -> int:
         return len(self._rows)

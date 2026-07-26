@@ -4,10 +4,10 @@ A real evaluation run: 48 code-review tasks executed against
 `agentic-runtime-platform`'s (ARP) own reviewer agent and graded with ARP's own
 YAML rubric, driven by `agentic-evalkit`'s `EvalRunner`. Every number on this
 page came out of the run recorded in
-`9f2e084c4eff47359f6d80756e8c34ce.json`.
+`e2f77bdddafc4b74b324a57851587317.json`.
 
 > **This run supersedes the invalidated run published at commit `c65f5b1`.**
-> External review found fifteen validity defects across five rounds: the wrong
+> External review found sixteen validity defects across six rounds: the wrong
 > system under test, silently truncated judge inputs, a machine-pinned rubric
 > path, a grader that renormalized over missing rubric criteria, a case corpus
 > contaminated with ARP's own log framing, spilled review artifacts that were
@@ -20,8 +20,10 @@ page came out of the run recorded in
 > checkout actually imported, a working-tree hash that never descended into new
 > directories, a manifest identity that covered evalkit and ARP but never this
 > harness's own source, and an `"unknown"` revision fallback that gave every
-> unidentifiable ARP tree the same identity.
-> All fifteen are fixed in the harness under `harness/`, and every number below
+> unidentifiable ARP tree the same identity, and a dataset fingerprint over raw
+> file bytes that made an identical corpus hash differently on Windows and
+> POSIX.
+> All sixteen are fixed in the harness under `harness/`, and every number below
 > comes from a full re-run against the fixed harness and a rebuilt corpus.
 > **The runs are not comparable** and no figure here should be read as a delta
 > against an earlier one: decontaminating the corpus changed the content of all
@@ -34,32 +36,32 @@ page came out of the run recorded in
 | Metric | Value |
 | --- | --- |
 | Cases | 48 |
-| Executions completed | 46 / 48 (2 operational timeouts) |
-| Graded | 46 |
-| Passed / failed | 46 / 0 — of the 46 graded |
-| Errors / timeouts / abstains | 0 / 2 / 0 |
-| Mean weighted score | 0.9646 (median 0.96, min 0.81, max 1.00) |
+| Executions completed | 48 / 48 |
+| Graded | 48 |
+| Passed / failed | 48 / 0 |
+| Errors / timeouts / abstains | 0 / 0 / 0 |
+| Mean weighted score | 0.9575 (median 0.96, min 0.75, max 1.00) |
 | Pass threshold | 0.70 (from `agent.yaml`) |
-| Wall-clock | 1332.42 s (22 m 12 s) |
-| Target tokens | 127,580 in / 332,755 out |
-| Judge tokens | 122,078 in / 39,617 out |
-| Total tokens | 622,030 |
+| Wall-clock | 1268.61 s (21 m 09 s) |
+| Target tokens | 133,415 in / 365,822 out |
+| Judge tokens | 129,978 in / 44,450 out |
+| Total tokens | 673,665 |
 | Cost | Not measured — see [Cost](#cost) |
-| Target fingerprint | `sha256:a5f62bb296d8ec7d…` (policy `required`, pinned in the manifest) |
-| Grader identity | `arp-agent-rubric@1+bbcad6d6aa8d` (rubric contents + judge model + harness source) |
-| Harness source | `f5d5408c4aae3a7b…` (digest of the three files in `harness/`) |
+| Target fingerprint | `sha256:2a8fe8b0fdcbd41f…` (policy `required`, pinned in the manifest) |
+| Grader identity | `arp-agent-rubric@1+960aa0c318ac` (rubric contents + judge model + harness source) |
+| Harness source | `398e74c90933fb37…` (digest of the three files in `harness/`) |
+| Dataset revision | `1f5a426c23609c37` (canonical record digest — line-ending invariant, see caveat 13) |
 | ARP revision | `872d723a…-dirty+cec21bca21f8` (see caveat 11) |
 | Prompt | `reviewer` `v1@f1555690` |
 
 Concurrency 4, 1 attempt per sample, 300 s per-sample timeout.
 
-**The pass rate is 46/46 of the samples that produced a review, not 48/48.**
-Two cases (`arp-fsgen-030`, `-031`) hit the 300 s per-sample timeout and were
-never graded; per ADR-0008 an operational failure is never folded into task
-results, so they are reported as timeouts rather than failures — and they are
-not quietly dropped from the denominator either: 48 cases were attempted.
-Nothing failed the rubric in this run; see caveat 10 for why that is not a
-stable property of the agent.
+**This run completed all 48 cases with no timeouts — and scored the lowest
+mean of the six runs on record (0.9575).** That coincidence is the point of
+caveat 10: the most complete execution and the weakest scores arrived together,
+minutes apart from runs that timed out and scored higher, with nothing about
+the agent changed. A 48/48 pass rate here is not a better result than run 5's
+46/46; it is a different sample.
 
 ## What was evaluated
 
@@ -104,20 +106,20 @@ is normalized to 0–1 and passes at ≥ 0.70.
 
 | Criterion | Weight | Mean score | Scored ≥ 4/5 |
 | --- | ---: | ---: | ---: |
-| Correctness | 0.25 | 4.674 | 41 / 46 |
-| Completeness | 0.20 | 4.522 | 45 / 46 |
-| Clarity | 0.15 | 5.000 | 46 / 46 |
-| Relevance | 0.15 | 5.000 | 46 / 46 |
-| Efficiency | 0.10 | 5.000 | 46 / 46 |
-| Safety | 0.15 | 5.000 | 46 / 46 |
+| Correctness | 0.25 | 4.583 | 45 / 48 |
+| Completeness | 0.20 | 4.500 | 48 / 48 |
+| Clarity | 0.15 | 4.958 | 47 / 48 |
+| Relevance | 0.15 | 5.000 | 48 / 48 |
+| Efficiency | 0.10 | 4.979 | 48 / 48 |
+| Safety | 0.15 | 5.000 | 48 / 48 |
 
-Every one of the 46 graded samples received a usable score on all six criteria —
+Every one of the 48 graded samples received a usable score on all six criteria —
 and that is now enforced rather than observed: a criterion that is missing,
 non-numeric, fractional, or outside 0–5 makes the grader abstain rather than be
 repaired into a gradeable value (caveat 8). The judge's scores as parsed are
 recorded verbatim in each grade's `evidence.judge_raw_scores`, so a reader can
-confirm no value was reshaped on the way in. The two timed-out samples never
-produced a review and so were never graded.
+confirm no value was reshaped on the way in. Every case produced a review in
+this run; five of the six runs on record did not.
 
 ## Models
 
@@ -143,18 +145,18 @@ mid-run (see below), so it could not produce a complete run.
 
 ## Honest caveats
 
-These matter for reading the 46/46 pass rate correctly.
+These matter for reading the 48/48 pass rate correctly.
 
 1. **The grader is a single uncalibrated LLM judge, and it is noisy.** One judge,
    one attempt per sample, no calibration against human labels — treat individual
    case scores as indicative, not authoritative. Across earlier runs of this suite
    the same case under the same target model has swung by more than 0.30 on the
    judge's score alone.
-2. **Scores cluster at the ceiling.** Median 0.96, no case below 0.81, and
+2. **Scores cluster at the ceiling.** Median 0.96, no case below 0.75, and
    nothing near the 0.70 threshold means this rubric/judge pairing is not very
    discriminative at the top end. It demonstrates the pipeline works end to end;
-   it does not finely rank agent quality. A 46/46 pass rate is evidence the
-   harness runs, not evidence the agent is flawless — one of the five runs of
+   it does not finely rank agent quality. A 48/48 pass rate is evidence the
+   harness runs, not evidence the agent is flawless — one of the six runs of
    this same suite, same models, produced a genuine rubric failure (0.69).
    Nothing about the agent changed between them.
 3. **The pass threshold is the rubric's own 0.70**, not a bar chosen to flatter
@@ -228,13 +230,10 @@ These matter for reading the 46/46 pass rate correctly.
    outright if any delimiter or truncation marker survives into a selected case.
    The suite is whatever survives this filter; it is not backfilled to hit a
    target count.
-10. **Two cases never produced a review, and operational variance is real.**
-    `arp-fsgen-030` and `-031` exhausted the 300 s per-sample timeout, so 46 of
-    48 attempted cases were graded. They are reported as timeouts, not failures
-    — ADR-0008 keeps operational outcomes out of task results — and they are not
-    dropped from the denominator either. **This is the single most important
-    caveat on the page**, because five runs of this suite now exist and they
-    disagree:
+10. **Operational variance is real, and this run happens to look best on
+    completion while scoring worst.** No case timed out here, so all 48 were
+    graded. **This is the single most important caveat on the page**, because
+    six runs of this suite now exist and they disagree:
 
     | Run | Timeouts | Timed-out case(s) | Graded | Passed | Mean |
     | ---: | ---: | --- | ---: | ---: | ---: |
@@ -242,19 +241,22 @@ These matter for reading the 46/46 pass rate correctly.
     | 2 | 3 | `-005`, `-013`, `-021` | 45 | 44 (one 0.69 failure) | 0.9584 |
     | 3 | 1 | `-017` | 47 | 47 | 0.9636 |
     | 4 | 1 | `-033` | 47 | 47 | 0.9709 |
-    | 5 (published) | 2 | `-030`, `-031` | 46 | 46 | 0.9646 |
+    | 5 | 2 | `-030`, `-031` | 46 | 46 | 0.9646 |
+    | 6 (published) | 0 | — | 48 | 48 | 0.9575 |
 
     Same corpus, same models, same concurrency, and **no case has timed out in
-    more than one run** — eight distinct cases have timed out across five runs,
+    more than one run** — nine distinct cases have timed out across six runs,
     each exactly once. A genuine rubric failure appeared in run 2 and never
     recurred. Nothing about the agent changed across any of them. Which cases
     complete — and whether any case fails — is substantially a property of
     provider latency and judge noise on the day. Treat any single run's
     completion count and pass rate as one sample from a noisy distribution, not
-    a measurement of the agent: across five runs the mean spans 0.9584–0.9709
-    (range 0.0125) and the graded count spans 45–47, so no difference smaller
-    than that is distinguishable from noise. The published run is the most
-    recent, not the best; run 4 scored higher and run 2 scored lower.
+    a measurement of the agent: across six runs the mean spans 0.9575–0.9709
+    (range 0.0134) and the graded count spans 45–48, so no difference smaller
+    than that is distinguishable from noise. **Note what run 6 shows:** it is
+    the only run to complete every case, and it has the lowest mean of the six.
+    Completion rate and score quality moved in opposite directions on identical
+    inputs. The published run is simply the most recent — not the best.
 11. **The ARP checkout was not clean, and the fingerprint says so.** The
     recorded revision is `872d723a…-dirty+cec21bca21f8`: the checkout carried
     two untracked files unrelated to the reviewer path. The digest covers the
@@ -272,7 +274,15 @@ These matter for reading the 46/46 pass rate correctly.
     fingerprint and rubric digest cover ARP and the rubric. A digest of the
     three harness files is therefore folded into both the target fingerprint
     and the grader identity, so changing how scores are parsed or how the agent
-    is invoked makes two runs non-comparable rather than silently equivalent. The suffix is reported rather than
+    is invoked makes two runs non-comparable rather than silently equivalent.
+13. **The dataset revision identifies the records, not the file's bytes.** It is
+    a SHA-256 over a canonical serialization of the parsed rows, so it is
+    invariant to line endings, key order and insignificant whitespace. Hashing
+    raw bytes — as this harness originally did — meant the suite built on
+    Windows recorded `f6cb6d74…` while the committed LF blob hashes to
+    `94918c71…`: a POSIX reproduction of a byte-for-byte identical corpus would
+    have been rejected by `compare_runs` as a different dataset. The digest
+    still moves when any record's content changes. The suffix is reported rather than
     suppressed because a fingerprint claiming a clean tree it did not have would
     overstate how reproducible this run is. Two runs are safely comparable only
     when the whole of `target_fingerprint` matches, and a `-dirty` revision
@@ -293,7 +303,7 @@ identical in shape to CLI output, and the HTML/Markdown were generated by the
 real CLI:
 
 ```bash
-agentic-evalkit report 9f2e084c4eff47359f6d80756e8c34ce.json --format html
+agentic-evalkit report e2f77bdddafc4b74b324a57851587317.json --format html
 ```
 
 `harness/` holds everything needed to re-run:
@@ -335,9 +345,9 @@ interpreter and `;` for the `PYTHONPATH` separator.
 
 | File | Contents |
 | --- | --- |
-| `9f2e084c4eff47359f6d80756e8c34ce.json` | Canonical `EvalRunResult` — every sample, review, grade, and provenance record |
-| `9f2e084c4eff47359f6d80756e8c34ce.html` | Self-contained HTML report |
-| `9f2e084c4eff47359f6d80756e8c34ce.md` | Markdown summary |
+| `e2f77bdddafc4b74b324a57851587317.json` | Canonical `EvalRunResult` — every sample, review, grade, and provenance record |
+| `e2f77bdddafc4b74b324a57851587317.html` | Self-contained HTML report |
+| `e2f77bdddafc4b74b324a57851587317.md` | Markdown summary |
 | `run-stats.json` | Aggregates quoted above, plus `target_fingerprint` and `target_provenance` |
 | `cases.jsonl` | The 48-case suite |
 | `artifacts/` | Spilled execution outputs, content-addressed — every `output_ref` in the canonical JSON resolves here |
