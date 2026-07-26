@@ -124,22 +124,80 @@ def _git(root: Path, *args: str) -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
+def harness_source_digest() -> str:
+    """Digest of this harness's own source, for the run's recorded identity.
+
+    ``compute_code_fingerprint()`` covers only the installed evalkit package,
+    the target fingerprint covers ARP and its configuration, and the grader
+    name covers the rubric and judge model -- none of them cover *this* code.
+    Yet the judge prompt, the score-parsing rules, and the whole target
+    integration live here, so without this a change to how scores are parsed
+    or how the agent is invoked leaves the manifest identical and lets
+    ``compare_runs`` accept two materially different harnesses as the same
+    system. Missing files are recorded as such rather than skipped.
+    """
+    digest = hashlib.sha256()
+    here = Path(__file__).resolve().parent
+    for name in ("arp_eval_harness.py", "run_eval.py", "build_cases.py"):
+        path = here / name
+        digest.update(name.encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
+def _hash_source_tree(root: Path, patterns: tuple[str, ...] = ("*.py", "*.yaml", "*.md")) -> str:
+    """Hash every matching file under ``root`` by relative path and contents."""
+    digest = hashlib.sha256()
+    paths: list[Path] = []
+    for pattern in patterns:
+        paths.extend(root.rglob(pattern))
+    for path in sorted(p for p in paths if p.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8", "replace"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
+    return digest.hexdigest()
+
+
+def _arp_source_identity() -> str:
+    """Identify an ARP tree that git cannot describe, by hashing its source.
+
+    Reached when ``--arp-root`` selects an unpacked or copied checkout with no
+    ``.git``, or git is unavailable. A literal ``"unknown"`` would be worse
+    than useless here: it is a syntactically valid component of a
+    ``required``-policy fingerprint, so every unidentifiable tree would share
+    one identity and two different ARP implementations would compare as the
+    same target -- the same collapse that ``-dirty`` and ``?? newdir/`` caused
+    before. Hash the package source instead, so distinct trees stay distinct.
+    """
+    package_dir = default_arp_root() / "agentic-workflows-v2" / "agentic_v2"
+    if not package_dir.is_dir():
+        raise RuntimeError(
+            f"cannot identify the ARP source tree: {package_dir} does not exist. "
+            "Refusing to run rather than record an unidentifiable target."
+        )
+    return f"nogit+{_hash_source_tree(package_dir)[:16]}"
+
+
 def _arp_revision() -> str:
     """Identify the ARP checkout under test.
 
-    Returns ``<sha>`` for a clean tree, or ``<sha>-dirty+<digest>`` when the
-    working tree differs from HEAD. The digest covers the tracked diff *and*
-    the contents of untracked files, because a bare ``-dirty`` marker gives
-    every modified checkout at the same commit an identical identity -- two
-    genuinely different local versions of ``create_agent``, the workflow YAML,
-    or task assembly would share one fingerprint and compare as the same
-    system. Returns ``"unknown"`` when git is unavailable or this is not a
-    repository, reported rather than silently omitted.
+    Returns ``<sha>`` for a clean tree, ``<sha>-dirty+<digest>`` when the
+    working tree differs from HEAD, or ``nogit+<digest>`` when git cannot
+    describe the tree at all. Every form distinguishes different source: a bare
+    ``-dirty`` marker gave every modified checkout at a commit one identity, and
+    a literal ``"unknown"`` did the same for every non-repository tree, so two
+    genuinely different versions of ``create_agent``, the workflow YAML, or task
+    assembly would have compared as the same system.
     """
     root = default_arp_root()
     revision = _git(root, "rev-parse", "HEAD")
     if revision is None:
-        return "unknown"
+        return _arp_source_identity()
     revision = revision.strip()
 
     # ``--untracked-files=all`` is load-bearing: the default mode collapses a
@@ -148,7 +206,7 @@ def _arp_revision() -> str:
     # and two different new subtrees would fingerprint identically.
     status = _git(root, "status", "--porcelain", "--untracked-files=all")
     if status is None:
-        return "unknown"
+        return _arp_source_identity()
     if not status.strip():
         return revision
 
@@ -424,6 +482,10 @@ class ArpReviewTarget:
             # runs of genuinely different systems produce the same target
             # fingerprint and would be wrongly treated as comparable.
             "arp_revision": _arp_revision(),
+            # This harness's own source: the target integration and the judge
+            # prompt/parsing live here, and nothing else in the manifest covers
+            # them (see harness_source_digest).
+            "harness_source_sha256": harness_source_digest(),
             "arp_workflow": REVIEW_WORKFLOW,
             "arp_step": self._step.name,
             "arp_agent": self._step.agent,
@@ -532,6 +594,10 @@ class ArpRubricGrader:
                 "rubric_sha256": rubric.content_sha256,
                 "judge_model": judge_model_id,
                 "pass_threshold": rubric.pass_threshold,
+                # The judge prompt and the score-parsing rules are this file,
+                # not the rubric: without them in the identity, rewriting how
+                # scores are read leaves the grader name unchanged.
+                "harness_source_sha256": harness_source_digest(),
             },
             sort_keys=True,
         )
