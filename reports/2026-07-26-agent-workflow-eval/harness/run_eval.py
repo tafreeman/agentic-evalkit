@@ -158,6 +158,27 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # --arp-root has to bind the checkout that is actually imported, not just
+    # pick a rubric. Otherwise the run prints one root while ArpReviewTarget and
+    # the revision fingerprint resolve whichever agentic_v2 was already on the
+    # path -- evaluating checkout A's agent against checkout B's rubric and
+    # labelling the result B.
+    if args.arp_root is not None:
+        requested = args.arp_root.resolve()
+        package_parent = requested / "agentic-workflows-v2"
+        if not (package_parent / "agentic_v2").is_dir():
+            print(f"--arp-root does not contain agentic-workflows-v2/agentic_v2: {requested}")
+            return 2
+        sys.path.insert(0, str(package_parent))
+        resolved = default_arp_root().resolve()
+        if resolved != requested:
+            print(
+                "refusing to run: agentic_v2 resolves to a different checkout than "
+                f"--arp-root.\n  --arp-root: {requested}\n  imported:   {resolved}\n"
+                "Run from an environment where the requested checkout is importable."
+            )
+            return 2
+
     arp_root = args.arp_root or default_arp_root()
     rubric_path = args.rubric or default_rubric_path(arp_root)
     if not rubric_path.is_file():

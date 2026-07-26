@@ -142,7 +142,11 @@ def _arp_revision() -> str:
         return "unknown"
     revision = revision.strip()
 
-    status = _git(root, "status", "--porcelain")
+    # ``--untracked-files=all`` is load-bearing: the default mode collapses a
+    # new directory into a single ``?? newdir/`` entry, so hashing what git
+    # reports would cover the directory's name but none of the code inside it,
+    # and two different new subtrees would fingerprint identically.
+    status = _git(root, "status", "--porcelain", "--untracked-files=all")
     if status is None:
         return "unknown"
     if not status.strip():
@@ -157,6 +161,8 @@ def _arp_revision() -> str:
         if line.startswith("??"):
             path = root / entry
             try:
+                # Every ``??`` entry is a file in ``all`` mode; anything else
+                # is recorded as such rather than passed over silently.
                 digest.update(path.read_bytes() if path.is_file() else b"<not-a-file>")
             except OSError:
                 digest.update(b"<unreadable>")
@@ -198,7 +204,12 @@ class Rubric:
     """ARP's YAML rubric: named criteria with weights, levels, and thresholds."""
 
     def __init__(self, path: Path) -> None:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        #: Digest of the rubric file as loaded. ``rubric_id`` is only a stem and
+        #: a self-declared version, so two different files can share it; this
+        #: pins the actual scoring criteria that graded a run.
+        self.content_sha256 = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        data = yaml.safe_load(raw)
         self.criteria = data["criteria"]
         self.thresholds = data.get("thresholds", {})
         self.metadata = data.get("metadata", {})
@@ -499,9 +510,15 @@ class ArpReviewTarget:
 
 
 class ArpRubricGrader:
-    """Scores the reviewer agent's output against ARP's agent.yaml rubric via an LLM judge."""
+    """Scores the reviewer agent's output against ARP's agent.yaml rubric via an LLM judge.
 
-    name = "arp-agent-rubric@1"
+    ``name`` is not a constant. It carries a digest of the rubric's contents and
+    the judge model, because ``compare_runs`` decides whether two runs used the
+    same scoring system by comparing this string and nothing else -- not the
+    per-grade ``rubric_id``, not the evidence. A fixed name would let a run
+    graded by a different rubric (the ``--rubric`` flag makes that a supported
+    operation) or a different judge be accepted as comparable.
+    """
 
     def __init__(self, rubric: Rubric, judge_model_id: str) -> None:
         from agentic_v2.langchain.models import get_chat_model
@@ -509,6 +526,17 @@ class ArpRubricGrader:
         self._rubric = rubric
         self._judge_model_id = judge_model_id
         self._judge = get_chat_model(judge_model_id, temperature=0.0)
+        config = json.dumps(
+            {
+                "rubric_id": rubric.rubric_id,
+                "rubric_sha256": rubric.content_sha256,
+                "judge_model": judge_model_id,
+                "pass_threshold": rubric.pass_threshold,
+            },
+            sort_keys=True,
+        )
+        digest = hashlib.sha256(config.encode("utf-8")).hexdigest()[:12]
+        self.name = f"arp-agent-rubric@1+{digest}"
 
     def _prompt(self, sample: EvalSample, review: str) -> str:
         """Build the judge prompt from **complete** inputs.
