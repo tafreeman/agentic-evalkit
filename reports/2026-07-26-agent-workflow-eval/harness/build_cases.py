@@ -180,9 +180,7 @@ def collect(run_dir: Path) -> tuple[dict[str, list[dict[str, object]]], Counter[
     return by_lang, rejected, candidates
 
 
-def select(
-    by_lang: dict[str, list[dict[str, object]]], target: int
-) -> list[dict[str, object]]:
+def select(by_lang: dict[str, list[dict[str, object]]], target: int) -> list[dict[str, object]]:
     """Round-robin across languages for a diverse suite, largest-first within a language.
 
     The suite is whatever survives extraction: if fewer than *target* clean

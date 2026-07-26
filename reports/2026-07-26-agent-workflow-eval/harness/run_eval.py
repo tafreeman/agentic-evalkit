@@ -26,6 +26,10 @@ from agentic_evalkit.artifacts import ArtifactStore
 from agentic_evalkit.cli.runs import write_canonical_report
 from agentic_evalkit.models import DatasetRef, EvalRunManifest, EvalRunResult
 from agentic_evalkit.models.runs import DatasetSelection
+from agentic_evalkit.provenance import (
+    compute_code_fingerprint,
+    compute_environment_fingerprint,
+)
 from agentic_evalkit.runner import EvalRunner
 
 TARGET_NAME = "arp-reviewer-agent"
@@ -72,9 +76,7 @@ def build_stats(
     in_tok = sum(s.execution.input_tokens or 0 for s in samples)
     out_tok = sum(s.execution.output_tokens or 0 for s in samples)
     judge_in = sum(
-        int(s.grade.evidence.get("judge_input_tokens") or 0)
-        for s in samples
-        if s.grade is not None
+        int(s.grade.evidence.get("judge_input_tokens") or 0) for s in samples if s.grade is not None
     )
     judge_out = sum(
         int(s.grade.evidence.get("judge_output_tokens") or 0)
@@ -179,16 +181,20 @@ def main(argv: list[str] | None = None) -> int:
         attempts=1,
         timeout_seconds=args.timeout,
         concurrency=args.concurrency,
+        # evalkit's own provenance helpers -- which interpreter/platform and
+        # which evalkit build produced the run. Left null, the canonical report
+        # silently under-describes what it can be compared against.
+        environment_fingerprint=compute_environment_fingerprint(),
+        code_fingerprint=compute_code_fingerprint(),
     )
 
     print(f"arp_root={arp_root}")
     print(f"rubric={rubric_path} ({rubric.rubric_id})")
-    print(f"agent={target.provenance['arp_agent']} "
-          f"prompt={target.provenance['arp_prompt_qualified_version']}")
     print(
-        f"cases={limit} target={TARGET_MODEL} judge={JUDGE_MODEL} "
-        f"concurrency={args.concurrency}"
+        f"agent={target.provenance['arp_agent']} "
+        f"prompt={target.provenance['arp_prompt_qualified_version']}"
     )
+    print(f"cases={limit} target={TARGET_MODEL} judge={JUDGE_MODEL} concurrency={args.concurrency}")
 
     result, wall_clock_s = asyncio.run(
         run(

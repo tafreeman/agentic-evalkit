@@ -25,6 +25,7 @@ import hashlib
 import json
 import math
 import re
+import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,6 +109,38 @@ def default_rubric_path(arp_root: Path | None = None) -> Path:
     return (arp_root or default_arp_root()) / RUBRIC_RELATIVE_PATH
 
 
+def _arp_revision() -> str:
+    """Identify the ARP checkout under test: ``<sha>`` or ``<sha>-dirty``.
+
+    Returns ``"unknown"`` when the checkout is not a git repository or git is
+    unavailable -- reported honestly rather than silently omitted, because a
+    fingerprint that quietly drops this field would claim more comparability
+    than it can back.
+    """
+    root = default_arp_root()
+    try:
+        head = subprocess.run(  # noqa: S603 - fixed argv, no shell, local driver
+            ["git", "-C", str(root), "rev-parse", "HEAD"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if head.returncode != 0:
+            return "unknown"
+        revision = head.stdout.strip()
+        status = subprocess.run(  # noqa: S603 - fixed argv, no shell, local driver
+            ["git", "-C", str(root), "status", "--porcelain"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return f"{revision}-dirty" if status.stdout.strip() else revision
+
+
 def _is_retryable(error: Exception) -> bool:
     text = f"{type(error).__name__}: {error}"
     return any(marker in text for marker in _RETRYABLE)
@@ -152,9 +185,7 @@ class Rubric:
         self.names = [str(c["name"]) for c in self.criteria]
         #: Highest level the rubric itself defines, so the 0-1 normalization
         #: below is read off the YAML rather than hardcoded.
-        self.max_level = float(
-            max(int(level) for c in self.criteria for level in c["levels"])
-        )
+        self.max_level = float(max(int(level) for c in self.criteria for level in c["levels"]))
 
     def prompt_block(self) -> str:
         lines = []
@@ -224,9 +255,7 @@ class JsonlCatalog:
             yield SourceRecord(
                 row_id=str(row["case_id"]),
                 data=row,
-                digest=hashlib.sha256(
-                    json.dumps(row, sort_keys=True).encode("utf-8")
-                ).hexdigest(),
+                digest=hashlib.sha256(json.dumps(row, sort_keys=True).encode("utf-8")).hexdigest(),
             )
 
 
@@ -302,9 +331,7 @@ class ArpReviewTarget:
         workflow = load_workflow_config(REVIEW_WORKFLOW)
         matching = [step for step in workflow.steps if step.name == REVIEW_STEP]
         if not matching:
-            raise RuntimeError(
-                f"ARP workflow {REVIEW_WORKFLOW!r} defines no {REVIEW_STEP!r} step"
-            )
+            raise RuntimeError(f"ARP workflow {REVIEW_WORKFLOW!r} defines no {REVIEW_STEP!r} step")
         self._step = matching[0]
         self._model_id = model_id
 
@@ -320,8 +347,7 @@ class ArpReviewTarget:
             f"file {prompt_path.name}": normalize_prompt_text(
                 prompt_path.read_text(encoding="utf-8")
             ),
-            f"role of {self._step.agent}": load_agent_system_prompt(self._step.agent)
-            or "",
+            f"role of {self._step.agent}": load_agent_system_prompt(self._step.agent) or "",
         }
         for label, text in checks.items():
             if compute_content_hash(text) != record.content_sha256:
@@ -359,6 +385,12 @@ class ArpReviewTarget:
         )
         self._declared_outputs = [key for key in self._step.outputs if key != "raw_response"]
         self.provenance: dict[str, Any] = {
+            # The ARP checkout itself is part of the system under test: the same
+            # prompt fingerprint can sit on top of a different create_agent,
+            # workflow YAML, or task-assembly implementation. Without this, two
+            # runs of genuinely different systems produce the same target
+            # fingerprint and would be wrongly treated as comparable.
+            "arp_revision": _arp_revision(),
             "arp_workflow": REVIEW_WORKFLOW,
             "arp_step": self._step.name,
             "arp_agent": self._step.agent,
@@ -377,9 +409,12 @@ class ArpReviewTarget:
                 "single step, no workflow DAG, no bound tools"
             ),
         }
-        self.fingerprint = "sha256:" + hashlib.sha256(
-            json.dumps(self.provenance, sort_keys=True).encode("utf-8")
-        ).hexdigest()
+        self.fingerprint = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(self.provenance, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+        )
 
     async def execute(
         self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
@@ -498,9 +533,18 @@ class ArpRubricGrader:
             value = raw_scores.get(name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 continue
-            if not math.isfinite(float(value)):
+            number = float(value)
+            if not math.isfinite(number):
                 continue
-            scores[name] = max(0.0, min(self._rubric.max_level, float(value)))
+            # Out-of-range and fractional values are *rejected*, not repaired.
+            # Clamping turned a judge that answered "50" for every criterion
+            # into a perfect score, and a negative into a legitimate zero --
+            # manufacturing a gradeable result out of a malformed one. The
+            # prompt asks for integer levels 0-5; anything else means the
+            # judge did not answer the question, which is what ABSTAIN is for.
+            if number != int(number) or not 0 <= number <= self._rubric.max_level:
+                continue
+            scores[name] = number
         missing = [name for name in self._rubric.names if name not in scores]
         return scores, missing
 
@@ -523,9 +567,7 @@ class ArpRubricGrader:
             created_at=datetime.now(UTC),
         )
 
-    async def grade(
-        self, sample: EvalSample, execution: NormalizedExecutionResult
-    ) -> GradeResult:
+    async def grade(self, sample: EvalSample, execution: NormalizedExecutionResult) -> GradeResult:
         from langchain_core.messages import HumanMessage
 
         review = str((execution.output or {}).get("review", ""))
@@ -549,14 +591,8 @@ class ArpRubricGrader:
                 },
             )
 
-        response = await _with_retry(
-            lambda: self._judge.ainvoke([HumanMessage(content=prompt)])
-        )
-        raw = (
-            response.content
-            if isinstance(response.content, str)
-            else str(response.content)
-        )
+        response = await _with_retry(lambda: self._judge.ainvoke([HumanMessage(content=prompt)]))
+        raw = response.content if isinstance(response.content, str) else str(response.content)
         usage = getattr(response, "usage_metadata", None) or {}
         judge_tokens = {
             "judge_model": self._judge_model_id,
@@ -588,9 +624,10 @@ class ArpRubricGrader:
                 sample,
                 GradeStatus.ABSTAIN,
                 {
-                    "reason": "judge omitted or non-numerically scored rubric criteria",
+                    "reason": "judge omitted or unusably scored rubric criteria",
                     "missing_criteria": missing,
                     "criterion_scores": scores,
+                    "judge_raw_scores": parsed["scores"],
                     "rationale": rationale,
                     **judge_tokens,
                 },
@@ -603,6 +640,11 @@ class ArpRubricGrader:
             {
                 "criterion_scores": scores,
                 "missing_criteria": [],
+                # The judge's scores exactly as parsed, so a reader can verify
+                # no value was reshaped on the way in. Without this, a score of
+                # 5.0 in the record is indistinguishable from a rejected-or-
+                # repaired 50, and the grader's own honesty is unauditable.
+                "judge_raw_scores": parsed["scores"],
                 "pass_threshold": self._rubric.pass_threshold,
                 "rationale": rationale,
                 **judge_tokens,
