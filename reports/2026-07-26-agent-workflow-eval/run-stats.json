@@ -1,43 +1,61 @@
 {
-  "run_id": "9895486e028d44ef9bbaa9df912b0e9c",
-  "report_path": "C:\\Users\\tandf\\source\\agentic-evalkit\\reports\\2026-07-26-agent-workflow-eval\\9895486e028d44ef9bbaa9df912b0e9c.json",
-  "wall_clock_seconds": 1026.88,
+  "run_id": "fb694424348643379922f0bd9c22f348",
+  "report_path": "C:\\Users\\tandf\\AppData\\Local\\Temp\\aek-rerun\\fb694424348643379922f0bd9c22f348.json",
+  "wall_clock_seconds": 1574.62,
   "total": 48,
-  "passed": 48,
+  "passed": 47,
   "failed": 0,
   "errors": 0,
-  "timeouts": 0,
+  "timeouts": 1,
   "abstained": 0,
-  "target_input_tokens": 36648,
-  "target_output_tokens": 212174,
-  "judge_input_tokens": 98182,
-  "judge_output_tokens": 35703,
+  "target_input_tokens": 131203,
+  "target_output_tokens": 364072,
+  "judge_input_tokens": 146188,
+  "judge_output_tokens": 43632,
   "cost_usd": null,
   "cost_note": "unverified - NVIDIA endpoint exposes no per-token price",
   "target_model": "nvidia:nvidia/nemotron-3-super-120b-a12b",
   "judge_model": "nvidia:deepseek-ai/deepseek-v4-flash",
+  "target_fingerprint": "sha256:d4e4a7e8592a8655b45386471a605bec395ba267381f733c29c7e2c968255188",
+  "target_provenance": {
+    "arp_workflow": "code_review",
+    "arp_step": "review_code",
+    "arp_agent": "tier2_reviewer",
+    "arp_bound_tools": [],
+    "arp_declared_outputs": [
+      "review"
+    ],
+    "arp_temperature": 0.0,
+    "arp_prompt_name": "reviewer",
+    "arp_prompt_source": "file:reviewer.md",
+    "arp_prompt_declared_version": "v1",
+    "arp_prompt_qualified_version": "v1@f1555690",
+    "arp_prompt_sha256": "f15556901329215b30e01da8324976a8755621c2700b0d2358a5fb8fdd5ebd02",
+    "model_id": "nvidia:nvidia/nemotron-3-super-120b-a12b",
+    "integration": "agentic_v2.langchain.agents.create_agent -> LangGraph react agent; task text from agentic_v2.langchain.graph_wiring.build_task_description; single step, no workflow DAG, no bound tools"
+  },
   "criterion_means": {
-    "Correctness": 4.708,
-    "Completeness": 4.562,
-    "Clarity": 4.938,
+    "Correctness": 4.638,
+    "Completeness": 4.553,
+    "Clarity": 4.957,
     "Relevance": 5.0,
-    "Efficiency": 4.938,
+    "Efficiency": 4.915,
     "Safety": 5.0
   },
   "criterion_counts": {
-    "Correctness": 48,
-    "Completeness": 48,
-    "Clarity": 48,
-    "Relevance": 48,
-    "Efficiency": 48,
-    "Safety": 48
+    "Correctness": 47,
+    "Completeness": 47,
+    "Clarity": 47,
+    "Relevance": 47,
+    "Efficiency": 47,
+    "Safety": 47
   },
   "criterion_pass_at_4plus": {
-    "Correctness": 46,
+    "Correctness": 42,
     "Completeness": 45,
     "Clarity": 47,
-    "Relevance": 48,
+    "Relevance": 47,
     "Efficiency": 47,
-    "Safety": 48
+    "Safety": 47
   }
 }
