@@ -1,0 +1,43 @@
+{
+  "run_id": "9895486e028d44ef9bbaa9df912b0e9c",
+  "report_path": "C:\\Users\\tandf\\source\\agentic-evalkit\\reports\\2026-07-26-agent-workflow-eval\\9895486e028d44ef9bbaa9df912b0e9c.json",
+  "wall_clock_seconds": 1026.88,
+  "total": 48,
+  "passed": 48,
+  "failed": 0,
+  "errors": 0,
+  "timeouts": 0,
+  "abstained": 0,
+  "target_input_tokens": 36648,
+  "target_output_tokens": 212174,
+  "judge_input_tokens": 98182,
+  "judge_output_tokens": 35703,
+  "cost_usd": null,
+  "cost_note": "unverified - NVIDIA endpoint exposes no per-token price",
+  "target_model": "nvidia:nvidia/nemotron-3-super-120b-a12b",
+  "judge_model": "nvidia:deepseek-ai/deepseek-v4-flash",
+  "criterion_means": {
+    "Correctness": 4.708,
+    "Completeness": 4.562,
+    "Clarity": 4.938,
+    "Relevance": 5.0,
+    "Efficiency": 4.938,
+    "Safety": 5.0
+  },
+  "criterion_counts": {
+    "Correctness": 48,
+    "Completeness": 48,
+    "Clarity": 48,
+    "Relevance": 48,
+    "Efficiency": 48,
+    "Safety": 48
+  },
+  "criterion_pass_at_4plus": {
+    "Correctness": 46,
+    "Completeness": 45,
+    "Clarity": 47,
+    "Relevance": 48,
+    "Efficiency": 47,
+    "Safety": 48
+  }
+}
