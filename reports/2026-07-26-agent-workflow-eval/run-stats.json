@@ -1,0 +1,63 @@
+{
+  "run_id": "e2f77bdddafc4b74b324a57851587317",
+  "report_path": "C:\\Users\\tandf\\AppData\\Local\\Temp\\aek-rerun6\\e2f77bdddafc4b74b324a57851587317.json",
+  "wall_clock_seconds": 1268.61,
+  "total": 48,
+  "passed": 48,
+  "failed": 0,
+  "errors": 0,
+  "timeouts": 0,
+  "abstained": 0,
+  "target_input_tokens": 133415,
+  "target_output_tokens": 365822,
+  "judge_input_tokens": 129978,
+  "judge_output_tokens": 44450,
+  "cost_usd": null,
+  "cost_note": "unverified - NVIDIA endpoint exposes no per-token price",
+  "target_model": "nvidia:nvidia/nemotron-3-super-120b-a12b",
+  "judge_model": "nvidia:deepseek-ai/deepseek-v4-flash",
+  "target_fingerprint": "sha256:2a8fe8b0fdcbd41f81c1c2e31fdfe46ff2c6cf0bf7d6e6fa3fbae085624e1b16",
+  "target_provenance": {
+    "arp_revision": "872d723a5899ecb82fc99549bf24b5673450750a-dirty+cec21bca21f8",
+    "harness_source_sha256": "398e74c90933fb378253ec6b40dd4fa1bf884b1d91f4f68db724e18d70db144b",
+    "arp_workflow": "code_review",
+    "arp_step": "review_code",
+    "arp_agent": "tier2_reviewer",
+    "arp_bound_tools": [],
+    "arp_declared_outputs": [
+      "review"
+    ],
+    "arp_temperature": 0.0,
+    "arp_prompt_name": "reviewer",
+    "arp_prompt_source": "file:reviewer.md",
+    "arp_prompt_declared_version": "v1",
+    "arp_prompt_qualified_version": "v1@f1555690",
+    "arp_prompt_sha256": "f15556901329215b30e01da8324976a8755621c2700b0d2358a5fb8fdd5ebd02",
+    "model_id": "nvidia:nvidia/nemotron-3-super-120b-a12b",
+    "integration": "agentic_v2.langchain.agents.create_agent -> LangGraph react agent; task text from agentic_v2.langchain.graph_wiring.build_task_description; single step, no workflow DAG, no bound tools"
+  },
+  "criterion_means": {
+    "Correctness": 4.583,
+    "Completeness": 4.5,
+    "Clarity": 4.958,
+    "Relevance": 5.0,
+    "Efficiency": 4.979,
+    "Safety": 5.0
+  },
+  "criterion_counts": {
+    "Correctness": 48,
+    "Completeness": 48,
+    "Clarity": 48,
+    "Relevance": 48,
+    "Efficiency": 48,
+    "Safety": 48
+  },
+  "criterion_pass_at_4plus": {
+    "Correctness": 45,
+    "Completeness": 48,
+    "Clarity": 47,
+    "Relevance": 48,
+    "Efficiency": 48,
+    "Safety": 48
+  }
+}

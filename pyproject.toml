@@ -89,6 +89,10 @@ show_missing = true
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+# reports/ holds pinned run evidence: the committed harness is the exact code
+# that produced the committed outputs, so it is never edited after the run —
+# not even for lint. Library standards apply to src/ and tests/, not evidence.
+extend-exclude = ["reports"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "ASYNC", "S", "B", "A", "C4", "SIM", "TCH", "RUF"]
