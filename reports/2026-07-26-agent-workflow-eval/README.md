@@ -1,9 +1,15 @@
 # ARP agent-workflow eval — 2026-07-26
 
-A real evaluation run: 48 code-review tasks executed against an
-`agentic-runtime-platform` (ARP) agent and graded with ARP's own YAML rubric,
-driven by `agentic-evalkit`'s `EvalRunner`. Every number on this page came out
-of the run recorded in `9895486e028d44ef9bbaa9df912b0e9c.json`.
+A real evaluation run: 48 code-review tasks executed against a reviewer-prompted
+model routed through `agentic-runtime-platform`'s (ARP) model layer and graded
+with ARP's own YAML rubric, driven by `agentic-evalkit`'s `EvalRunner`. Every
+number on this page came out of the run recorded in
+`9895486e028d44ef9bbaa9df912b0e9c.json`.
+
+> **Amended 2026-07-26 after post-publication review.** Caveats 6–8 below were
+> added and the system-under-test description was tightened in response to
+> external review of PR #29. The harness and run outputs are unchanged — they
+> are the pinned evidence exactly as run.
 
 ## Headline numbers
 
@@ -26,10 +32,13 @@ Concurrency 4, 1 attempt per sample, 300 s per-sample timeout.
 
 ## What was evaluated
 
-**System under test:** ARP's Reviewer Agent — the platform's code-review role
-("expert at code review and security analysis"), invoked through ARP's own
-LangChain model layer (`agentic_v2.langchain.models.get_chat_model`), not a
-re-implementation.
+**System under test:** ARP's target model under a reviewer system prompt,
+resolved and invoked through ARP's own LangChain model layer
+(`agentic_v2.langchain.models.get_chat_model`). The system prompt mirrors the
+Reviewer Agent's role ("expert at code review and security analysis") but is
+defined in the harness — the run does **not** construct ARP's Reviewer Agent,
+workflow graph, or tool wiring (see caveat 6). What these numbers characterize
+is the prompted base model on ARP's routing path, not the full agent stack.
 
 **Task:** given one real source file, produce a code review identifying
 correctness bugs, missing functionality, code-quality problems, and security
@@ -115,6 +124,27 @@ These matter for reading the 100% pass rate correctly.
    daily quota exhausted), one 44/48 (transient NVIDIA 503s). Only the complete
    48/48 run is published here. The transient failures were fixed with bounded
    retry (4 attempts, linear backoff) on 429/503, which is in the harness.
+6. **The system under test is a prompted model, not ARP's full Reviewer
+   Agent.** The harness sends a locally-defined reviewer system prompt to the
+   model resolved by ARP's `get_chat_model`; it never constructs ARP's agent
+   configuration, workflow graph, or tools. The pass rate supports claims about
+   the reviewer-prompted base model on ARP's routing path — not about the
+   Reviewer Agent as deployed inside ARP workflows.
+7. **The judge graded truncated inputs on a third of the suite.** The judge
+   prompt slices sources to 4,000 chars and reviews to 6,000
+   (`arp_eval_harness.py`, `_prompt`): 15 of 48 source files exceed the source
+   slice, and one review (`arp-fsgen-041`) exceeds the review slice. Several
+   recorded rationales penalize "truncated" inputs — those deductions measure
+   harness truncation, not review quality. Scores on the 15 affected cases
+   should be read with that bias in mind.
+8. **The grader renormalizes over present criteria instead of abstaining.** If
+   the judge returns valid JSON but omits a criterion, the weighted score is
+   computed over the criteria present and a PASS/FAIL is still emitted
+   (`missing_criteria` is recorded in evidence but does not gate). **This did
+   not affect the published run** — all 48 samples have zero missing criteria,
+   verified from the canonical JSON — but a re-run with a different judge could
+   silently inflate scores through this path. A fixed harness should abstain
+   when any criterion is missing.
 
 ## Reproducing
 
@@ -141,6 +171,12 @@ agentic-evalkit report 9895486e028d44ef9bbaa9df912b0e9c.json --format html
 | `build_cases.py` | Extracts the suite from ARP's `runs/default/` logs |
 | `arp_eval_harness.py` | Catalog, adapter, ARP target, rubric grader |
 | `run_eval.py` | Builds the manifest and drives `EvalRunner` |
+
+**Before running:** `RUBRIC_PATH` in `harness/arp_eval_harness.py` is an
+absolute path pinned to the machine that produced this run. Edit it to point at
+your ARP checkout's `agentic-v2-eval/src/agentic_v2_eval/rubrics/agent.yaml`
+first — the harness is committed exactly as run, so it is not edited here even
+to parameterize this.
 
 Both packages must be importable by one interpreter. ARP's venv plus
 `PYTHONPATH` pointing at evalkit's `src/` works without installing anything:
