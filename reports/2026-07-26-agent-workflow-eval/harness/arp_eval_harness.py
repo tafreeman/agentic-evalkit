@@ -109,36 +109,58 @@ def default_rubric_path(arp_root: Path | None = None) -> Path:
     return (arp_root or default_arp_root()) / RUBRIC_RELATIVE_PATH
 
 
-def _arp_revision() -> str:
-    """Identify the ARP checkout under test: ``<sha>`` or ``<sha>-dirty``.
-
-    Returns ``"unknown"`` when the checkout is not a git repository or git is
-    unavailable -- reported honestly rather than silently omitted, because a
-    fingerprint that quietly drops this field would claim more comparability
-    than it can back.
-    """
-    root = default_arp_root()
+def _git(root: Path, *args: str) -> str | None:
+    """Run a read-only git command in ``root``; ``None`` if it fails."""
     try:
-        head = subprocess.run(  # noqa: S603 - fixed argv, no shell, local driver
-            ["git", "-C", str(root), "rev-parse", "HEAD"],  # noqa: S607
+        done = subprocess.run(  # noqa: S603 - fixed argv, no shell, local driver
+            ["git", "-C", str(root), *args],  # noqa: S607
             capture_output=True,
             text=True,
-            timeout=15,
-            check=False,
-        )
-        if head.returncode != 0:
-            return "unknown"
-        revision = head.stdout.strip()
-        status = subprocess.run(  # noqa: S603 - fixed argv, no shell, local driver
-            ["git", "-C", str(root), "status", "--porcelain"],  # noqa: S607
-            capture_output=True,
-            text=True,
-            timeout=15,
+            timeout=30,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def _arp_revision() -> str:
+    """Identify the ARP checkout under test.
+
+    Returns ``<sha>`` for a clean tree, or ``<sha>-dirty+<digest>`` when the
+    working tree differs from HEAD. The digest covers the tracked diff *and*
+    the contents of untracked files, because a bare ``-dirty`` marker gives
+    every modified checkout at the same commit an identical identity -- two
+    genuinely different local versions of ``create_agent``, the workflow YAML,
+    or task assembly would share one fingerprint and compare as the same
+    system. Returns ``"unknown"`` when git is unavailable or this is not a
+    repository, reported rather than silently omitted.
+    """
+    root = default_arp_root()
+    revision = _git(root, "rev-parse", "HEAD")
+    if revision is None:
         return "unknown"
-    return f"{revision}-dirty" if status.stdout.strip() else revision
+    revision = revision.strip()
+
+    status = _git(root, "status", "--porcelain")
+    if status is None:
+        return "unknown"
+    if not status.strip():
+        return revision
+
+    # Hash what is actually different, not merely that something is.
+    digest = hashlib.sha256()
+    digest.update((_git(root, "diff", "HEAD") or "").encode("utf-8", "replace"))
+    for line in sorted(status.splitlines()):
+        entry = line[3:].strip().strip('"')
+        digest.update(entry.encode("utf-8", "replace"))
+        if line.startswith("??"):
+            path = root / entry
+            try:
+                digest.update(path.read_bytes() if path.is_file() else b"<not-a-file>")
+            except OSError:
+                digest.update(b"<unreadable>")
+    return f"{revision}-dirty+{digest.hexdigest()[:12]}"
 
 
 def _is_retryable(error: Exception) -> bool:

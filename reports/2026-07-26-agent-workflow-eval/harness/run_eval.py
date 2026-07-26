@@ -181,6 +181,12 @@ def main(argv: list[str] | None = None) -> int:
         attempts=1,
         timeout_seconds=args.timeout,
         concurrency=args.concurrency,
+        # The manifest is the field evalkit's own compare_runs reads to decide
+        # whether two runs are comparable, and it treats two nulls as a match --
+        # so a fingerprint recorded only in run-stats.json or per-execution
+        # metadata is invisible to the gate that exists to use it. Pin it here.
+        target_fingerprint_policy="required",
+        target_fingerprint=target.fingerprint,
         # evalkit's own provenance helpers -- which interpreter/platform and
         # which evalkit build produced the run. Left null, the canonical report
         # silently under-describes what it can be compared against.
