@@ -10,7 +10,7 @@ Host repositories need a reusable way to evaluate grounded question
 answering: does an answer cite real documents from a trusted corpus, quote
 them verbatim, cover all required evidence, and avoid echoing planted
 do-not-cite distractor tokens? This is the NIST AREP grounded-citation
-probe — three orthogonal axes: faithfulness (anti-hallucination),
+probe — three independent axes: faithfulness (anti-hallucination),
 completeness (anti-cherry-pick), sufficiency (anti-overreach) — and the
 eval-validity literature shows scoring defects (weak verifiers, empty
 responses counted as success, free-form numeric LLM ratings) distort

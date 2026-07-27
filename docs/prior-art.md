@@ -33,7 +33,7 @@ Every framework above solves the eval **workflow** problem well. This
 package exists for the eval **validity** problem — being *structurally hard
 to overclaim a result*. On 2026-07-11 we checked each framework's primary
 documentation for the five validity controls this package treats as
-load-bearing; none documents any of them as a first-class concept:
+load-bearing; none documents any of them as a core concept:
 
 | Validity control | Here | promptfoo / Inspect / DeepEval / Braintrust / LangSmith |
 |---|---|---|
@@ -58,7 +58,7 @@ This comparison only means something if it cuts both ways:
 - **Frontier-style agent evaluations with heavy sandboxing**, or an
   ecosystem standard backed by a safety institute — **Inspect** is the
   serious alternative and the closest overlap. If the calibration/
-  provenance/contamination controls above ever land there as first-class
+  provenance/contamination controls above ever land there as built-in
   features, the build-vs-buy math for this package should be revisited —
   that is this page's supersession trigger.
 - **A large off-the-shelf RAG/agent metric library in pytest** — **DeepEval**.
@@ -90,6 +90,6 @@ Build. Three reasons, in order of weight:
 
 Revisit this page if (a) Inspect or another maintained framework ships
 calibration-gated judging, provenance-gated comparison, and typed
-operational/task outcome separation as first-class features, or (b) this
+operational/task outcome separation as built-in features, or (b) this
 package's maintenance cost starts crowding out the validity work that
 justifies it.

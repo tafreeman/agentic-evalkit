@@ -65,9 +65,8 @@ judging, or heuristic patch inspection can honestly make that claim.
 Because of that, the harness boundary is explicit and typed everywhere a
 capability might be missing. `UnavailableHarnessExecutor`
 (`agentic_evalkit.benchmarks.harness`) is the zero-extra fallback: a
-deterministic, production-safe `HarnessExecutor` that always returns a
-typed `unavailable` `HarnessResult` naming the missing capability, never a
-fabricated pass/fail. The design's own words: *"Generic rubric or
+`HarnessExecutor` that always returns a typed `unavailable` `HarnessResult`
+naming the missing capability, never a fabricated pass/fail. The design's own words: *"Generic rubric or
 similarity scoring must never be labeled `SWE-bench resolved`."*
 
 ```python

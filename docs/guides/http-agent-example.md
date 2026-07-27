@@ -97,8 +97,8 @@ from agentic_evalkit.graders.composite import SchemaGrader
 grader = SchemaGrader(name="agent-response-schema@1", adapter=TypeAdapter(AgentResponse))
 ```
 
-This is deterministic and instantaneous — no network call, no model
-inference — and it catches an entire class of integration bugs (a
+This always gives the same result for the same input, and it's
+instantaneous — no network call, no model inference — and it catches an entire class of integration bugs (a
 malformed response, a missing field, a wrong type) before any more
 expensive check runs. See [the graders guide](graders.md) for where a
 schema check sits in the objective-first evidence order, and how to layer

@@ -13,7 +13,7 @@ checks first, subjective judgement last — and to prevent three specific
 distortions:
 
 1. A strong average silently **compensating for a failed hard requirement**
-   (a solution that is elegant but does not compile).
+   (a solution that reads well but does not compile).
 2. A **subjective LLM judge** being trusted to gate a release without evidence
    that it agrees with humans on held-out data.
 3. A component that **errored** being scored as if it had legitimately earned
@@ -27,7 +27,7 @@ distortions:
   whitespace collapsing, opt-in case folding, and numeric canonicalization.
 - **Atomic rubric criteria.** `RubricCriterion` / `Rubric` reject negative
   weights, duplicate criterion IDs, and zero-sum weights at construction, and
-  require any broad/holistic criterion to set `requires_evidence=True`, so a
+  require any broad, whole-response criterion to set `requires_evidence=True`, so a
   vague criterion cannot silently carry weight.
 - **Noncompensable hard gates.** `CompositeGrader` computes a score as the
   weighted mean over the **available numeric** sub-scores only; a failed hard
@@ -69,7 +69,7 @@ distortions:
   only runs when the judge's result could actually approve a release, so
   a judge that's only ever giving an advisory opinion gets asked once per
   question instead of twice.
-- **Abstention is first-class.** A grader that cannot responsibly score
+- **Abstention is its own outcome.** A grader that cannot responsibly score
   abstains as a distinct outcome, separate from pass and fail.
 
 ## Alternatives
@@ -104,7 +104,7 @@ distortions:
   `test_failed_hard_gate_cannot_be_averaged_away`, plus error-not-silent-zero
   and available-only weighted-mean behavior.
 - `tests/unit/graders/test_rubric.py` covers rejection of negative/zero-sum
-  weights, duplicate IDs, and evidence-free holistic criteria.
+  weights, duplicate IDs, and evidence-free broad criteria.
 - `tests/unit/graders/test_judge.py` includes the verbatim
   `test_expired_calibration_cannot_gate`, plus fingerprint-mismatch,
   insufficient-sample, position-bias, and abstention cases — each asserting

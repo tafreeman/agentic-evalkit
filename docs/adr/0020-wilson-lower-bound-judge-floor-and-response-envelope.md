@@ -174,7 +174,7 @@ Every wire change is additive; `schema_version` stays `"1"` (ADR-0002).
   only when applicable, mirroring the ADR-0018 convention. The transport message
   and the rationale are redacted and bounded before persistence.
 - A future real judge integration can now surface refusals, timeouts, and rate
-  limits as first-class non-gating outcomes rather than as raises or fabricated
+  limits as distinct non-gating outcomes rather than as raises or fabricated
   verdicts, closing the operational-vs-task conflation ADR-0008 warns against at
   the judge boundary specifically.
 - The runner-level amendment makes any raising `ExecutionTarget`/`Grader`
@@ -240,7 +240,7 @@ issue-on-every-sample position-bias probe, per ADR-0007's own Supersession
 clause requiring a superseding ADR with new calibration evidence for any change
 to the floor or the position-bias policy. ADR-0007's other conditions
 (fingerprint equality, expiry, minimum held-out counts, per-artifact threshold,
-abstention as first-class, bounded parse retries) stand unchanged. A future
+abstention as its own outcome, bounded parse retries) stand unchanged. A future
 change to the Wilson confidence level, the project floor values, the
 `JudgeResponseStatus` vocabulary, the status-to-`GradeStatus` mapping, the
 probe-issuance condition, or the persisted judge-evidence keys must supersede

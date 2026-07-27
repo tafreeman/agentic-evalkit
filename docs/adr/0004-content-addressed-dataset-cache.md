@@ -27,7 +27,7 @@ should never be silently treated as a cache miss and silently re-fetched,
 since re-fetching a supposedly-immutable revision that produced corrupt
 bytes may mask a real problem rather than fix it).
 
-The framework runs on Windows as a first-class platform (per the Windows CI
+The framework treats Windows as a fully supported platform (per the Windows CI
 matrix added in Task 1), and dataset caching is exactly the kind of
 filesystem-heavy code that behaves differently across platforms: file
 replacement semantics, locking, and concurrent-writer behavior are not
