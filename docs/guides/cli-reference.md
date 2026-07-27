@@ -169,8 +169,8 @@ agentic-evalkit compare run-a.json run-b.json \
 ```
 
 `compare` reports the paired success-rate estimate and its 2.5th and 97.5th
-bootstrap percentiles. The bootstrap is deterministic for the same inputs and
-seed. `--bootstrap-samples` accepts values from 100 through 10,000 and defaults
+bootstrap percentiles. Given the same inputs and seed, the bootstrap always
+produces the same result. `--bootstrap-samples` accepts values from 100 through 10,000 and defaults
 to 1,000.
 
 The runs must agree on dataset identity and revision, adapter, grader, target,

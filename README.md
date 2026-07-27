@@ -1,6 +1,6 @@
 # agentic-evalkit
 
-`agentic-evalkit` evaluates whether an AI agent performed well enough — and produces the evidence for that verdict.
+`agentic-evalkit` grades AI agent output against checks you define, and writes up the evidence behind each score.
 
 Use it from the command line or Python to run repeatable evaluations, apply
 objective checks, compare results, and generate reports for review. It can
@@ -9,8 +9,9 @@ them to a specific AI framework.
 
 Objective checks run before optional model-based judging. The package includes
 tested support for calibrated judge evidence while leaving model-provider
-selection to the caller. The built-in reference judge is deterministic and
-advisory only; it cannot approve a release.
+selection to the caller. The built-in reference judge always returns the
+same verdict for the same input, and it's advisory only; it cannot approve
+a release.
 
 **Why not promptfoo, Inspect, DeepEval, Braintrust, or LangSmith?**
 Those tools handle the *workflow* side of evals — running lots of prompts,
@@ -24,8 +25,8 @@ result you get.
 - A fuzzy AI opinion can never override a hard requirement like "the code must compile"
 - Test questions that leaked into the AI's training data get caught before they inflate a score
 
-None of the tools above treat these as first-class problems. Full
-comparison and reasoning: [docs/prior-art.md](docs/prior-art.md).
+None of the tools above solve these problems. Full comparison and
+reasoning: [docs/prior-art.md](docs/prior-art.md).
 
 Start with the [quickstart guide](docs/guides/quickstart.md). Design
 boundaries: [architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md).

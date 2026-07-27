@@ -58,7 +58,7 @@ and redaction behavior, not just a call signature.
 1. **Let graders read target-specific responses directly.** Rejected: it
    couples every grader to every target shape and makes adding a target a
    cross-cutting change.
-2. **A first-class `ArpTarget` inside this package.** Rejected: it would
+2. **A dedicated `ArpTarget` inside this package.** Rejected: it would
    require importing ARP/EK, violating ADR-0001; the callable/HTTP adapters
    already make ARP evaluable from outside with zero repository change, which
    is the stronger property.

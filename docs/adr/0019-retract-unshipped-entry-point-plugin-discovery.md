@@ -64,7 +64,7 @@ repository, and no identified downstream consumer, currently needs.
   adapters (`DatasetProvider.api_version` in
   `agentic_evalkit.datasets.base`, `BenchmarkAdapter.api_version` in
   `agentic_evalkit.benchmarks.base`, and every concrete provider/adapter
-  that declares one) is retained unchanged. It is orthogonal to discovery
+  that declares one) is retained unchanged. It is separate from discovery
   and has its own independent consumers (the structural protocol checks,
   each adapter's own tests).
 - The versioned entry-point group naming convention

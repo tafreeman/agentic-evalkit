@@ -6,7 +6,7 @@ strictly in this order:
 1. authoritative benchmark verifier or state transition;
 2. executable tests;
 3. schema, type, or format validation;
-4. exact or normalized deterministic comparison;
+4. exact or normalized comparison that always gives the same answer for the same input;
 5. documented domain metric;
 6. calibrated model judge;
 7. human review.
@@ -42,7 +42,7 @@ text after the dataset's `####` marker in the reference answer.
 
 Validates `NormalizedExecutionResult.output` against a supplied Pydantic
 `TypeAdapter`. Useful for structured-output agents where "did the system
-return a well-formed response" is itself an objective, deterministic
+return a well-formed response" is itself an objective, repeatable
 check — see [the HTTP agent example](http-agent-example.md), which uses a
 `SchemaGrader` as its objective check.
 
@@ -75,12 +75,13 @@ child's status, score, weight, and gate flag.
 
 ## Rubrics
 
-`Rubric` and `RubricCriterion` express atomic, holistic-scoring criteria:
-every criterion has a stable ID, a binary or bounded scale, an evidence
+`Rubric` and `RubricCriterion` express criteria ranging from atomic
+(narrow, specific) to holistic (broad, whole-response) scoring: every
+criterion has a stable ID, a binary or bounded scale, an evidence
 requirement, a weight, and a hard-gate flag. Duplicate criterion IDs,
 negative weights, broad criteria with no evidence requirement, and rubrics
-whose weights sum to zero are all rejected at construction time. Broad
-holistic scores remain advisory only — they cannot substitute for an
+whose weights sum to zero are all rejected at construction time. Broad,
+whole-response scores remain advisory only — they cannot substitute for an
 authoritative or executable check.
 
 ## Calibrated judges
