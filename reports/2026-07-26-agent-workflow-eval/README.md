@@ -167,9 +167,10 @@ These matter for reading the 48/48 pass rate correctly.
 5. **Earlier runs were discarded, not committed** — one 24/48 (OpenRouter daily
    quota exhausted) and one 44/48 (transient NVIDIA 503s) before the harness was
    fixed. Bounded retry (4 attempts, linear backoff) on 429/503 is in the
-   harness and handled the transient failures; the one timeout in this run
-   exhausted the 300 s per-sample budget rather than erroring, so retry does not
-   apply to it.
+   harness and handled those transient failures. Retry does not apply to
+   timeouts: a sample that exhausts the 300 s per-sample budget has not errored,
+   so it is recorded as a timeout rather than retried. The published run had no
+   timeouts; five of the six runs in caveat 10 did.
 6. **The system under test is ARP's own reviewer agent — and the scope is
    exactly one step of it.** The harness builds the agent with
    `agentic_v2.langchain.agents.create_agent`, the same factory ARP's LangGraph
