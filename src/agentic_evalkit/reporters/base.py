@@ -16,9 +16,15 @@ section 12).
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from agentic_evalkit.models.base import FrozenModel
+from agentic_evalkit.models.execution import (
+    OUTPUT_REF_KEY,
+    OUTPUT_SPILL_ERROR_KEY,
+    OUTPUT_SPILL_FAILED_CODE,
+    is_output_spill_error_record,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,6 +35,14 @@ if TYPE_CHECKING:
     from agentic_evalkit.models.execution import NormalizedExecutionResult
 
 _REDACTED = "[REDACTED]"
+
+#: Exactly the shape ``ArtifactStore`` mints (``artifacts._digest_of``): the
+#: literal ``sha256:`` followed by a 64-character lowercase hex digest. The
+#: redaction sweep exempts ``artifacts["output_ref"]`` from rewriting, and
+#: that exemption is only safe for a value this harness actually produced --
+#: ``artifacts`` is target-controlled, so anything else found under that key
+#: is free-form text that must be swept like the rest of the dict.
+_OUTPUT_REF_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class RedactionPolicy(FrozenModel):
@@ -143,6 +157,63 @@ def _redact_grade(
     return grade.model_copy(update={"evidence": redacted_evidence})
 
 
+def _is_artifact_digest(value: JsonValue | None) -> bool:
+    """Is ``value`` a reference ``ArtifactStore`` minted, rather than target text?
+
+    Only a value of this exact shape earns the ``output_ref`` exemption from
+    the redaction sweep (see ``_redact_execution``). ``artifacts`` is
+    target-controlled, so the key name alone proves nothing -- exempting
+    whatever happens to sit under it would let a target hand a live
+    credential through the sweep untouched.
+    """
+    return isinstance(value, str) and _OUTPUT_REF_DIGEST_RE.match(value) is not None
+
+
+def _restore_machine_readable_artifacts(
+    execution: NormalizedExecutionResult, redacted: dict[str, JsonValue]
+) -> dict[str, JsonValue]:
+    """Put back the two values in ``artifacts`` that are identifiers, not prose.
+
+    Everything in ``artifacts`` is swept (see ``_redact_execution``), but two
+    values there are machine-readable contracts rather than free-form text,
+    and rewriting either breaks a consumer rather than protecting anyone:
+
+    * ``output_ref`` -- the only pointer back to bytes already on disk.
+      Rewriting one character orphans the artifact permanently.
+    * the ``code`` inside an ``output_spill_error`` record -- what every
+      consumer matches on via ``is_output_spill_error_record`` to tell a
+      genuine spill failure from target-authored data. Redact it and
+      ``HarnessGrader`` re-grading that report falls back to the
+      "produced no output" ``UNAVAILABLE`` this whole change exists to
+      eliminate, and the CLI's dropped-output warning stops firing.
+
+    Neither restoration can smuggle anything, because neither is
+    target-supplied text being handed back. The digest is exempt only when it
+    matches what ``ArtifactStore`` mints, and the code is not restored from
+    the record at all -- it is rewritten to the fixed ``OUTPUT_SPILL_FAILED_CODE``
+    literal, and only for a record that already carried it before the sweep.
+    Every other key and every other value in both, including the record's
+    ``message`` and ``type``, stays redacted.
+
+    The default policy matches neither value, so this changes nothing for the
+    shipped CLI. It matters because ``apply_redaction`` is public and takes
+    whatever policy a caller hands it: a "long hex string looks like a key"
+    rule matches the digest, and a broad identifier rule matches
+    ``output_spill_failed``.
+    """
+    restored = redacted
+    if _is_artifact_digest(execution.artifacts.get(OUTPUT_REF_KEY)):
+        restored = {**restored, OUTPUT_REF_KEY: execution.artifacts[OUTPUT_REF_KEY]}
+    if is_output_spill_error_record(execution.artifacts.get(OUTPUT_SPILL_ERROR_KEY)):
+        record = restored.get(OUTPUT_SPILL_ERROR_KEY)
+        if isinstance(record, dict):
+            restored = {
+                **restored,
+                OUTPUT_SPILL_ERROR_KEY: {**record, "code": OUTPUT_SPILL_FAILED_CODE},
+            }
+    return restored
+
+
 def _redact_execution(
     execution: NormalizedExecutionResult, *, patterns: tuple[re.Pattern[str], ...]
 ) -> NormalizedExecutionResult:
@@ -150,11 +221,47 @@ def _redact_execution(
 
     Grade evidence (see ``_redact_grade`` above) is data our own harness
     generates, so we can define a fixed list of keys to strip out entirely
-    (``evidence_keys``). The ``output``, ``structured_output``, and ``error``
-    fields handled here are different: they're free-form text written by
-    whatever system is under test, not by us, so there's no fixed set of
-    keys to drop -- all we can do is scan the text for secret-shaped
-    patterns and blank out any matches.
+    (``evidence_keys``). The ``output``, ``structured_output``, ``error``,
+    and ``artifacts`` fields handled here are different: they're free-form
+    text written by whatever system is under test, not by us, so there's no
+    fixed set of keys to drop -- all we can do is scan the text for
+    secret-shaped patterns and blank out any matches.
+
+    ``artifacts`` is swept for the same reason as the rest, even though it
+    mostly holds harness-authored values like the ``output_ref`` digest: a
+    failed spill records the artifact store's own exception message there
+    (``output_spill_error``), and a store that talks to something remote is
+    free to echo a URL, a header, or a credential into that text. So the
+    whole field goes through rather than a hand-picked list of keys that
+    would need extending every time the dict grows -- except for the two
+    values in it that are identifiers rather than prose, which
+    ``_restore_machine_readable_artifacts`` puts back afterwards. The first is
+    below; the second is the ``code`` inside a spill-failure record, which is
+    what every consumer matches on to recognise that record at all.
+
+    ``output_ref`` is restored verbatim afterwards -- but only when it holds
+    a digest this harness actually minted. It is the *only* pointer back to a
+    payload that has already been written to the artifact store, so a pattern
+    that rewrites even one character of it orphans those bytes permanently:
+    the report then references an artifact nobody can look up, which is a
+    worse outcome than the one redaction is guarding against. The default
+    policy's patterns cannot match a hex digest, but ``apply_redaction`` is
+    public and takes any policy a caller supplies, and a generic "long hex
+    string looks like a key" rule is an entirely reasonable thing for someone
+    to add.
+
+    The exemption is gated on the value's *shape* rather than on the key
+    name, because the key name is not ours to trust. ``artifacts`` is
+    target-controlled -- the same premise that makes
+    ``is_output_spill_error_record`` necessary one field over -- so a target
+    is perfectly free to return ``artifacts={"output_ref": "hf_…"}`` and, if
+    the key alone bought the exemption, walk a live credential straight
+    through this sweep and into the canonical report under the *default*
+    policy the CLI writes every report with. Only a value matching what
+    ``ArtifactStore`` mints (``_OUTPUT_REF_DIGEST_RE``) is a real reference;
+    anything else is free-form target text and gets swept with everything
+    else. A genuine digest is harness-authored and structurally incapable of
+    carrying a secret, so exempting *that* gives up nothing.
 
     This function matters even though very large outputs get special
     handling elsewhere: an output too big to keep inline gets written out to
@@ -168,11 +275,15 @@ def _redact_execution(
     if not patterns:
         return execution
     updates: dict[str, object] = {}
-    for field_name in ("output", "structured_output", "error"):
+    for field_name in ("output", "structured_output", "error", "artifacts"):
         value = getattr(execution, field_name)
         if value is None:
             continue
         redacted_value = _redact_json_value(value, patterns)
+        if field_name == "artifacts":
+            redacted_value = _restore_machine_readable_artifacts(
+                execution, cast("dict[str, JsonValue]", redacted_value)
+            )
         if redacted_value != value:
             updates[field_name] = redacted_value
     if not updates:

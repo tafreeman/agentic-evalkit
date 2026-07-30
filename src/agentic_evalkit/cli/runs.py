@@ -82,6 +82,7 @@ from agentic_evalkit.manifest import (
     load_manifest,
 )
 from agentic_evalkit.models import (
+    OUTPUT_SPILL_ERROR_KEY,
     DatasetRef,
     DatasetSelection,
     EvalRunManifest,
@@ -89,6 +90,7 @@ from agentic_evalkit.models import (
     ResolvedDataset,
     SamplingPolicy,
     SourceRecord,
+    is_output_spill_error_record,
 )
 from agentic_evalkit.provenance import (
     compute_code_fingerprint,
@@ -618,6 +620,29 @@ def run(
         f"timeouts={summary.timeouts} cancelled={summary.cancelled} "
         f"abstained={summary.abstained} unavailable={summary.unavailable}"
     )
+    # A sample whose oversized output could not be stored keeps the status
+    # and the grade it genuinely earned, so it shows up in `outcomes` above
+    # as an ordinary pass or fail and changes no count -- which is correct,
+    # but would otherwise make the run look completely clean while some of
+    # its evidence was quietly lost. Say so explicitly instead: the whole
+    # point of the isolation is that the run survives, not that the loss
+    # goes unmentioned.
+    spilled = _failed_spill_count(result)
+    if spilled:
+        # soft_wrap=True for the same reason the report path below uses it,
+        # and with more at stake: this line is 146 characters, the console is
+        # pinned to width 120 whenever stdout is not a terminal
+        # (``cli.app._MIN_CONSOLE_WIDTH``), and the CLI guide tells scripts to
+        # check for this warning. Left to Rich's word-wrapping it arrives
+        # split, with ``artifacts.output_spill_error`` stranded on a line of
+        # its own -- so the one signal that a run lost evidence would break
+        # exactly the consumers the guide points at it.
+        console.print(
+            f"[yellow]warning[/yellow]: {spilled} sample(s) lost their output -- it could not be "
+            "written to the artifact store and is not in the report; see "
+            "artifacts.output_spill_error",
+            soft_wrap=True,
+        )
     # soft_wrap=True because the report path must appear on stdout as one
     # single, unbroken piece of text (both scripts and our own tests search
     # the output for the exact path string) -- it must never get broken
@@ -627,6 +652,51 @@ def run(
 
     if summary.errors > 0 or summary.timeouts > 0:
         raise typer.Exit(code=int(ExitCode.INFRASTRUCTURE_ERROR))
+
+
+def _failed_spill_count(result: EvalRunResult) -> int:
+    """Count distinct samples whose oversized output could not be stored.
+
+    This is deliberately not a ``RunSummary`` field. ``RunSummary`` counts
+    how each sample *turned out* -- passed, failed, errored, timed out --
+    and a failed spill is none of those: the attempt ran, the grader graded
+    it, and only the archiving of the answer went wrong. Adding it there
+    would either invent a bucket that isn't an outcome or inflate
+    ``errors``, which is exactly the operational-vs-task conflation ADR-0008
+    forbids. So it is recomputed here, from the per-sample records, purely
+    to tell the person at the terminal that something was lost.
+
+    Counted per ``sample_id``, not per record. ``result.samples`` holds one
+    entry per *attempt*, so a run configured with ``attempts=3`` against a
+    store that is refusing writes would otherwise report three lost outputs
+    for a single sample -- overstating the damage in the one message whose
+    whole purpose is to size it accurately.
+
+    The record must also look like one the runner wrote. ``artifacts`` is
+    target-controlled, so testing for the key alone would let a target that
+    keeps its own upload diagnostics under that name make a perfectly
+    healthy run print a warning about evidence it never lost.
+
+    And the output must actually be gone. A spill-failure record does not by
+    itself mean anything was lost: ``_spill_failure_result`` records the
+    failure whenever the spill boundary raises, but drops the output only
+    when it was genuinely oversized, so a boundary that fails *before* the
+    size check -- a malformed ``secret_patterns``, which is a per-runner
+    setting and therefore fails every sample in the run -- leaves a record
+    beside an output that is still sitting right there in the report.
+    Counting those would make this warning claim a total loss of evidence on
+    a run that lost none, in the one message whose whole purpose is to size
+    the loss accurately. ``output is None`` is what the warning is actually
+    about.
+    """
+    return len(
+        {
+            sample.sample.sample_id
+            for sample in result.samples
+            if sample.execution.output is None
+            and is_output_spill_error_record(sample.execution.artifacts.get(OUTPUT_SPILL_ERROR_KEY))
+        }
+    )
 
 
 def _run_stamp() -> str:

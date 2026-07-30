@@ -10,6 +10,46 @@ from pydantic import Field, JsonValue
 
 from agentic_evalkit.models.base import FrozenModel
 
+#: Key under which ``NormalizedExecutionResult.artifacts`` carries the record
+#: of a spill the artifact store refused or failed to write (see
+#: ``EvalRunner._spill_failure_result``). Named here, next to the field it
+#: lives in, because it is a contract between one producer (the runner) and
+#: several consumers -- graders re-grading a saved run, the CLI's
+#: dropped-output warning -- that would otherwise agree only by each spelling
+#: the same string literal by hand, a spelling no test would catch drifting.
+#:
+#: ``artifacts`` is target-controlled, so the presence of this key is not on
+#: its own proof the runner wrote it. Consumers should also require the value
+#: to be a mapping whose ``"code"`` is ``OutputSpillFailed``'s taxonomy code.
+OUTPUT_SPILL_ERROR_KEY = "output_spill_error"
+
+#: Key under which ``artifacts`` carries the digest of an output the spill
+#: moved into the artifact store. It is the only pointer back to those bytes,
+#: so it must survive report-boundary redaction untouched.
+OUTPUT_REF_KEY = "output_ref"
+
+#: ``agentic_evalkit.errors.OutputSpillFailed``'s taxonomy code. Spelled out
+#: here rather than imported so this module stays free of dependencies on the
+#: error taxonomy; ``tests/unit/test_errors.py`` pins the code itself, and
+#: ``test_the_spill_failure_code_constant_matches_the_error_taxonomy`` in
+#: ``tests/contract/test_models.py`` pins that the two spellings agree.
+OUTPUT_SPILL_FAILED_CODE = "output_spill_failed"
+
+
+def is_output_spill_error_record(value: JsonValue | None) -> bool:
+    """Is ``value`` a spill-failure record the runner wrote, rather than target data?
+
+    ``artifacts`` is populated by the target, so the presence of
+    ``OUTPUT_SPILL_ERROR_KEY`` proves nothing on its own -- a target is free
+    to store anything under that name, including its own upload diagnostics.
+    Every consumer that acts on a spill failure (a grader deciding a result
+    cannot be re-graded, the CLI warning an operator that evidence was lost)
+    should route through here, so a target cannot steer those decisions by
+    guessing a key name, and so no consumer subscripts a dict that may not
+    have the shape it expects.
+    """
+    return isinstance(value, dict) and value.get("code") == OUTPUT_SPILL_FAILED_CODE
+
 
 class ExecutionStatus(StrEnum):
     """How the attempt to run the system went, separate from whether its answer was correct (§5.4).
@@ -107,8 +147,16 @@ class NormalizedExecutionResult(FrozenModel):
         status: What happened when this attempt ran (see
             ``ExecutionStatus``) -- separate from whether the answer was
             correct.
-        error: Structured details about what went wrong, when ``status``
-            indicates something other than a clean completion.
+        error: Structured details about what went wrong -- usually because
+            ``status`` indicates something other than a clean completion,
+            but not only then. A ``COMPLETED`` attempt whose oversized
+            output could not be saved to the artifact store also lands an
+            ``output_spill_failed`` record here (the attempt itself really
+            did succeed; only storing its answer failed, so the status and
+            any grade stay as they were). That case additionally records
+            the same details under ``artifacts["output_spill_error"]``,
+            which is where to look when a target already reported an error
+            of its own and this field is therefore still holding it.
         environment_metadata: Free-form details about the runtime
             environment this attempt executed in (e.g. HTTP
             request/response details for an HTTP target), for debugging

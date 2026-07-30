@@ -37,6 +37,7 @@ from agentic_evalkit.errors import (
     GraderError,
     JsonValue,
     ManifestValidationError,
+    OutputSpillFailed,
     TargetFailure,
     TargetTimeout,
 )
@@ -52,6 +53,8 @@ from agentic_evalkit.events import (
     SampleStarted,
 )
 from agentic_evalkit.models import (
+    OUTPUT_REF_KEY,
+    OUTPUT_SPILL_ERROR_KEY,
     DatasetRef,
     EvalRunManifest,
     EvalRunResult,
@@ -64,6 +67,7 @@ from agentic_evalkit.models import (
     RunSummary,
     SampleResult,
     SourceRecord,
+    is_output_spill_error_record,
 )
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
 
@@ -455,19 +459,37 @@ class EvalRunner:
         output happened to be large. Spilling only affects how the final
         result gets stored, never what the grader is allowed to see.
 
-        Both the execute step and the grade step are fault-isolated per
-        sample (``_execute_isolated``/``_grade_isolated``): if the target
-        or the grader raises while working on *this* sample, that raise is
-        converted into this sample's own error result
-        (``ExecutionStatus.ERROR``/``GradeStatus.ERROR``) rather than being
+        All three components this coroutine drives -- the target, the
+        grader, and the artifact store it spills to -- are fault-isolated
+        per sample
+        (``_execute_isolated``/``_grade_isolated``/``_spill_isolated``): if
+        the target, the grader, or the artifact store raises while working
+        on *this* sample, that raise is converted into this sample's own
+        error record (``ExecutionStatus.ERROR``/``GradeStatus.ERROR``, or an
+        ``output_spill_failed`` record on the execution) rather than being
         allowed to escape. Because this coroutine therefore never raises for
-        an ordinary target/grader failure, the surrounding ``TaskGroup``
-        (see ``_execute_all``) never cancels the other in-flight samples, no
-        already-completed result is discarded, and ``RunCompleted`` still
-        fires. This makes the target and grader boundaries symmetric with
-        the judge-transport isolation ADR-0020 already applied inside
-        ``JudgeGrader``. ``asyncio.CancelledError`` is deliberately *not*
-        isolated (see the helpers), so cancelling a run still cancels it.
+        an ordinary target/grader/store failure, the surrounding
+        ``TaskGroup`` (see ``_execute_all``) never cancels the other
+        in-flight samples, no already-completed result is discarded, and
+        ``RunCompleted`` still fires. This makes all three boundaries
+        symmetric with the judge-transport isolation ADR-0020 already
+        applied inside ``JudgeGrader``. ``asyncio.CancelledError`` is
+        deliberately *not* isolated (see the helpers), so cancelling a run
+        still cancels it. Note the scope: it is those three *components*
+        that are isolated, not every call this coroutine makes. The
+        ``sink(...)`` and ``self._clock()`` calls interleaved between them
+        are still unguarded, so a caller-supplied event sink that raises
+        does abort the run.
+
+        The spill boundary differs from the other two in one deliberate
+        way: a failed spill leaves ``execution.status`` -- and therefore
+        this sample's already-computed ``grade`` -- exactly as they were.
+        The store refusing the bytes says nothing about how the attempt
+        went, and by ADR-0017 the grader had already seen the full inline
+        output before the spill was even attempted. Marking the sample
+        ``ERROR`` would throw away a genuinely earned verdict over a
+        storage problem, which is precisely the kind of evidence loss this
+        isolation exists to prevent.
         """
         sink(
             SampleStarted(
@@ -510,8 +532,11 @@ class EvalRunner:
         # grading (ADR-0017): even an execution that was never gradable
         # (for example, one that timed out) can still be carrying a huge
         # output that needs to be moved out to the artifact store before we
-        # store the final result.
-        execution = self._spill_large_output(execution)
+        # store the final result. It is fault-isolated like the two steps
+        # above: an artifact store that refuses or fails to write the bytes
+        # degrades this one sample's stored output instead of tearing down
+        # the run around it.
+        execution = self._spill_isolated(execution)
         sink(
             SampleCompleted(
                 run_id=run_id,
@@ -665,6 +690,159 @@ class EvalRunner:
             message = f"{kept}...[truncated, {omitted} chars omitted]"
         return message
 
+    def _spill_isolated(self, execution: NormalizedExecutionResult) -> NormalizedExecutionResult:
+        """Spill an oversized output, converting a raising artifact store into a degraded result.
+
+        The third per-sample fault-isolated boundary, added to the
+        target/grader pair by the same ADR-0020 amendment reasoning: the
+        artifact store is just as capable of raising as a target or a
+        grader is (an oversized payload, a full disk, a directory that
+        turned read-only), and ``_spill_large_output`` is called from inside
+        the ``TaskGroup`` in ``_execute_all``. Left unguarded, one store
+        failure cancelled every in-flight sibling and escaped
+        ``EvalRunner.run`` as an ``ExceptionGroup`` -- which, not being an
+        ``AgenticEvalkitError``, bypassed the CLI's documented exit-code
+        mapping, so no report was ever written and every result already
+        graded in that run was lost.
+
+        As in ``_execute_isolated`` and ``_grade_isolated``, only
+        ``Exception`` is caught: ``asyncio.CancelledError`` is a
+        ``BaseException``, so cancelling a run still actually cancels it.
+        """
+        try:
+            return self._spill_large_output(execution)
+        except Exception as error:
+            return self._spill_failure_result(execution=execution, error=error)
+
+    def _spill_failure_message(self, error: Exception) -> str:
+        """Describe ``error`` for the record, without ever raising while doing so.
+
+        ``_safe_error_message`` is not itself guaranteed to succeed here.
+        It calls ``str(error)`` on an exception this runner did not create,
+        and it compiles ``self._redaction_policy``'s patterns -- the very
+        call that can raise ``re.error`` inside ``_spill_large_output`` when
+        a caller supplied a malformed pattern, which is one of the failures
+        ``_spill_isolated`` is supposed to absorb. Letting it raise from the
+        failure handler would put the original exception right back into the
+        ``TaskGroup`` and cancel every sibling: the isolation would hold for
+        every failure except the one it was handling.
+
+        So the fallback is deliberately the least it can be: the exception's
+        class name, which is an attribute of a class object rather than
+        anything derived from target- or store-controlled text, and a note
+        saying the message could not be rendered. Nothing is swallowed --
+        the failure is still recorded, just with less detail than usual.
+        """
+        try:
+            return self._safe_error_message(error)
+        except Exception:
+            return f"{type(error).__name__} (message unavailable: could not be rendered safely)"
+
+    def _spill_failure_result(
+        self, *, execution: NormalizedExecutionResult, error: Exception
+    ) -> NormalizedExecutionResult:
+        """Build the degraded execution result for an artifact store that raised.
+
+        The output is dropped (``output=None``): the whole point of the
+        spill is that these bytes are too big to keep inline, and quietly
+        keeping them anyway would reintroduce the unbounded payload
+        requirement 8 exists to prevent. What replaces them is a typed
+        record -- the original exception's class name, the stable
+        :class:`~agentic_evalkit.errors.OutputSpillFailed` ``code``, and a
+        redacted, bounded message -- so a reader can tell "the answer
+        existed but could not be persisted" apart from "there was never an
+        answer."
+
+        ``status`` is deliberately left alone. The store refusing the bytes
+        is a storage failure, not a verdict on the attempt: the target
+        completed, and by ADR-0017 the grader already saw the full inline
+        output before this ran. Flipping the status to ``ERROR`` would
+        re-bucket an already-earned grade as an operational error in
+        ``_summarize`` and in ``stats.aggregate``, and would break the
+        standing invariant that a non-``COMPLETED`` execution carries
+        ``grade=None``.
+
+        The record lands in two places for two different reasons.
+        ``artifacts`` is this boundary's own namespace -- it records what
+        the spill did, ``output_ref`` on success and ``output_spill_error``
+        on failure, uniformly and always. ``error`` is the sample's
+        *primary* diagnosis, so the spill claims it only when nothing else
+        has: a target that already reported its own failure alongside a
+        large output keeps that diagnosis intact, and the reader still
+        finds the spill failure under ``artifacts``.
+
+        Each field gets its **own copy** of the record rather than a shared
+        reference to one dict. ``model_copy`` does not deep-copy what it is
+        handed, so storing the same object twice would make ``error`` and
+        ``artifacts["output_spill_error"]`` a single mutable value wearing
+        two names -- and every later stage that rewrites one field
+        independently of the other (report-boundary redaction is exactly
+        that) would silently be rewriting both.
+
+        Dropping the output is conditional, because not every raise from
+        ``_spill_large_output`` comes from the store. Three steps run before
+        the size check and before the store is touched at all: ``str()`` on
+        the output, compiling ``secret_patterns`` (which raises ``re.error``
+        on a malformed caller-supplied pattern -- accepted at construction,
+        so a reachable state), and encoding the result. A raise from any of
+        those reaches this handler for an output that was never a spill
+        candidate, and nulling it would destroy a perfectly good inline
+        answer -- for *every* sample in the run, since the policy is
+        per-runner -- while recording that the artifact store refused bytes
+        it was never offered. So the output is dropped only when it really
+        was too big to keep inline, measured on the raw serialization
+        (``str`` on JSON-shaped data cannot raise, so this check is always
+        available even when the redaction that follows it is not). An output
+        within the threshold is bounded by definition, which is all
+        requirement 8 asks; it stays inline and gets redacted at the report
+        boundary like any other small output.
+        """
+        wrapped = OutputSpillFailed(message=self._spill_failure_message(error))
+        record: dict[str, JsonValue] = {
+            "type": type(error).__name__,
+            "code": wrapped.code,
+            "message": wrapped.message,
+        }
+        updates: dict[str, object] = {
+            "error": execution.error if execution.error is not None else dict(record),
+            "artifacts": {**execution.artifacts, OUTPUT_SPILL_ERROR_KEY: dict(record)},
+        }
+        if self._output_exceeds_inline_threshold(execution):
+            updates["output"] = None
+        return execution.model_copy(update=updates)
+
+    @staticmethod
+    def _output_exceeds_inline_threshold(execution: NormalizedExecutionResult) -> bool:
+        """Was this output actually too big to keep inline, ignoring redaction?
+
+        Deliberately measured on the raw serialization rather than the
+        redacted one ``_spill_large_output`` sizes up: this is called from a
+        failure handler, where the redaction step is exactly what may have
+        just failed. Redaction can only substitute a fixed ``[REDACTED]``
+        marker for matched runs of text, so the two sizes differ by a bounded
+        amount -- and in the corner where redaction would have pushed a
+        just-under-threshold output over the line, keeping it inline is the
+        safe answer anyway.
+
+        Like ``_spill_failure_message``, this never raises. It runs inside
+        the same ``except`` block, so a raise from here would re-enter the
+        ``TaskGroup`` and cancel every sibling -- the precise failure the
+        isolation exists to prevent, reintroduced by its own handler.
+        ``str`` on JSON-shaped data does not raise today, but that rests on
+        pydantic coercing the field's contents upstream rather than on
+        anything this module enforces, and the cost of not relying on it is
+        three lines. On failure the answer is "not oversized", which keeps
+        the output inline: unmeasurable is not a reason to destroy data, and
+        an output that really was oversized loses only its size bound for
+        one sample.
+        """
+        if execution.output is None:
+            return False
+        try:
+            return len(str(execution.output).encode("utf-8")) > _LARGE_OUTPUT_THRESHOLD_BYTES
+        except Exception:
+            return False
+
     def _spill_large_output(
         self, execution: NormalizedExecutionResult
     ) -> NormalizedExecutionResult:
@@ -677,6 +855,13 @@ class EvalRunner:
         moved out to storage for being too big can never accidentally
         affect what the grader saw. This method's only job is deciding
         what gets saved to disk, not what gets graded.
+
+        Inside a real run this is always reached through
+        ``_spill_isolated``, never called directly, so the artifact store is
+        free to raise here: a store that refuses or fails to write the bytes
+        degrades that one sample (``output=None`` plus an
+        ``output_spill_error`` record) instead of aborting the run around
+        it.
 
         Rather than modifying the ``execution`` object that was passed in,
         this builds a brand new ``NormalizedExecutionResult`` via
@@ -719,10 +904,36 @@ class EvalRunner:
         ref = self._artifact_store.put_bytes(
             encoded, media_type="application/json", redacted=was_redacted
         )
+        # A successful spill clears any spill-failure record already sitting
+        # in ``artifacts`` that carries the runner's taxonomy code. The two
+        # keys describe the same boundary's outcome and cannot both be true:
+        # the bytes are on disk under ``output_ref`` now. Leaving such a
+        # record behind would be read *in preference* to the reference,
+        # because consumers check the failure key first (see
+        # ``HarnessGrader``) -- telling a reader the output "was never
+        # persisted" while pointing away from bytes that are sitting right
+        # there.
+        #
+        # In practice the only thing that can have put one there is the
+        # target: every attempt builds a fresh ``NormalizedExecutionResult``,
+        # so this never inherits a record an earlier attempt's spill wrote.
+        #
+        # Only a record carrying the taxonomy code is removed. ``artifacts``
+        # is target-controlled and this key is not reserved -- that is the
+        # whole premise of ``is_output_spill_error_record`` -- so a target
+        # that keeps its own upload diagnostics under that name must not have
+        # them silently deleted just because its output happened to spill.
+        # Such a value cannot cause the misreading above either, since every
+        # consumer validates the record's shape before acting on it.
+        artifacts = {
+            key: value
+            for key, value in execution.artifacts.items()
+            if not (key == OUTPUT_SPILL_ERROR_KEY and is_output_spill_error_record(value))
+        }
         return execution.model_copy(
             update={
                 "output": None,
-                "artifacts": {**execution.artifacts, "output_ref": ref.digest},
+                "artifacts": {**artifacts, OUTPUT_REF_KEY: ref.digest},
             }
         )
 

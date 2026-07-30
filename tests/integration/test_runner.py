@@ -46,7 +46,7 @@ from agentic_evalkit.models import (
     SourceRecord,
 )
 from agentic_evalkit.reporters.base import RedactionPolicy
-from agentic_evalkit.runner import EvalRunner
+from agentic_evalkit.runner import _LARGE_OUTPUT_THRESHOLD_BYTES, EvalRunner
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -1272,3 +1272,136 @@ async def test_isolated_target_error_message_is_redacted_and_bounded(tmp_path: P
     assert _PLANTED_TOKEN not in message  # secret-shaped substring redacted
     assert "[REDACTED]" in message
     assert "truncated" in message  # oversized message was bounded
+
+
+# --- an artifact store that refuses the bytes must not take down the run -----
+#
+# The spill that moves an oversized output to the artifact store is the third
+# call ``_execute_and_grade`` makes that can raise, and it ran unguarded
+# inside the ``TaskGroup`` long after the target and grader boundaries were
+# isolated. A store rejecting one sample's payload therefore cancelled every
+# in-flight sibling and escaped ``EvalRunner.run`` as an ``ExceptionGroup``:
+# not being an ``AgenticEvalkitError``, it bypassed the CLI's documented
+# exit-code mapping, so no report was written and every result the run had
+# already graded was thrown away over a storage problem. ``_spill_isolated``
+# now absorbs it per sample. The test below proves that end to end through the
+# real ``EvalRunner``, mirroring the target/grader isolation tests above --
+# with one deliberate difference: the affected sample keeps its execution
+# status *and* its grade, because by ADR-0017 the grader had already seen the
+# full inline output before the spill was ever attempted.
+
+#: A store limit sitting one byte above the spill threshold: big enough that
+#: the runner still decides to spill an oversized output, small enough that
+#: the store then refuses it. This reproduces the production failure with a
+#: real ``ArtifactStore``, no test double involved.
+_SPILL_REJECTING_MAX_BYTES = _LARGE_OUTPUT_THRESHOLD_BYTES + 1
+
+
+class _OversizedOnOneSampleTarget:
+    """A fake target that answers every sample correctly, but pads exactly one
+    ``sample_id``'s output past the spill threshold.
+
+    That asymmetry is the whole point: one sample's output is small enough to
+    stay inline and never touch the artifact store, while the other's is
+    large enough to be spilled -- and then rejected by a store configured to
+    refuse it. Both samples run concurrently in the same ``TaskGroup``, so the
+    small one is exactly the sibling a propagating store failure used to
+    destroy.
+    """
+
+    def __init__(self, *, oversized_sample_id: str, expected_samples: int) -> None:
+        self._oversized_sample_id = oversized_sample_id
+        self._expected_samples = expected_samples
+        self._entered = 0
+        self._all_entered = asyncio.Event()
+
+    async def execute(
+        self, sample: EvalSample, *, attempt: int, timeout_seconds: float | None
+    ) -> NormalizedExecutionResult:
+        # A rendezvous, not a delay: no sample returns until every sample has
+        # entered, so both really are in flight at the same time. Without it
+        # the fakes never await anything and an uncontended semaphore never
+        # yields, so the samples would just run one after the other and the
+        # "a store failure used to destroy the in-flight sibling" scenario
+        # would never actually be constructed. The bound turns a regression
+        # that breaks concurrency into a fast failure rather than a hang.
+        self._entered += 1
+        if self._entered >= self._expected_samples:
+            self._all_entered.set()
+        async with asyncio.timeout(10):
+            await self._all_entered.wait()
+        now = datetime.now(UTC)
+        output: dict[str, JsonValue] = {"answer": sample.reference}
+        if sample.sample_id == self._oversized_sample_id:
+            output["log"] = "x" * _SPILL_PADDING_CHARS
+        return NormalizedExecutionResult(
+            sample_id=sample.sample_id,
+            attempt=attempt,
+            output=output,
+            status=ExecutionStatus.COMPLETED,
+            started_at=now,
+            finished_at=now,
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_completes_when_the_artifact_store_rejects_one_sample_output(
+    tmp_path: Path,
+) -> None:
+    """When the artifact store refuses one of several concurrently running
+    samples' oversized output, that must not abort the whole run. The run
+    still finishes and returns normally, ``RunCompleted`` fires, no
+    ``RunFailed`` ever does, and the sibling sample's graded result survives
+    intact.
+
+    The affected sample degrades rather than failing: it keeps the
+    ``COMPLETED`` status the target genuinely earned and the ``PASS`` the
+    grader genuinely gave it (the grader saw the full inline output before the
+    spill ran, per ADR-0017), losing only the output itself, which is replaced
+    by an ``output_spill_error`` record carrying the ``output_spill_failed``
+    taxonomy code. Because the status is preserved, a storage failure alone
+    never inflates ``summary.errors`` -- it is visible in the persisted
+    result, not in the run's exit code.
+    """
+    events: list[RunEvent] = []
+
+    def _sink(event: RunEvent) -> None:
+        events.append(event)
+
+    runner = EvalRunner(
+        catalog=_catalog_with_two_records(),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={
+            "fake": _OversizedOnOneSampleTarget(
+                oversized_sample_id="identity:1", expected_samples=2
+            )
+        },
+        graders={"exact@1": _ExactFixtureGrader()},
+        artifact_store=ArtifactStore(tmp_path / "artifacts", max_bytes=_SPILL_REJECTING_MAX_BYTES),
+    )
+    result = await runner.run(_manifest(concurrency=2), event_sink=_sink)
+
+    assert result.summary.total == 2
+    assert result.summary.errors == 0  # a failed spill is not an operational error
+    assert result.summary.passed == 2
+    by_id = {sample.sample.sample_id: sample for sample in result.samples}
+
+    degraded = by_id["identity:1"]
+    assert degraded.execution.status is ExecutionStatus.COMPLETED  # the attempt really did complete
+    assert degraded.grade is not None
+    assert degraded.grade.status is GradeStatus.PASS  # the earned verdict survives the spill
+    assert degraded.execution.output is None
+    spill_error = degraded.execution.artifacts["output_spill_error"]
+    assert isinstance(spill_error, dict)
+    assert spill_error["code"] == "output_spill_failed"
+    assert spill_error["type"] == "ArtifactStoreLimitExceeded"
+
+    survivor = by_id["identity:0"]
+    assert survivor.execution.output == {"answer": "42"}  # small enough to stay inline
+    assert survivor.grade is not None
+    assert survivor.grade.status is GradeStatus.PASS  # already-completed work survived
+
+    event_names = [type(event).__name__ for event in events]
+    assert "RunCompleted" in event_names
+    assert "RunFailed" not in event_names

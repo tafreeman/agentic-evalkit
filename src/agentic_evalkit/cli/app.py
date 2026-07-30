@@ -154,13 +154,18 @@ def _exit_code_for_error(error: AgenticEvalkitError) -> ExitCode:
 
     Falls back to :attr:`ExitCode.INFRASTRUCTURE_ERROR` (5) for any
     ``AgenticEvalkitError`` subclass that isn't explicitly listed in
-    ``_ERROR_EXIT_CODES`` above. Note that a target or grader raising for an
-    individual sample never reaches this lookup: the runner isolates those
-    per sample (recording ``TargetFailure``/``TargetTimeout``/``GraderError``
-    taxonomy codes on that sample's ERROR result while the run completes),
-    and the ``run`` command then exits 5 based on the completed summary's
-    error/timeout counts. This fallback covers run-level infrastructure
-    failures raised outside per-sample execution.
+    ``_ERROR_EXIT_CODES`` above. Note that a target, grader, or artifact
+    store raising for an individual sample never reaches this lookup: the
+    runner isolates all three per sample, recording
+    ``TargetFailure``/``TargetTimeout``/``GraderError``/``OutputSpillFailed``
+    taxonomy codes on that sample's result while the run completes. The
+    ``run`` command then exits 5 based on the completed summary's
+    error/timeout counts -- which deliberately excludes
+    ``OutputSpillFailed``: a spill failure leaves the sample's status and
+    grade as they were, so it changes no count and no exit code, and is
+    surfaced instead as an explicit warning line naming how many outputs
+    were dropped. This fallback covers run-level infrastructure failures
+    raised outside per-sample execution.
     """
     for error_type, code in _ERROR_EXIT_CODES.items():
         if isinstance(error, error_type):

@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `EvalRunner` now fault-isolates the third boundary that can raise per
+  sample: the spill that moves an oversized output to the `ArtifactStore`,
+  alongside the `ExecutionTarget` and `Grader` boundaries isolated in 0.3.0.
+  Previously a store that refused or failed to write one sample's payload
+  (`ArtifactStoreLimitExceeded` from the 16 MiB default cap, an `OSError`
+  from a full or read-only disk) cancelled every in-flight sibling through
+  the `TaskGroup` and escaped `EvalRunner.run` as an `ExceptionGroup` —
+  not an `AgenticEvalkitError`, so the CLI's exit-code mapping never saw
+  it: no report was written, the process exited outside the documented
+  `ExitCode` contract, and every result the run had already graded was lost.
+  The run now finishes with every other sample intact, and the affected
+  sample degrades to `output=None` carrying the new `output_spill_failed`
+  taxonomy code in `artifacts["output_spill_error"]` (and in `error`, unless
+  the target already reported one of its own). See
+  [ADR-0020](docs/adr/0020-wilson-lower-bound-judge-floor-and-response-envelope.md).
+- **Exit codes and counts are unchanged by a failed spill.** The affected
+  sample keeps its execution status and any grade it earned — the grader had
+  already seen the full inline output before the spill ran (ADR-0017) — so a
+  storage failure never discards a genuine verdict and never inflates
+  `RunSummary.errors`. Because that leaves every count unchanged, `evalkit
+  run` now prints an explicit warning naming how many sample outputs were
+  lost, so a degraded run cannot read as a clean one.
+- An output small enough to stay inline is never dropped by this path, even
+  when the spill boundary fails before the artifact store is reached (a
+  malformed caller-supplied `secret_patterns` is the reachable case); only a
+  payload genuinely past the inline threshold is. The warning counts outputs
+  that were actually lost rather than every failure recorded, so a boundary
+  that fails before the size check cannot make a run that lost nothing report
+  a total loss.
+- `HarnessGrader` re-grades the new state as an explicit `ERROR` naming the
+  failed spill rather than a misleading "produced no output" `UNAVAILABLE`.
+  Because `artifacts` is target-controlled, an `output_spill_error` entry is
+  acted on only when it carries the `output_spill_failed` code, so a target
+  cannot steer a grade or the warning by writing that key itself.
+
+### Security
+
+- Report-boundary redaction now covers `NormalizedExecutionResult.artifacts`
+  as well as `output`, `structured_output`, and `error`. This is hardening
+  ahead of a new state, not a fix for a released vulnerability: the field
+  previously held only a harness-authored `output_ref` digest, and the
+  artifact store's own exception message — into which a remote-backed store
+  may echo a URL, header, or credential — first becomes storable there in
+  this same unreleased change. Without the widened sweep, a caller who had
+  turned the runner's spill redaction off (`redaction_policy=None`) and who
+  applies a pattern-bearing policy at the report boundary could have written
+  that text unredacted into the canonical report. No shipped version was
+  exposed, and the CLI never was in any case, since it builds its runner with
+  the default policy.
+- Two values in `artifacts` are exempt from that sweep because they are
+  identifiers rather than prose, and rewriting either breaks a consumer
+  rather than protecting anyone: a genuine `output_ref` digest (the only
+  pointer back to a payload already on disk, which a caller-supplied pattern
+  matching long hex strings would otherwise orphan) and the
+  `output_spill_failed` code inside a spill-failure record (what every
+  consumer matches on to recognise the record at all). Both exemptions are
+  gated on shape, never on the key name — `artifacts` is target-controlled
+  and neither key is reserved, so exempting a key alone would let a target
+  returning `artifacts={"output_ref": "hf_…"}` carry a live credential
+  through the sweep. Only a value matching what `ArtifactStore` mints
+  (`sha256:` plus 64 lowercase hex characters) is treated as a digest, and
+  the code is rewritten to a fixed literal rather than restored from the
+  record. Everything else in both, including the record's `message` and
+  `type`, is still swept. Both gates were introduced and closed within this
+  unreleased change; no released version shipped the key-name form.
+
 ## [0.3.0] - 2026-07-22
 
 ### Added

@@ -20,9 +20,13 @@ from agentic_evalkit.models.datasets import (
     SourceRecord,
 )
 from agentic_evalkit.models.execution import (
+    OUTPUT_REF_KEY,
+    OUTPUT_SPILL_ERROR_KEY,
+    OUTPUT_SPILL_FAILED_CODE,
     ExecutionRequest,
     ExecutionStatus,
     NormalizedExecutionResult,
+    is_output_spill_error_record,
 )
 from agentic_evalkit.models.grades import GradeResult, GradeStatus
 from agentic_evalkit.models.runs import (
@@ -36,6 +40,9 @@ from agentic_evalkit.models.runs import (
 from agentic_evalkit.models.samples import EvalSample, GraderSpec
 
 __all__ = [
+    "OUTPUT_REF_KEY",
+    "OUTPUT_SPILL_ERROR_KEY",
+    "OUTPUT_SPILL_FAILED_CODE",
     "ContaminationMetadata",
     "ContaminationStatus",
     "DatasetRef",
@@ -58,4 +65,5 @@ __all__ = [
     "SearchHit",
     "SearchPage",
     "SourceRecord",
+    "is_output_spill_error_record",
 ]

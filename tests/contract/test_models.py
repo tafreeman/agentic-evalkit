@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from agentic_evalkit.errors import OutputSpillFailed
 from agentic_evalkit.graders.judge import (
     CalibrationArtifact,
     JudgeResponse,
@@ -31,6 +32,25 @@ from agentic_evalkit.models import (
     SearchPage,
     SourceRecord,
 )
+from agentic_evalkit.models.execution import OUTPUT_SPILL_FAILED_CODE
+
+
+def test_the_spill_failure_code_constant_matches_the_error_taxonomy() -> None:
+    """``models.execution`` spells the spill-failure code as a literal rather
+    than importing it, deliberately: that module stays free of any dependency
+    on the error taxonomy. The cost of that choice is two independent
+    spellings of one contract -- the runner writes ``OutputSpillFailed.code``
+    into the record, while ``is_output_spill_error_record`` and everything
+    routed through it compare against the constant.
+
+    Nothing else pins them together. ``tests/unit/test_errors.py`` pins the
+    taxonomy side against its own literal, so renaming the class and updating
+    that test leaves this side stale and the suite green, while the grader
+    branch and the CLI's dropped-output warning quietly stop recognizing
+    genuine spill failures. This is the assertion that makes them one
+    contract.
+    """
+    assert OutputSpillFailed(message="spill failed").code == OUTPUT_SPILL_FAILED_CODE
 
 
 def test_models_are_frozen_and_forbid_unknown_fields() -> None:

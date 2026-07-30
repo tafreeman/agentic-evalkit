@@ -145,6 +145,40 @@ ID and prints the path. Environment, code, and target fingerprints are
 computed at execution time. A run that completes with sample errors or
 timeouts still writes its report, then exits `5`.
 
+A run can also finish successfully while having lost some evidence. When a
+sample's output is too large to keep inline, it is moved to the artifact
+store; if the store refuses or fails to write it (a size cap, a full disk, a
+read-only directory), that one sample degrades instead of aborting the run.
+It keeps the status and the grade it earned — the grader had already read the
+full output — so no count changes and the exit code stays `0`. Because
+nothing in `outcomes` would reveal that, the command prints a separate line:
+
+```text
+warning: 2 sample(s) lost their output -- it could not be written to the artifact store and is not in the report; see artifacts.output_spill_error
+```
+
+That is emitted as a single unbroken line, deliberately: it is the one signal
+a run lost evidence, so it is not word-wrapped to the console width the way
+ordinary prose output would be. A script may match on it directly.
+
+The per-sample detail is in each affected sample's
+`execution.artifacts.output_spill_error`, which records the failure's type,
+the `output_spill_failed` taxonomy code, and a redacted message. For the
+samples the warning counts, `execution.output` is `null`, so they cannot be
+re-graded from the report — re-run them if you need the answers themselves.
+
+The record can also appear on a sample whose output *survived*. The spill
+boundary does a little work before it measures the payload, and a failure
+there — a malformed `secret_patterns` in a caller-supplied redaction policy
+is the reachable case — is recorded even though the artifact store was never
+offered anything. An output that never crossed the inline threshold is kept:
+those samples have their `output` intact and are not counted by the warning.
+So the reliable test for lost evidence is `output` being `null` *and* the
+record being present, which is exactly what the warning counts.
+
+A script that cares about completeness should check for that warning, or for
+that pair of conditions, not only the exit code.
+
 ## Generate another report format
 
 Given canonical JSON from `run`, create a Markdown, JSONL, or self-contained

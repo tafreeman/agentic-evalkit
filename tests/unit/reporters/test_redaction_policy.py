@@ -2,12 +2,20 @@
 out of a report before it's written (design doc §12, plan Task 13).
 """
 
+from __future__ import annotations
+
 import re
+from typing import TYPE_CHECKING
 
 import pytest
 
-from agentic_evalkit.models import EvalRunResult
+from agentic_evalkit.artifacts import ArtifactStore
+from agentic_evalkit.models import EvalRunResult, is_output_spill_error_record
 from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY, RedactionPolicy, apply_redaction
+from agentic_evalkit.reporters.base import _is_artifact_digest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_redaction_removes_configured_evidence_keys(
@@ -282,3 +290,220 @@ def test_construction_accepts_an_invalid_regex_but_write_rejects_it(
     # is finally compiled -- it does not just silently do nothing.
     with pytest.raises(re.error):
         apply_redaction(pass_error_timeout_and_provenance_run, policy)
+
+
+def test_redaction_covers_execution_artifacts(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
+    """``artifacts`` used to hold nothing but a harness-authored digest, so
+    the redaction sweep skipped it. It no longer does: a spill that fails
+    records the artifact store's own exception message under
+    ``output_spill_error``, and a store that talks to something remote is
+    free to echo a URL, a header, or a credential into that text. The runner
+    redacts that message on the way in, but a caller may have switched the
+    runner's own spill redaction off (``redaction_policy=None`` is a
+    documented opt-out), which leaves this report boundary as the only thing
+    standing between that text and the written file."""
+    run = pass_error_timeout_and_provenance_run
+    leaking_execution = run.samples[1].execution.model_copy(
+        update={
+            "artifacts": {
+                "output_spill_error": {
+                    "type": "OSError",
+                    "code": "output_spill_failed",
+                    "message": "upload rejected for Bearer eyJhbGciOiJIUzI1NiJ9.tok",
+                }
+            }
+        }
+    )
+    leaking_sample = run.samples[1].model_copy(update={"execution": leaking_execution})
+    run = run.model_copy(update={"samples": (run.samples[0], leaking_sample, run.samples[2])})
+
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY)
+    redacted_artifacts = redacted.samples[1].execution.artifacts
+    assert "eyJhbGciOiJIUzI1NiJ9" not in str(redacted_artifacts)
+    assert "[REDACTED]" in str(redacted_artifacts)
+    # The structural keys around the message survive -- only the secret-shaped
+    # substring is replaced, so the record stays machine-readable.
+    spill_record = redacted_artifacts["output_spill_error"]
+    assert isinstance(spill_record, dict)
+    assert spill_record["code"] == "output_spill_failed"
+
+
+def test_redaction_leaves_a_spilled_output_digest_intact(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
+    """Sweeping ``artifacts`` must not damage what normally lives there. An
+    ``output_ref`` digest is hex, matches no credential shape, and is the
+    only way to find a spilled payload again -- rewriting one character of it
+    would orphan the artifact it points at."""
+    run = pass_error_timeout_and_provenance_run
+    digest = "sha256:" + "ab12" * 16
+    referencing_execution = run.samples[0].execution.model_copy(
+        update={"output": None, "artifacts": {"output_ref": digest}}
+    )
+    referencing_sample = run.samples[0].model_copy(update={"execution": referencing_execution})
+    run = run.model_copy(update={"samples": (referencing_sample, *run.samples[1:])})
+
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY)
+
+    assert redacted.samples[0].execution.artifacts == {"output_ref": digest}
+
+
+def test_a_caller_supplied_pattern_never_rewrites_an_output_ref_digest(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
+    """The sweep over ``artifacts`` was justified by the observation that no
+    *default* pattern matches a hex digest -- but ``apply_redaction`` is
+    public API and takes whatever policy a caller hands it, and "a long hex
+    string looks like a key" is an entirely reasonable rule for someone to
+    add. The digest is the only pointer back to a payload already written to
+    the artifact store, so rewriting one character of it orphans those bytes
+    permanently: the report would reference an artifact nobody can look up.
+    It is therefore restored verbatim after the sweep.
+    """
+    run = pass_error_timeout_and_provenance_run
+    digest = "sha256:" + "ab12" * 16
+    referencing_execution = run.samples[0].execution.model_copy(
+        update={"output": None, "artifacts": {"output_ref": digest}}
+    )
+    referencing_sample = run.samples[0].model_copy(update={"execution": referencing_execution})
+    run = run.model_copy(update={"samples": (referencing_sample, *run.samples[1:])})
+
+    # A generic "long hex blob" rule, which does match this digest.
+    hostile = RedactionPolicy(secret_patterns=(r"[A-Fa-f0-9]{32,}",))
+    redacted = apply_redaction(run, hostile)
+
+    assert redacted.samples[0].execution.artifacts["output_ref"] == digest
+
+
+def test_a_target_cannot_smuggle_a_secret_through_the_output_ref_exemption(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
+    """The exemption is gated on the value's shape, not on the key name.
+
+    ``artifacts`` is target-controlled and ``output_ref`` is not a reserved
+    name -- the same premise that makes ``is_output_spill_error_record``
+    necessary one field over. If holding that key were enough to earn the
+    exemption, a target returning ``artifacts={"output_ref": "hf_…"}`` would
+    walk a live credential straight through this sweep and into the canonical
+    report, under the *default* policy the CLI writes every report with. Only
+    a value shaped like something ``ArtifactStore`` actually minted is
+    exempt; anything else is target text and gets swept like the rest.
+    """
+    run = pass_error_timeout_and_provenance_run
+    smuggled = "hf_" + "A" * 34
+    execution = run.samples[0].execution.model_copy(
+        update={"output": None, "artifacts": {"output_ref": smuggled}}
+    )
+    sample = run.samples[0].model_copy(update={"execution": execution})
+    run = run.model_copy(update={"samples": (sample, *run.samples[1:])})
+
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY)
+
+    assert redacted.samples[0].execution.artifacts["output_ref"] == "[REDACTED]"
+
+
+def test_the_digest_exemption_does_not_shield_the_rest_of_artifacts(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
+    """Exempting ``output_ref`` must be exactly that narrow: every other key
+    in ``artifacts`` still gets swept, including in a record that sits beside
+    a digest in the same dict.
+    """
+    run = pass_error_timeout_and_provenance_run
+    digest = "sha256:" + "ab12" * 16
+    execution = run.samples[0].execution.model_copy(
+        update={
+            "output": None,
+            "artifacts": {
+                "output_ref": digest,
+                "store_note": "upload used Bearer eyJhbGciOiJIUzI1NiJ9.tok",
+            },
+        }
+    )
+    sample = run.samples[0].model_copy(update={"execution": execution})
+    run = run.model_copy(update={"samples": (sample, *run.samples[1:])})
+
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY)
+    artifacts = redacted.samples[0].execution.artifacts
+
+    assert artifacts["output_ref"] == digest  # still exempt
+    assert "eyJhbGciOiJIUzI1NiJ9" not in str(artifacts["store_note"])
+    assert "[REDACTED]" in str(artifacts["store_note"])
+
+
+def test_a_caller_supplied_pattern_never_rewrites_the_spill_failure_code(
+    pass_error_timeout_and_provenance_run: EvalRunResult,
+) -> None:
+    """The record's ``code`` is a machine-readable contract, not prose.
+
+    ``is_output_spill_error_record`` is what every consumer -- ``HarnessGrader``
+    deciding a result cannot be re-graded, the CLI's dropped-output warning --
+    uses to tell a genuine spill failure from something a target wrote. The
+    sweep recurses into the record and rewrites its strings like any other, so
+    a caller policy broad enough to match ``output_spill_failed`` would leave
+    the redacted report carrying a record no consumer recognises: re-grading
+    it falls back to the "produced no output" ``UNAVAILABLE`` this whole
+    change exists to eliminate.
+
+    The digest got a shape-gated exemption for the same class of reason. This
+    is the other half of it. Restoring the code smuggles nothing: it is
+    rewritten to the fixed constant, and only for a record that already
+    carried it before the sweep -- ``message`` and ``type``, which are the
+    parts that can hold store-authored text, stay redacted.
+    """
+    run = pass_error_timeout_and_provenance_run
+    execution = run.samples[1].execution.model_copy(
+        update={
+            "output": None,
+            "artifacts": {
+                "output_spill_error": {
+                    "type": "OSError",
+                    "code": "output_spill_failed",
+                    # A long lowercase run, so the very pattern that would
+                    # have eaten the code matches in here too.
+                    "message": "rejected by internalstoragebackend",
+                }
+            },
+        }
+    )
+    sample = run.samples[1].model_copy(update={"execution": execution})
+    run = run.model_copy(update={"samples": (run.samples[0], sample, run.samples[2])})
+
+    # A broad identifier rule, which does match "output_spill_failed".
+    hostile = RedactionPolicy(secret_patterns=(r"[a-z_]{16,}",))
+    redacted = apply_redaction(run, hostile)
+
+    record = redacted.samples[1].execution.artifacts["output_spill_error"]
+    assert isinstance(record, dict)
+    assert record["code"] == "output_spill_failed"  # still recognisable
+    assert is_output_spill_error_record(record)
+    # The exemption is exactly that narrow: the same pattern still rewrites
+    # the message, which is where store-authored text lives.
+    assert "[REDACTED]" in str(record["message"])
+    assert "internalstoragebackend" not in str(record["message"])
+
+
+def test_the_digest_exemption_matches_what_the_artifact_store_actually_mints(
+    tmp_path: Path,
+) -> None:
+    """The exemption's shape gate and the store's digest format are two
+    independent spellings of one contract, and nothing else pins them
+    together.
+
+    ``_OUTPUT_REF_DIGEST_RE`` hard-codes ``sha256:`` plus 64 lowercase hex
+    characters; ``ArtifactStore._digest_of`` is what actually produces the
+    value. Every other test here hand-writes the literal (``"sha256:" +
+    "ab12" * 16``), so all of them would keep passing if the store switched
+    to sha512, to an uppercase digest, or to a different prefix -- while
+    every real digest silently lost the exemption and got rewritten by any
+    caller policy matching long hex, orphaning the artifact it points at.
+    This is the same drift ``test_the_spill_failure_code_constant_matches_
+    the_error_taxonomy`` closes for the taxonomy code, applied to the other
+    constant this change introduced.
+    """
+    store = ArtifactStore(tmp_path / "artifacts")
+    ref = store.put_bytes(b'{"answer": "42"}', media_type="application/json")
+
+    assert _is_artifact_digest(ref.digest)
