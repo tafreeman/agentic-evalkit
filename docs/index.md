@@ -15,7 +15,7 @@ hide:
 
 # agentic-evalkit
 
-<p class="hero-sub">A standalone evaluation toolkit for agentic systems — dynamic dataset discovery, typed evaluation contracts, benchmark-valid grading, calibration-gated judge evidence, and statistical reporting behind a developer-friendly Python API and CLI. Datasets, grading, and reporting are separated from the system under test through a neutral <code>ExecutionTarget</code> protocol, so any callable, subprocess, or HTTP system is evaluable without framework lock-in.</p>
+<p class="hero-sub">A standalone evaluation toolkit for agentic systems — dynamic dataset discovery, typed evaluation contracts, benchmark-valid grading, calibration-gated judge evidence, and statistical reporting behind a developer-friendly Python API and CLI. Datasets, grading, and reporting are separated from the system under test through a neutral <code>ExecutionTarget</code> protocol, so any callable, subprocess, HTTP, or MCP-stdio system is evaluable without framework lock-in.</p>
 
 <div class="hero-actions" markdown>
 [Get started](guides/quickstart.md){ .md-button .md-button--primary }
@@ -59,11 +59,11 @@ This resolves the curated GSM8K preset from Hugging Face, runs five samples thro
 
 <div class="stat-strip" markdown>
 <div class="stat-item">
-  <div class="stat-value">20</div>
+  <div class="stat-value">21</div>
   <div class="stat-label">ADRs</div>
 </div>
 <div class="stat-item">
-  <div class="stat-value">3</div>
+  <div class="stat-value">4</div>
   <div class="stat-label">Execution target adapters</div>
 </div>
 <div class="stat-item">
@@ -108,7 +108,7 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 
 <div class="feature-card" markdown>
 <h3 class="fc-title">Neutral execution targets</h3>
-<p class="fc-body">Callable, subprocess-JSONL, and HTTP adapters normalize every outcome to an <code>ExecutionStatus</code> before grading — no target-specific response shape ever reaches a grader.</p>
+<p class="fc-body">Callable, subprocess-JSONL, HTTP, and MCP-stdio adapters normalize every outcome to an <code>ExecutionStatus</code> before grading — no target-specific response shape ever reaches a grader.</p>
 [Targets guide](guides/targets.md){ .fc-link }
 </div>
 
@@ -132,7 +132,7 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 
 ## Standalone by design
 
-`agentic-evalkit` imports no modules from the Agentic Runtime Platform, ExecutionKit, or any other host repository, at build time, runtime, or in its test suite. Those systems — or any other agentic system — are evaluated only through the public `ExecutionTarget` protocol: callable, subprocess, or HTTP. Legacy evaluation code may remain in host repositories; this package neither imports nor migrates it.
+`agentic-evalkit` imports no modules from the Agentic Runtime Platform, ExecutionKit, or any other host repository, at build time, runtime, or in its test suite. Those systems — or any other agentic system — are evaluated only through the public `ExecutionTarget` protocol: callable, subprocess, HTTP, or MCP stdio. The MCP adapter reaches a server purely by spawning its argument vector as a subprocess — composition, never importation. Legacy evaluation code may remain in host repositories; this package neither imports nor migrates it.
 
 [ADR-0001: Standalone boundary](adr/0001-standalone-boundary.md){ .link-forward } · [ADR-0006: Execution target boundary](adr/0006-execution-target-boundary.md){ .link-forward }
 
@@ -150,7 +150,7 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 - [Quickstart](guides/quickstart.md) — install to first report, including the standalone `report` command for self-contained HTML
 - [Providers](guides/providers.md) — local formats, Hugging Face auth, the content-addressed cache, and `--offline` mode
 - [Graders](guides/graders.md) — the objective-first evidence order and calibrated-judge requirements
-- [Targets](guides/targets.md) — callable, subprocess-JSONL, and HTTP execution targets
+- [Targets](guides/targets.md) — callable, subprocess-JSONL, HTTP, and MCP-stdio execution targets
 - [SWE-bench](guides/swebench.md) — the preview/prediction-export workflow and harness boundary
 - [HTTP agent example](guides/http-agent-example.md) — evaluating a real tool-using agent over HTTP
 </div>
@@ -161,7 +161,7 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 - [Architecture specification](specs/2026-07-02-agentic-evalkit-design.md) — the full design
 - [Prior art & build-vs-buy](prior-art.md) — the recorded decision versus existing frameworks
 - [Implementation plan](plans/2026-07-02-agentic-evalkit-initial-release.md) — initial release plan
-- [ADR index](adr/0001-standalone-boundary.md) — twenty architecture decision records, 0001 through 0020
+- [ADR index](adr/0001-standalone-boundary.md) — twenty-one architecture decision records, 0001 through 0021
 </div>
 
 </div>
@@ -169,7 +169,7 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 <div class="cta-card" markdown>
 ### Evaluating a real system?
 
-Start with the [quickstart](guides/quickstart.md) for the pipeline end to end, then the [targets guide](guides/targets.md) to wire `run` to your own callable, subprocess, or HTTP system under test.
+Start with the [quickstart](guides/quickstart.md) for the pipeline end to end, then the [targets guide](guides/targets.md) to wire `run` to your own callable, subprocess, HTTP, or MCP-stdio system under test.
 
 <div class="hero-actions" markdown>
 [Read the quickstart](guides/quickstart.md){ .md-button .md-button--primary }
