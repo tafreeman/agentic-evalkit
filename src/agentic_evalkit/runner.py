@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-import warnings
 from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -70,7 +69,11 @@ from agentic_evalkit.models import (
     SourceRecord,
     is_output_spill_error_record,
 )
-from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
+from agentic_evalkit.reporters.base import (
+    DEFAULT_REDACTION_POLICY,
+    RedactionPolicy,
+    _resolve_redaction_policy,
+)
 
 if TYPE_CHECKING:
     from agentic_evalkit.artifacts import ArtifactStore
@@ -201,17 +204,7 @@ class EvalRunner:
         id_factory: IdFactory = _default_id_factory,
         redaction_policy: RedactionPolicy | None = DEFAULT_REDACTION_POLICY,
     ) -> None:
-        if redaction_policy is None:
-            warnings.warn(
-                "EvalRunner(redaction_policy=None) is deprecated; pass "
-                "RedactionPolicy() instead, which is the supported way to opt "
-                "out of redaction. None is still accepted for backward "
-                "compatibility (deprecated since 0.4.0); support for it will "
-                "be removed in 0.5.0.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            redaction_policy = RedactionPolicy()
+        redaction_policy = _resolve_redaction_policy(redaction_policy, caller="EvalRunner")
         self._catalog = catalog
         self._adapters = dict(adapters)
         self._targets = dict(targets)

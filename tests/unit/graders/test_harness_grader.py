@@ -38,13 +38,17 @@ def _sample() -> EvalSample:
 
 
 def _execution(
-    *, status: ExecutionStatus = ExecutionStatus.COMPLETED, output: dict[str, JsonValue] | None
+    *,
+    status: ExecutionStatus = ExecutionStatus.COMPLETED,
+    output: dict[str, JsonValue] | None,
+    artifacts: dict[str, JsonValue] | None = None,
 ) -> NormalizedExecutionResult:
     now = datetime.now(UTC)
     return NormalizedExecutionResult(
         sample_id=_SAMPLE_ID,
         attempt=1,
         output=output,
+        artifacts=artifacts or {},
         status=status,
         started_at=now,
         finished_at=now,
@@ -149,16 +153,7 @@ async def test_spilled_output_is_a_diagnostic_error_not_a_silent_unavailable() -
     the result can tell the two situations apart (flagged by a code-review
     tool named Codex, priority P2)."""
     grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
-    now = datetime.now(UTC)
-    spilled = NormalizedExecutionResult(
-        sample_id=_SAMPLE_ID,
-        attempt=1,
-        output=None,
-        artifacts={"output_ref": "sha256:deadbeef"},
-        status=ExecutionStatus.COMPLETED,
-        started_at=now,
-        finished_at=now,
-    )
+    spilled = _execution(output=None, artifacts={"output_ref": "sha256:deadbeef"})
     result = await grader.grade(_sample(), spilled)
     assert result.status is GradeStatus.ERROR
     assert result.hard_gate is False
@@ -176,10 +171,7 @@ async def test_failed_spill_is_a_diagnostic_error_not_a_silent_unavailable() -> 
     explicit ERROR naming the failed spill instead, telling the reader this
     result can't be re-graded and the sample has to be re-run."""
     grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
-    now = datetime.now(UTC)
-    spill_failed = NormalizedExecutionResult(
-        sample_id=_SAMPLE_ID,
-        attempt=1,
+    spill_failed = _execution(
         output=None,
         artifacts={
             "output_spill_error": {
@@ -188,9 +180,6 @@ async def test_failed_spill_is_a_diagnostic_error_not_a_silent_unavailable() -> 
                 "message": "artifact payload exceeds the configured maximum",
             }
         },
-        status=ExecutionStatus.COMPLETED,
-        started_at=now,
-        finished_at=now,
     )
     result = await grader.grade(_sample(), spill_failed)
     assert result.status is GradeStatus.ERROR
@@ -267,16 +256,7 @@ async def test_a_target_cannot_hijack_the_spill_diagnosis_by_key_name(
     the runner's own recorded messages, has no length bound.
     """
     grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
-    now = datetime.now(UTC)
-    execution = NormalizedExecutionResult(
-        sample_id=_SAMPLE_ID,
-        attempt=1,
-        output=None,
-        artifacts={"output_spill_error": planted},
-        status=ExecutionStatus.COMPLETED,
-        started_at=now,
-        finished_at=now,
-    )
+    execution = _execution(output=None, artifacts={"output_spill_error": planted})
 
     result = await grader.grade(_sample(), execution)
 
@@ -293,10 +273,7 @@ async def test_a_genuine_spill_record_still_wins_over_a_stale_output_ref() -> No
     honest report -- those bytes were never written.
     """
     grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
-    now = datetime.now(UTC)
-    execution = NormalizedExecutionResult(
-        sample_id=_SAMPLE_ID,
-        attempt=1,
+    execution = _execution(
         output=None,
         artifacts={
             "output_ref": "sha256:" + "ab" * 32,
@@ -306,9 +283,6 @@ async def test_a_genuine_spill_record_still_wins_over_a_stale_output_ref() -> No
                 "message": "no space left on device",
             },
         },
-        status=ExecutionStatus.COMPLETED,
-        started_at=now,
-        finished_at=now,
     )
 
     result = await grader.grade(_sample(), execution)
@@ -331,16 +305,7 @@ async def test_an_oversized_output_ref_is_truncated_before_it_reaches_the_eviden
     ADR-0020 both cite as hardening would otherwise ship unexercised.
     """
     grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
-    now = datetime.now(UTC)
-    execution = NormalizedExecutionResult(
-        sample_id=_SAMPLE_ID,
-        attempt=1,
-        output=None,
-        artifacts={"output_ref": "z" * 5000},
-        status=ExecutionStatus.COMPLETED,
-        started_at=now,
-        finished_at=now,
-    )
+    execution = _execution(output=None, artifacts={"output_ref": "z" * 5000})
 
     result = await grader.grade(_sample(), execution)
 

@@ -80,7 +80,6 @@ itself ever looks at it.
 """
 
 import re
-import warnings
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
@@ -101,7 +100,11 @@ from agentic_evalkit.graders.calibration import (
 )
 from agentic_evalkit.models import EvalSample, GradeResult, GradeStatus, NormalizedExecutionResult
 from agentic_evalkit.models.base import FrozenModel
-from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
+from agentic_evalkit.reporters.base import (
+    DEFAULT_REDACTION_POLICY,
+    RedactionPolicy,
+    _resolve_redaction_policy,
+)
 
 # If the judge's response doesn't parse, we try again -- but only up to
 # this many extra times, so 3 judge calls total at most.
@@ -265,17 +268,7 @@ class JudgeGrader:
         redaction_policy: RedactionPolicy | None = DEFAULT_REDACTION_POLICY,
         max_candidate_output_chars: int | None = _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
     ) -> None:
-        if redaction_policy is None:
-            warnings.warn(
-                "JudgeGrader(redaction_policy=None) is deprecated; pass "
-                "RedactionPolicy() instead, which is the supported way to opt "
-                "out of redaction. None is still accepted for backward "
-                "compatibility (deprecated since 0.4.0); support for it will "
-                "be removed in 0.5.0.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            redaction_policy = RedactionPolicy()
+        redaction_policy = _resolve_redaction_policy(redaction_policy, caller="JudgeGrader")
         self._judge = judge
         self._calibration = calibration
         self._gate = gate

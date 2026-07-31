@@ -514,19 +514,24 @@ async def test_run_emits_ordered_progress_events(tmp_path: Path) -> None:
 
 class _ResolveRaisesCatalog:
     """A fake catalog that has the two methods the runner needs, but whose
-    ``resolve`` method always raises an error instead of returning data.
+    ``resolve`` method always raises an error instead of returning data
+    (with ``message``, so a test can also plant a secret-shaped substring
+    in it and prove the emitted ``RunFailed.message`` was redacted).
 
-    This test expects the runner to give up immediately when ``resolve``
+    These tests expect the runner to give up immediately when ``resolve``
     fails, before it ever gets to preparing samples -- so ``iter_records``
     should never be called at all. To make sure of that, ``iter_records``
     itself raises an error if it's ever called. That way, if a future change
     to the runner accidentally called it anyway (running things in the
-    wrong order), this test would fail loudly and obviously, instead of
-    quietly passing when it shouldn't.
+    wrong order), these tests would fail loudly and obviously, instead of
+    quietly passing when they shouldn't.
     """
 
+    def __init__(self, message: str = "dataset provider unreachable") -> None:
+        self._message = message
+
     async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
-        raise RuntimeError("dataset provider unreachable")
+        raise RuntimeError(self._message)
 
     async def iter_records(
         self, dataset: ResolvedDataset, *, offset: int = 0, limit: int | None = None
@@ -573,21 +578,6 @@ async def test_dataset_resolution_failure_emits_exactly_one_run_failed(tmp_path:
     assert run_failed.run_id == events[0].run_id
 
 
-class _ResolveRaisesSecretCatalog:
-    """Like ``_ResolveRaisesCatalog``, but ``resolve`` raises with a message
-    containing an ``hf_``-shaped secret token, so tests using this fake can
-    prove ``RunFailed.message`` is redacted rather than persisted raw."""
-
-    async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
-        raise RuntimeError(f"upstream rejected token hf_{'B' * 40}")
-
-    async def iter_records(
-        self, dataset: ResolvedDataset, *, offset: int = 0, limit: int | None = None
-    ) -> AsyncIterator[SourceRecord]:
-        raise AssertionError("iter_records must not be called after resolve() failed")
-        yield  # pragma: no cover - unreachable; makes this an async generator
-
-
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_dataset_resolution_failure_with_secret_shaped_message_is_redacted(
@@ -605,7 +595,7 @@ async def test_dataset_resolution_failure_with_secret_shaped_message_is_redacted
         events.append(event)
 
     runner = EvalRunner(
-        catalog=_ResolveRaisesSecretCatalog(),
+        catalog=_ResolveRaisesCatalog(f"upstream rejected token hf_{'B' * 40}"),
         adapters={"identity@1": _IdentityAdapter()},
         targets={"fake": _SequencedTarget.success_then_error()},
         graders={"exact@1": _ExactFixtureGrader()},

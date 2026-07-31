@@ -16,6 +16,7 @@ section 12).
 from __future__ import annotations
 
 import re
+import warnings
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from agentic_evalkit.models.base import FrozenModel
@@ -83,6 +84,31 @@ DEFAULT_REDACTION_POLICY = RedactionPolicy(
         r"(?i:authorization)\s*[:=]\s*\S{8,}",
     ),
 )
+
+
+def _resolve_redaction_policy(policy: RedactionPolicy | None, *, caller: str) -> RedactionPolicy:
+    """Normalize the deprecated ``None`` opt-out spelling to ``RedactionPolicy()``.
+
+    ``RedactionPolicy()`` (no patterns) is the one supported way to opt out
+    of redaction. ``None`` is still accepted for backward compatibility and
+    behaves identically, but warns: deprecated since 0.4.0, support for it
+    will be removed in 0.5.0. Every constructor that accepts a policy calls
+    this one function so the deprecation window and wording cannot drift
+    between call sites. ``stacklevel=3`` points the warning at the code that
+    called the constructor, not at the constructor or this helper.
+    """
+    if policy is not None:
+        return policy
+    warnings.warn(
+        f"{caller}(redaction_policy=None) is deprecated; pass "
+        "RedactionPolicy() instead, which is the supported way to opt "
+        "out of redaction. None is still accepted for backward "
+        "compatibility (deprecated since 0.4.0); support for it will "
+        "be removed in 0.5.0.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    return RedactionPolicy()
 
 
 @runtime_checkable
