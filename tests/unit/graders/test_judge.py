@@ -414,6 +414,25 @@ async def test_redaction_policy_none_disables_redaction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_redaction_policy_none_warns_and_still_disables_redaction() -> None:
+    """``redaction_policy=None`` is the deprecated opt-out spelling (DW-7):
+    constructing a ``JudgeGrader`` with it must raise a
+    ``DeprecationWarning``, and grading behavior must stay unchanged -- a
+    planted secret still reaches the judge verbatim.
+    """
+    execution = _execution_with_output({"answer": f"the token is {_PLANTED_SECRET}"})
+    judge = _FakeJudge(0.9)
+
+    with pytest.warns(DeprecationWarning):
+        grader = JudgeGrader(judge, calibration=None, gate=False, redaction_policy=None)
+
+    result = await grader.grade(_sample(), execution)
+
+    assert _PLANTED_SECRET in judge.calls[0].candidate_output
+    assert "candidate_output_redacted" not in result.evidence
+
+
+@pytest.mark.asyncio
 async def test_max_candidate_output_chars_none_disables_truncation() -> None:
     """``max_candidate_output_chars=None`` opts out: an oversized output
     reaches the judge whole, and neither truncation evidence key is added.

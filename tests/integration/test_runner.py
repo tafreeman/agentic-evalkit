@@ -573,6 +573,53 @@ async def test_dataset_resolution_failure_emits_exactly_one_run_failed(tmp_path:
     assert run_failed.run_id == events[0].run_id
 
 
+class _ResolveRaisesSecretCatalog:
+    """Like ``_ResolveRaisesCatalog``, but ``resolve`` raises with a message
+    containing an ``hf_``-shaped secret token, so tests using this fake can
+    prove ``RunFailed.message`` is redacted rather than persisted raw."""
+
+    async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
+        raise RuntimeError(f"upstream rejected token hf_{'B' * 40}")
+
+    async def iter_records(
+        self, dataset: ResolvedDataset, *, offset: int = 0, limit: int | None = None
+    ) -> AsyncIterator[SourceRecord]:
+        raise AssertionError("iter_records must not be called after resolve() failed")
+        yield  # pragma: no cover - unreachable; makes this an async generator
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_dataset_resolution_failure_with_secret_shaped_message_is_redacted(
+    tmp_path: Path,
+) -> None:
+    """If the dataset catalog's ``resolve`` method raises with a
+    secret-shaped substring in its message, that substring must not survive
+    onto the emitted ``RunFailed.message`` -- it should be replaced with
+    ``[REDACTED]``, exactly like the runner's other exception-message
+    boundaries (target/grader error results).
+    """
+    events: list[RunEvent] = []
+
+    def _sink(event: RunEvent) -> None:
+        events.append(event)
+
+    runner = EvalRunner(
+        catalog=_ResolveRaisesSecretCatalog(),
+        adapters={"identity@1": _IdentityAdapter()},
+        targets={"fake": _SequencedTarget.success_then_error()},
+        graders={"exact@1": _ExactFixtureGrader()},
+        artifact_store=_artifact_store(tmp_path),
+    )
+    with pytest.raises(RuntimeError, match="upstream rejected token"):
+        await runner.run(_manifest(), event_sink=_sink)
+
+    run_failed = events[-1]
+    assert isinstance(run_failed, RunFailed)
+    assert "[REDACTED]" in run_failed.message
+    assert f"hf_{'B' * 40}" not in run_failed.message
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_cancellation_during_the_run_emits_exactly_one_run_failed(tmp_path: Path) -> None:

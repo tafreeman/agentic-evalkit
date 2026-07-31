@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import warnings
 from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -180,7 +181,12 @@ class EvalRunner:
             never accidentally writes a raw secret to disk. A caller can
             supply a custom ``RedactionPolicy`` to change which patterns
             count as secrets, or pass ``RedactionPolicy()`` with no patterns
-            at all to deliberately turn this protection off.
+            at all -- the single supported way to deliberately turn this
+            protection off. Passing ``None`` is still accepted for backward
+            compatibility and behaves identically (redaction fully
+            disabled), but is deprecated: it emits a ``DeprecationWarning``
+            and is normalized internally to ``RedactionPolicy()``. It ships
+            deprecated in 0.4.0; support for it will be removed in 0.5.0.
     """
 
     def __init__(
@@ -195,6 +201,17 @@ class EvalRunner:
         id_factory: IdFactory = _default_id_factory,
         redaction_policy: RedactionPolicy | None = DEFAULT_REDACTION_POLICY,
     ) -> None:
+        if redaction_policy is None:
+            warnings.warn(
+                "EvalRunner(redaction_policy=None) is deprecated; pass "
+                "RedactionPolicy() instead, which is the supported way to opt "
+                "out of redaction. None is still accepted for backward "
+                "compatibility (deprecated since 0.4.0); support for it will "
+                "be removed in 0.5.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            redaction_policy = RedactionPolicy()
         self._catalog = catalog
         self._adapters = dict(adapters)
         self._targets = dict(targets)
@@ -307,7 +324,7 @@ class EvalRunner:
                 RunFailed(
                     run_id=run_id,
                     error_type=type(error).__name__,
-                    message=str(error),
+                    message=self._safe_error_message(error),
                     failed_at=self._clock(),
                 )
             )
@@ -669,7 +686,7 @@ class EvalRunner:
             created_at=self._clock(),
         )
 
-    def _safe_error_message(self, error: Exception) -> str:
+    def _safe_error_message(self, error: BaseException) -> str:
         """Redact secret-shaped substrings from ``str(error)`` and cap its length.
 
         Mirrors the redact-then-truncate order (and truncation marker)
@@ -678,7 +695,10 @@ class EvalRunner:
         ``_compiled_secret_patterns``/``_redact`` this module already uses
         for spilling), then the message is bounded at
         ``_MAX_ERROR_MESSAGE_CHARS``. An exception message can echo target-
-        or grader-controlled text, so it is never persisted raw.
+        or grader-controlled text, so it is never persisted raw. Takes
+        ``BaseException`` rather than ``Exception`` because ``run()`` catches
+        ``BaseException`` (a cancellation reaches this same path via
+        ``_emit_run_failed``), not just ``Exception``.
         """
         message = str(error)
         patterns = self._compiled_secret_patterns()
@@ -940,16 +960,13 @@ class EvalRunner:
     def _compiled_secret_patterns(self) -> tuple[re.Pattern[str], ...]:
         """Compile ``self._redaction_policy.secret_patterns`` into regexes, or none at all.
 
-        Returns an empty tuple in two different cases: when the policy was
-        explicitly set to ``None`` (meaning the caller opted out of spill
-        redaction entirely), and when a policy object was given but its
-        own ``secret_patterns`` list happens to be empty. In the normal
-        case, though, the constructor's default value is
+        Returns an empty tuple when a policy was given but its own
+        ``secret_patterns`` list happens to be empty (``RedactionPolicy()``
+        -- the supported way to opt out of spill redaction entirely). In
+        the normal case, though, the constructor's default value is
         :data:`DEFAULT_REDACTION_POLICY`, which does have patterns defined
         -- so ordinarily, this compiles and returns those.
         """
-        if self._redaction_policy is None:
-            return ()
         return tuple(re.compile(pattern) for pattern in self._redaction_policy.secret_patterns)
 
 

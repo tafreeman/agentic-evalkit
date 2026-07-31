@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+
+- `EvalRunner(redaction_policy=None)` and `JudgeGrader(redaction_policy=None)`
+  are deprecated. `RedactionPolicy()` is the supported spelling for opting
+  out of redaction; `None` still works (it is normalized internally to
+  `RedactionPolicy()`) but now emits a `DeprecationWarning`. Support for
+  `None` ships deprecated in 0.4.0 and is planned for removal in 0.5.0.
+
 ### Fixed
 
 - `EvalRunner` now fault-isolates the third boundary that can raise per
@@ -43,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Because `artifacts` is target-controlled, an `output_spill_error` entry is
   acted on only when it carries the `output_spill_failed` code, so a target
   cannot steer a grade or the warning by writing that key itself.
+- `EvalRunner._emit_run_failed` now routes `RunFailed.message` through the
+  same redact-then-bound helper (`_safe_error_message`) already used for
+  target/grader error messages, instead of persisting the raw exception
+  text.
 
 ### Security
 
