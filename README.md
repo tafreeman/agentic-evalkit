@@ -97,10 +97,10 @@ extras policy.
 - [CLI reference](docs/guides/cli-reference.md) — commands, options, offline behavior, and exit codes
 - [Providers](docs/guides/providers.md) — local formats, Hugging Face auth, cache/offline
 - [Graders](docs/guides/graders.md) — objective-first order, hard gates, calibrated judges
-- [Targets](docs/guides/targets.md) — callable, subprocess, and HTTP execution targets
+- [Targets](docs/guides/targets.md) — callable, subprocess, HTTP, and MCP-stdio execution targets
 - [SWE-bench](docs/guides/swebench.md) — preview/prediction workflow and the harness boundary
 - [HTTP agent example](docs/guides/http-agent-example.md) — evaluating a real HTTP agent endpoint
 
 ## Repository boundary
 
-This project imports no host-repo internals — systems are reached only through the public `ExecutionTarget` protocol (callable, subprocess, or HTTP adapters); see [ADR-0001](docs/adr/0001-standalone-boundary.md) and [ADR-0006](docs/adr/0006-execution-target-boundary.md).
+This project imports no host-repo internals — systems are reached only through the public `ExecutionTarget` protocol (callable, subprocess, HTTP, or MCP-stdio adapters); see [ADR-0001](docs/adr/0001-standalone-boundary.md) and [ADR-0006](docs/adr/0006-execution-target-boundary.md).

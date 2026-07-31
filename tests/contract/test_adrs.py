@@ -48,12 +48,15 @@ ADR_DIR = Path("docs/adr")
 #: size of, the system-under-test's output before it is sent to an LLM
 #: judge), 0019 (retract unshipped entry-point plugin discovery --
 #: formally remove a plugin-loading feature that was built but never
-#: actually wired up to anything), and 0020 (Wilson lower-bound judge
+#: actually wired up to anything), 0020 (Wilson lower-bound judge
 #: floor, response envelope, and gating-scoped probe -- a stricter
 #: statistical bar before a judge may gate a release, a structured way for
 #: a judge to report refusal/error instead of just failing outright, and
 #: skipping an expensive bias-check probe when its result would not
-#: actually be used). Each prefix matches exactly one file under docs/adr/.
+#: actually be used), and 0021 (MCP stdio execution target -- a fourth
+#: built-in adapter that evaluates a tool behind any MCP stdio server by
+#: spawning the server fresh for every sample and making exactly one
+#: tools/call). Each prefix matches exactly one file under docs/adr/.
 REQUIRED_ADR_PREFIXES = (
     "0001",
     "0002",
@@ -75,6 +78,7 @@ REQUIRED_ADR_PREFIXES = (
     "0018",
     "0019",
     "0020",
+    "0021",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
@@ -229,6 +233,7 @@ NUMBER_WORDS = {
     "eighteen": 18,
     "nineteen": 19,
     "twenty": 20,
+    "twenty-one": 21,
 }
 
 
@@ -277,7 +282,7 @@ def test_landing_page_adr_claims_match_committed_adr_count() -> None:
         f"docs/index.md ADR stat tile says {tile.group(1)}; docs/adr/ ships {count}"
     )
 
-    prose = re.search(r"(\w+) architecture decision records, 0001 through (\d{4})", index)
+    prose = re.search(r"([\w-]+) architecture decision records, 0001 through (\d{4})", index)
     assert prose is not None, "docs/index.md: ADR-index prose claim not found"
     assert NUMBER_WORDS.get(prose.group(1).lower()) == count, (
         f"docs/index.md prose says {prose.group(1)!r} architecture decision records; "
