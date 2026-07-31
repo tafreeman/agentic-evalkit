@@ -27,8 +27,11 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
+
+import pytest
 
 from agentic_evalkit.artifacts import ArtifactStore
 from agentic_evalkit.models import ExecutionStatus, NormalizedExecutionResult
@@ -70,6 +73,25 @@ def _default_runner(store: ArtifactStore) -> EvalRunner:
         graders={},
         artifact_store=store,
     )
+
+
+def _runner_with_explicit_none_policy(store: ArtifactStore) -> EvalRunner:
+    """Like ``_default_runner``, but passes ``redaction_policy=None``
+    explicitly -- the deprecated (but still-accepted) opt-out spelling under
+    test here, rather than the supported ``RedactionPolicy()`` spelling.
+    Warnings are suppressed here since the deprecation warning itself is
+    covered by its own dedicated test below.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        return EvalRunner(
+            catalog=cast("Any", None),
+            adapters={},
+            targets={},
+            graders={},
+            artifact_store=store,
+            redaction_policy=None,
+        )
 
 
 def _execution_with_output(output: dict[str, JsonValue]) -> NormalizedExecutionResult:
@@ -243,3 +265,37 @@ def test_spill_redaction_is_idempotent_at_the_boundary(tmp_path: Path) -> None:
     for pattern in DEFAULT_REDACTION_POLICY.secret_patterns:
         reapplied = re.sub(pattern, "[REDACTED]", reapplied)
     assert reapplied == persisted
+
+
+def test_redaction_policy_none_emits_deprecation_warning(tmp_path: Path) -> None:
+    # `redaction_policy=None` is the deprecated opt-out spelling (DW-7):
+    # constructing an EvalRunner with it must raise a DeprecationWarning,
+    # naming RedactionPolicy() as the supported spelling instead.
+    root = tmp_path / "artifacts"
+    store = ArtifactStore(root)
+
+    with pytest.warns(DeprecationWarning):
+        EvalRunner(
+            catalog=cast("Any", None),
+            adapters={},
+            targets={},
+            graders={},
+            artifact_store=store,
+            redaction_policy=None,
+        )
+
+
+def test_redaction_policy_none_still_disables_spill_redaction(tmp_path: Path) -> None:
+    # Behavior must stay byte-identical to before the deprecation: a runner
+    # built with the deprecated `redaction_policy=None` spelling still spills
+    # a secret-containing output completely unredacted.
+    root = tmp_path / "artifacts"
+    store = ArtifactStore(root)
+    runner = _runner_with_explicit_none_policy(store)
+
+    spilled = runner._spill_large_output(_large_secret_execution())
+    assert "output_ref" in spilled.artifacts
+
+    stored = _only_payload_text(root)
+    assert _SECRET in stored
+    assert "[REDACTED]" not in stored
