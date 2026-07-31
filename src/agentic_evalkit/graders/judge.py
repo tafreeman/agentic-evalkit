@@ -100,7 +100,11 @@ from agentic_evalkit.graders.calibration import (
 )
 from agentic_evalkit.models import EvalSample, GradeResult, GradeStatus, NormalizedExecutionResult
 from agentic_evalkit.models.base import FrozenModel
-from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
+from agentic_evalkit.reporters.base import (
+    DEFAULT_REDACTION_POLICY,
+    RedactionPolicy,
+    _resolve_redaction_policy,
+)
 
 # If the judge's response doesn't parse, we try again -- but only up to
 # this many extra times, so 3 judge calls total at most.
@@ -222,8 +226,14 @@ class JudgeGrader:
             the original question or the reference answer -- see the note
             below for why. Defaults to
             :data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`,
-            so secrets don't leak to a judge by accident. Pass ``None`` (or
-            an empty policy) to turn this off.
+            so secrets don't leak to a judge by accident. Pass
+            ``RedactionPolicy()`` (an empty policy) to deliberately turn
+            this off -- the single supported opt-out. Passing ``None`` is
+            still accepted for backward compatibility and behaves
+            identically, but is deprecated: it emits a
+            ``DeprecationWarning`` and is normalized internally to
+            ``RedactionPolicy()``. It ships deprecated in 0.4.0; support for
+            it will be removed in 0.5.0.
         max_candidate_output_chars: The longest the AI's answer is allowed
             to be before we cut it short (with a marker showing it was cut)
             when sending it to the judge. Defaults to 8192 characters. Pass
@@ -258,6 +268,7 @@ class JudgeGrader:
         redaction_policy: RedactionPolicy | None = DEFAULT_REDACTION_POLICY,
         max_candidate_output_chars: int | None = _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
     ) -> None:
+        redaction_policy = _resolve_redaction_policy(redaction_policy, caller="JudgeGrader")
         self._judge = judge
         self._calibration = calibration
         self._gate = gate
@@ -615,14 +626,13 @@ class JudgeGrader:
         """Turn the configured secret patterns into ready-to-use regexes, or none.
 
         Works the same way ``EvalRunner._compiled_secret_patterns`` does in
-        ``runner.py``: you get nothing back both when redaction was
-        explicitly turned off (``None``) and when a policy was given that
-        just happens to list no patterns. Normally, though, the default
-        policy (:data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`)
+        ``runner.py``: you get nothing back when a policy was given that
+        just happens to list no patterns (``RedactionPolicy()`` -- the
+        supported way to opt out of redaction entirely). Normally, though,
+        the default policy
+        (:data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`)
         does list real patterns, so the usual case compiles those.
         """
-        if self._redaction_policy is None:
-            return ()
         return tuple(re.compile(pattern) for pattern in self._redaction_policy.secret_patterns)
 
     def _calibration_failure_reason(self, *, now: datetime | None = None) -> str | None:

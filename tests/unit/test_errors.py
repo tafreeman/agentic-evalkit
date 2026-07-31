@@ -13,6 +13,7 @@ from agentic_evalkit.errors import (
     IncompatibleRuns,
     ManifestValidationError,
     OfflineCacheMiss,
+    OutputSpillFailed,
     PluginCompatibilityError,
     TargetFailure,
     TargetTimeout,
@@ -34,6 +35,7 @@ ALL_SUBCLASSES: tuple[type[AgenticEvalkitError], ...] = (
     PluginCompatibilityError,
     TargetFailure,
     TargetTimeout,
+    OutputSpillFailed,
     GraderError,
     IncompatibleRuns,
     ManifestValidationError,
@@ -62,6 +64,7 @@ def test_default_code_is_stable_snake_case_derived_from_class_name() -> None:
     assert PluginCompatibilityError(message="incompatible").code == "plugin_compatibility_error"
     assert TargetFailure(message="failed").code == "target_failure"
     assert TargetTimeout(message="timed out").code == "target_timeout"
+    assert OutputSpillFailed(message="spill failed").code == "output_spill_failed"
     assert GraderError(message="grader broke").code == "grader_error"
     assert IncompatibleRuns(message="not comparable").code == "incompatible_runs"
     assert ManifestValidationError(message="bad manifest").code == "manifest_validation_error"

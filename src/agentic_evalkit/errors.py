@@ -60,6 +60,7 @@ __all__ = [
     "IncompatibleRuns",
     "ManifestValidationError",
     "OfflineCacheMiss",
+    "OutputSpillFailed",
     "PluginCompatibilityError",
     "SecretValue",
     "TargetFailure",
@@ -255,6 +256,29 @@ class TargetFailure(AgenticEvalkitError):
 
 class TargetTimeout(AgenticEvalkitError):
     """The execution target did not respond within the configured timeout."""
+
+
+# --- Output storage errors ------------------------------------------------------
+
+
+class OutputSpillFailed(AgenticEvalkitError):
+    """The artifact store refused or failed to persist an output too large to keep inline.
+
+    Raised nowhere directly -- ``EvalRunner`` constructs one of these to
+    *wrap* whatever the store threw (an ``ArtifactStoreLimitExceeded``, an
+    ``OSError`` from a full or read-only disk, anything else), because those
+    are plain Python exceptions with no stable ``code`` of their own. This
+    wrapper is what gives that failure a machine-readable
+    ``"output_spill_failed"`` label on the recorded result, so a caller can
+    recognize "the answer existed but could not be stored" without matching
+    on exception class names that are free to change.
+
+    A spill failure is a *storage* failure, not a task failure: the system
+    under test really did run, and (per ADR-0017) the grader had already
+    seen the full inline output before the spill was even attempted. So the
+    execution keeps its status and its grade -- what is lost is only the
+    ability to read the output back later.
+    """
 
 
 # --- Grading errors ------------------------------------------------------------

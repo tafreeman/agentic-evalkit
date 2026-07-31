@@ -159,6 +159,17 @@ argument -- see Consequences.
   reports `GradeStatus.ERROR` with `"spilled"` in the evidence reason.
 - `tests/unit/test_spill_redaction.py` is unchanged and still exercises
   `_spill_large_output`'s redaction/threshold behavior directly.
+- The unconditional spill call this ADR places after grading is, since
+  ADR-0020's output-spill isolation amendment, reached through
+  `EvalRunner._spill_isolated` rather than called directly. Nothing here
+  changes -- the spill still runs for every execution status, still runs
+  only after grading -- but an artifact store that refuses or fails to write
+  the bytes now degrades that one sample (`output=None` plus an
+  `artifacts["output_spill_error"]` record) instead of aborting the run. The
+  ordering guaranteed by this ADR is what makes that degradation safe to
+  apply: because the grader has already seen the full inline output, the
+  sample keeps the status and the grade it earned. See ADR-0020's
+  "Runner-level output-spill isolation (amendment)" bullet for the decision.
 
 ## Supersession
 

@@ -105,6 +105,33 @@ Every wire change is additive; `schema_version` stays `"1"` (ADR-0002).
   fires, and every other sample's completed result survives — the target and
   grader boundaries now behave symmetrically with the judge boundary and with
   the operational-vs-task separation ADR-0008 requires.
+- **Runner-level output-spill isolation (amendment).** The spill that moves an
+  oversized output to the `ArtifactStore` is the third call
+  `_execute_and_grade` makes that can raise, and it stayed unguarded inside the
+  same `TaskGroup` after the two boundaries above were isolated. A store
+  failure — `ArtifactStoreLimitExceeded` (a plain `ValueError` carrying no
+  `.code` of its own), or an `OSError` from a full or read-only disk —
+  therefore cancelled every in-flight sibling and escaped `EvalRunner.run` as
+  an `ExceptionGroup`, so no report was written and every result the run had
+  already graded was lost over a storage problem. `EvalRunner._spill_isolated`
+  now applies the same per-sample treatment at that third boundary: the
+  affected sample degrades to `output=None` carrying the new `OutputSpillFailed`
+  taxonomy code (`output_spill_failed`) with a message redacted then bounded
+  under the ADR-0018 order. It differs from the target and grader boundaries in
+  one deliberate respect — `status` and any already-computed `grade` are
+  **preserved**. A store refusing the bytes is a storage failure, not a verdict
+  on the attempt: the target genuinely completed, and ADR-0017 guarantees the
+  grader had already seen the full inline output before the spill ran. Flipping
+  the status to `ERROR` would re-bucket an earned grade as an operational error
+  in both `_summarize` and `stats.aggregate`, and would break the standing
+  invariant that a non-`COMPLETED` execution carries `grade=None`. The record
+  always lands in `artifacts["output_spill_error"]` — that namespace is the
+  boundary's own log of what it did, `output_ref` on success and
+  `output_spill_error` on failure — and claims the execution's primary `error`
+  field only when the execution carries none, so a target that already reported
+  its own failure alongside a large output keeps that diagnosis intact. As
+  above, only `Exception` is caught, so `CancelledError` still tears the run
+  down.
 - **Gating-scoped probe.** The reversed-order probe is issued only when
   `gate=True` **and** the calibration is usable (no calibration failure), so the
   advisory path makes exactly one judge call per sample. It is not additionally
@@ -151,6 +178,28 @@ Every wire change is additive; `schema_version` stays `"1"` (ADR-0002).
    (ADR-0018's scope decision stands), and reading a judge's self-reported
    rationale or confidence to influence gating is precisely the subjective
    shortcut design section 9 orders last, never first.
+7. **Truncate an oversized output and store the prefix, marking the artifact
+   truncated, instead of isolating the spill failure.** Rejected: it answers a
+   different question. Truncation addresses only the store's size limit and
+   does nothing for the other ways a store fails (a full disk, a read-only
+   directory, a permission change mid-run), so the run-aborting defect would
+   survive in every non-size case. It also silently converts a stored artifact
+   into a partial one, which is precisely the kind of quiet quality
+   degradation this project's evidence-first posture exists to prevent: a
+   truncated patch or transcript still *looks* like the answer. Per-sample
+   isolation is the treatment already ratified for the target and grader
+   boundaries above, it covers every failure mode rather than one, and it
+   keeps what was lost explicit rather than plausible.
+8. **Mark a failed spill as `ExecutionStatus.ERROR`, so it shows up in the
+   run's error count and exit code.** Rejected: it destroys evidence to raise
+   an alarm. The attempt completed and the grader had already scored the full
+   inline output (ADR-0017), so re-bucketing the sample as an operational
+   error discards a verdict that was genuinely earned -- the same class of
+   loss the isolation exists to prevent, just smaller. It would also break the
+   invariant that a non-`COMPLETED` execution carries `grade=None`. The
+   discoverability concern is real and is addressed where it belongs: the
+   `run` command prints an explicit warning naming how many outputs were
+   dropped, without falsifying any count.
 
 ## Consequences
 
@@ -186,6 +235,109 @@ Every wire change is additive; `schema_version` stays `"1"` (ADR-0002).
   escape `EvalRunner.run` on a target/grader raise now receive a completed
   `EvalRunResult` whose affected sample is an operational `ERROR`/`TIMEOUT`
   (never a task `FAIL`), counted in `RunSummary.errors`/`.timeouts`.
+- The spill amendment surfaces in the persisted result rather than in the exit
+  status. `NormalizedExecutionResult.artifacts` may now carry an
+  `output_spill_error` record, and `error` may carry `output_spill_failed` on a
+  still-`COMPLETED` execution — the one case where an error record accompanies
+  a clean status, and the reason that field's documentation no longer promises
+  otherwise. Because the status is preserved, a spill failure alone does not
+  raise `RunSummary.errors` and therefore does not change the CLI's exit code.
+  So that a degraded run cannot look untouched, the `run` command prints an
+  explicit warning naming how many sample outputs were dropped; the per-sample
+  detail is always in `artifacts["output_spill_error"]`, whether or not the
+  spill record also claimed `error`. `HarnessGrader` recognises the new state
+  and re-grades it as an explicit `GradeStatus.ERROR` naming the failed spill,
+  instead of the factually wrong "produced no output" `UNAVAILABLE` it would
+  otherwise fall through to.
+- Report-boundary redaction now sweeps `execution.artifacts` alongside
+  `output`/`structured_output`/`error`. That field previously held only
+  harness-authored values (an `output_ref` digest), but a failed spill records
+  the store's own exception text there, and a store that talks to something
+  remote can echo a credential into it. Without the sweep, a caller who had
+  opted out of the runner's spill redaction (`redaction_policy=None`) could
+  have written that text unredacted into the canonical report — the one
+  promise `write_canonical_report` makes. A genuine `output_ref` digest is
+  exempt from the sweep so the reference it carries is never rewritten; see
+  the digest bullet below for why that exemption is gated on the value's
+  shape rather than on the key name.
+- The spill isolation is closed against its own failure handler.
+  `_safe_error_message` compiles the caller's `secret_patterns`, the very call
+  that raises `re.error` on a malformed pattern inside `_spill_large_output`;
+  deriving the recorded message through `_spill_failure_message` means that
+  raise cannot re-enter the `TaskGroup` from the `except` block and cancel the
+  siblings the isolation just saved. The record is also copied per field rather
+  than shared, so a later stage rewriting `error` cannot silently rewrite
+  `artifacts` too. This hardening is scoped to the spill boundary: the target
+  and grader handlers still call `_safe_error_message` directly, so the same
+  malformed pattern escapes those two `except` blocks. That is a pre-existing
+  gap this amendment deliberately leaves open: closing it belongs with the
+  boundaries it affects, not with the storage decision recorded here.
+- Dropping the output is conditional on it actually having been oversized.
+  `_spill_large_output` serializes, compiles patterns and encodes *before* it
+  compares against the threshold, so a raise from any of those steps reaches
+  the handler for an output the store was never offered. Nulling it there
+  would destroy a small inline answer -- for every sample in the run, since
+  the redaction policy is per-runner -- while recording that the store refused
+  bytes it never saw. The handler therefore re-measures the raw serialization
+  (`str` on JSON-shaped data cannot raise, so the check is available even when
+  the redaction that follows it is not) and keeps any output within the
+  threshold inline, where it is bounded by definition and gets redacted at the
+  report boundary like any other small output. Because the record is written
+  whether or not the output was dropped, a record alone is not evidence of
+  loss: the `run` command's warning counts a sample only when `output is None`
+  *and* the record is present, so a boundary that failed before the size check
+  — a per-runner setting, therefore every sample in the run — cannot make a
+  run that lost nothing report a total loss. `_output_exceeds_inline_threshold`
+  is itself written never to raise, for the same reason
+  `_spill_failure_message` is: it runs inside the same `except` block, where a
+  raise would re-enter the `TaskGroup` and cancel the siblings the isolation
+  had just saved.
+- `artifacts` is target-controlled, so `output_spill_error` is a key any target
+  may write. Consumers that act on a spill failure -- `HarnessGrader` deciding
+  a result cannot be re-graded, the `run` command's dropped-output warning --
+  route through `models.execution.is_output_spill_error_record`, which requires
+  a mapping carrying the `output_spill_failed` code. A target therefore cannot
+  steer a grade or a warning by guessing a key name, no consumer subscripts a
+  record that may lack the key it expects, and no unbounded target-authored
+  string reaches `GradeResult.evidence`, which is not length-bounded the way
+  the runner's own recorded messages are. A successful spill also clears any
+  stale *runner-written* `output_spill_error` before writing `output_ref`: the
+  two describe the same boundary's outcome and cannot both be true, and
+  consumers check the failure key first, so a leftover record would announce
+  that bytes sitting on disk were never persisted. Only records carrying the
+  taxonomy code are removed — a target's own data under that name survives its
+  output spilling, and cannot cause that misreading anyway, since every
+  consumer validates the record's shape first.
+- The `output_ref` digest is exempt from the widened redaction sweep. It is the
+  only pointer back to a payload already written to the store, so a pattern
+  that rewrites one character of it orphans those bytes permanently. The
+  default policy cannot match a hex digest, but `apply_redaction` is public and
+  takes any policy a caller supplies, and a generic "long hex string looks like
+  a key" rule is a reasonable thing to add. The digest is harness-authored and
+  structurally incapable of carrying a secret, so the exemption gives up
+  nothing; every other key in `artifacts` is still swept.
+- That exemption is gated on the value's **shape**, not on the key name, for
+  the same reason `output_spill_error` is: `artifacts` is target-controlled and
+  neither key is reserved. Exempting whatever happens to sit under `output_ref`
+  would let a target returning `artifacts={"output_ref": "hf_…"}` carry a live
+  credential through the sweep and into the canonical report — under the
+  *default* policy, which is the one the CLI writes every report with, so the
+  hole would be reachable from the shipped tool rather than only from a
+  caller-supplied policy. Only a value matching what `ArtifactStore` mints
+  (`sha256:` plus 64 lowercase hex characters) is treated as a reference;
+  anything else is free-form target text and is redacted with the rest of the
+  dict.
+- The spill record's `code` is exempt on the same grounds. It is the value
+  `is_output_spill_error_record` matches on, so a caller policy broad enough
+  to rewrite `output_spill_failed` would leave the redacted report carrying a
+  record no consumer recognises — `HarnessGrader` re-grading it falls back to
+  the "produced no output" `UNAVAILABLE` this amendment exists to eliminate,
+  and the `run` command's warning stops firing. Restoring it smuggles
+  nothing, because it is not restored from the record: it is rewritten to the
+  fixed `OUTPUT_SPILL_FAILED_CODE` literal, and only for a record that
+  already carried the code before the sweep. The record's `message` and
+  `type` — the parts that can hold store-authored text — are still redacted,
+  as is every other key in the dict.
 
 ## Validation
 
@@ -228,6 +380,103 @@ Every wire change is additive; `schema_version` stays `"1"` (ADR-0002).
   (`test_cancellation_during_the_run_emits_exactly_one_run_failed`,
   `test_cancelling_the_run_marks_pending_samples_cancelled`) still pass,
   confirming `CancelledError` is not swallowed by the new isolation.
+- `tests/unit/test_spill_redaction.py` proves the spill-boundary amendment
+  against a real `ArtifactStore` whose `max_bytes` sits between the spill
+  threshold and the payload, so the spill is entered and then genuinely
+  rejected: `test_store_rejecting_the_payload_degrades_the_sample_instead_of_raising`
+  (`output=None`, `status` unchanged, `error["code"] == "output_spill_failed"`,
+  `error["type"] == "ArtifactStoreLimitExceeded"`, nothing written to disk),
+  `test_an_error_the_target_already_reported_is_never_overwritten` (the
+  target's own `error` survives verbatim while the spill record still lands in
+  `artifacts`), `test_a_store_failure_that_is_not_a_value_error_degrades_identically`
+  (an `OSError` absorbed the same way, naming the real class),
+  `test_a_secret_in_the_store_failure_message_is_redacted_before_it_is_recorded`,
+  and `test_cancellation_raised_by_the_store_is_deliberately_not_absorbed`
+  (`CancelledError` propagates out of `_spill_isolated` uncaught).
+- `tests/integration/test_runner.py::test_run_completes_when_the_artifact_store_rejects_one_sample_output`
+  proves the run-level guarantee end to end: two concurrent samples, a store
+  that rejects one sample's oversized output, and the run still returns
+  normally with `RunCompleted` and no `RunFailed`, the sibling's inline graded
+  result intact, the affected sample keeping its `COMPLETED` status and its
+  `PASS` grade with `artifacts["output_spill_error"]["code"] ==
+  "output_spill_failed"`, and `summary.total == 2` with `summary.errors` still
+  zero.
+- `tests/unit/graders/test_harness_grader.py::test_failed_spill_is_a_diagnostic_error_not_a_silent_unavailable`
+  pins the re-grade path (a failed-spill result grades `ERROR` naming the
+  spill, never `UNAVAILABLE`), and `tests/unit/test_errors.py` pins
+  `OutputSpillFailed(...).code == "output_spill_failed"` as a stable taxonomy
+  contract rather than an accident of the class name.
+- `tests/unit/reporters/test_redaction_policy.py::test_redaction_covers_execution_artifacts`
+  proves a credential planted in an `output_spill_error` message is
+  `[REDACTED]` in the redacted run while the record stays machine-readable,
+  and `::test_redaction_leaves_a_spilled_output_digest_intact` proves the
+  widened sweep does not rewrite an `output_ref` digest, which would orphan
+  the artifact it points at.
+  `::test_a_caller_supplied_pattern_never_rewrites_an_output_ref_digest`
+  proves the same under a *non-default* policy (`[A-Fa-f0-9]{32,}`, which
+  does match a digest), and
+  `::test_the_digest_exemption_does_not_shield_the_rest_of_artifacts` proves
+  the exemption is exactly that narrow -- a secret in a sibling key of the
+  same dict is still redacted.
+- `tests/unit/test_spill_redaction.py::test_a_failure_before_the_size_check_leaves_a_small_output_inline`
+  proves a ~30-byte output survives a spill boundary that raises before the
+  store is reached, while
+  `::test_an_oversized_output_is_still_dropped_when_the_failure_is_not_the_store`
+  proves a genuinely oversized payload is still dropped no matter which step
+  failed, and
+  `::test_a_successful_spill_clears_a_stale_spill_error_record` proves a spill
+  that succeeds does not leave a runner-written failure record behind it,
+  while `::test_a_successful_spill_keeps_a_targets_own_data_under_that_key`
+  proves that clearing is scoped to records carrying the taxonomy code rather
+  than deleting whatever a target stored under the name.
+- `tests/unit/cli/test_run_spill_warning.py::test_a_recorded_failure_that_kept_its_output_inline_is_not_counted`
+  pins that the warning counts lost outputs rather than recorded failures, so
+  a spill boundary that fails before the size check — which, being a
+  per-runner setting, fails every sample — cannot make a run that lost nothing
+  report a total loss.
+- `tests/unit/reporters/test_redaction_policy.py::test_a_target_cannot_smuggle_a_secret_through_the_output_ref_exemption`
+  pins that the digest exemption is gated on the value's shape: a target
+  returning `artifacts={"output_ref": "hf_…"}` has it redacted under the
+  default policy rather than carried into the report, and
+  `::test_the_digest_exemption_matches_what_the_artifact_store_actually_mints`
+  pins the exemption's shape gate against a digest a real `ArtifactStore`
+  minted, so the two independent spellings of that format cannot drift with
+  the suite green — the same drift the taxonomy-code contract test closes one
+  constant over.
+- `tests/unit/reporters/test_redaction_policy.py::test_a_caller_supplied_pattern_never_rewrites_the_spill_failure_code`
+  pins the second exemption under a policy (`[a-z_]{16,}`) that does match
+  `output_spill_failed`: the code survives and the record stays recognisable
+  to `is_output_spill_error_record`, while the same pattern still rewrites the
+  record's `message`.
+- `tests/integration/test_cli_spill_warning.py::test_run_warns_on_stdout_when_sample_outputs_could_not_be_stored`
+  additionally pins that the warning arrives as one unbroken line. It is 146
+  characters and the console is pinned to width 120 whenever stdout is not a
+  terminal, so without `soft_wrap=True` Rich strands
+  `artifacts.output_spill_error` on a line of its own — breaking exactly the
+  scripted consumers the CLI guide points at it.
+- `tests/unit/graders/test_harness_grader.py::test_an_oversized_output_ref_is_truncated_before_it_reaches_the_evidence`
+  exercises `_bounded_ref`'s truncation branch, which a genuine 71-character
+  digest never reaches and which nothing else in the suite covered.
+- `tests/contract/test_models.py::test_the_spill_failure_code_constant_matches_the_error_taxonomy`
+  pins `models.execution.OUTPUT_SPILL_FAILED_CODE` against
+  `OutputSpillFailed.code`, so the two independent spellings of that one
+  contract cannot drift with the suite green.
+- `tests/unit/graders/test_harness_grader.py::test_a_target_cannot_hijack_the_spill_diagnosis_by_key_name`
+  proves a target-written `output_spill_error` (a non-dict, a dict with no
+  `code`, or a dict with some other code) falls through instead of raising
+  `KeyError` or reporting a spill failure that never happened, and
+  `::test_a_genuine_spill_record_still_wins_over_a_stale_output_ref` re-pins
+  the ordering rule for a real record.
+- `tests/integration/test_cli_spill_warning.py` proves the discoverability
+  claim end to end through the real `run` command: with a store that refuses
+  both samples, the command exits `0`, still writes its report, and prints a
+  warning naming how many outputs were dropped -- and
+  `::test_run_stays_silent_about_spills_when_nothing_was_lost` proves the line
+  is conditional rather than always emitted.
+  `tests/unit/cli/test_run_spill_warning.py::test_repeated_attempts_at_one_sample_are_counted_once`
+  pins that the count is per sample rather than per attempt, and
+  `::test_a_target_writing_the_key_itself_is_not_counted` that a target cannot
+  provoke the warning.
 - `tests/contract/test_adrs.py` adds `"0020"` to `REQUIRED_ADR_PREFIXES`, so
   this ADR's shape (seven headings, canonical order, `Accepted`, no
   contradicting phrases) is enforced identically to every other ADR, and

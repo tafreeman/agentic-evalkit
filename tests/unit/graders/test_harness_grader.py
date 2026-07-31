@@ -38,13 +38,17 @@ def _sample() -> EvalSample:
 
 
 def _execution(
-    *, status: ExecutionStatus = ExecutionStatus.COMPLETED, output: dict[str, JsonValue] | None
+    *,
+    status: ExecutionStatus = ExecutionStatus.COMPLETED,
+    output: dict[str, JsonValue] | None,
+    artifacts: dict[str, JsonValue] | None = None,
 ) -> NormalizedExecutionResult:
     now = datetime.now(UTC)
     return NormalizedExecutionResult(
         sample_id=_SAMPLE_ID,
         attempt=1,
         output=output,
+        artifacts=artifacts or {},
         status=status,
         started_at=now,
         finished_at=now,
@@ -149,20 +153,40 @@ async def test_spilled_output_is_a_diagnostic_error_not_a_silent_unavailable() -
     the result can tell the two situations apart (flagged by a code-review
     tool named Codex, priority P2)."""
     grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
-    now = datetime.now(UTC)
-    spilled = NormalizedExecutionResult(
-        sample_id=_SAMPLE_ID,
-        attempt=1,
-        output=None,
-        artifacts={"output_ref": "sha256:deadbeef"},
-        status=ExecutionStatus.COMPLETED,
-        started_at=now,
-        finished_at=now,
-    )
+    spilled = _execution(output=None, artifacts={"output_ref": "sha256:deadbeef"})
     result = await grader.grade(_sample(), spilled)
     assert result.status is GradeStatus.ERROR
     assert result.hard_gate is False
     assert "spilled" in str(result.evidence["reason"])
+
+
+@pytest.mark.asyncio
+async def test_failed_spill_is_a_diagnostic_error_not_a_silent_unavailable() -> None:
+    """The other way a spill can leave ``output=None`` behind: the artifact
+    store refused or failed to write the oversized answer, so there is an
+    ``output_spill_error`` record and -- unlike the spilled-successfully case
+    above -- no stored bytes to point at. The AI still produced a real answer;
+    it just was never persisted anywhere. Reporting UNAVAILABLE ("execution
+    produced no output") would be plainly false, so the grader reports an
+    explicit ERROR naming the failed spill instead, telling the reader this
+    result can't be re-graded and the sample has to be re-run."""
+    grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
+    spill_failed = _execution(
+        output=None,
+        artifacts={
+            "output_spill_error": {
+                "type": "ArtifactStoreLimitExceeded",
+                "code": "output_spill_failed",
+                "message": "artifact payload exceeds the configured maximum",
+            }
+        },
+    )
+    result = await grader.grade(_sample(), spill_failed)
+    assert result.status is GradeStatus.ERROR
+    assert result.hard_gate is False
+    reason = str(result.evidence["reason"])
+    assert "spilled" in reason
+    assert "output_spill_failed" in reason
 
 
 @pytest.mark.asyncio
@@ -205,3 +229,90 @@ def test_grade_result_from_harness_grader_has_no_resolved_attribute() -> None:
         created_at=datetime.now(UTC),
     )
     assert not hasattr(grade, "resolved")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "planted",
+    [
+        pytest.param({"note": "retrying"}, id="dict-without-a-code"),
+        pytest.param("totally fine actually", id="not-a-dict-at-all"),
+        pytest.param({"code": "something_else"}, id="some-other-code"),
+    ],
+)
+async def test_a_target_cannot_hijack_the_spill_diagnosis_by_key_name(
+    planted: JsonValue,
+) -> None:
+    """``artifacts`` is target-controlled -- it is documented as "any extra
+    files or data the system produced" -- so the presence of an
+    ``output_spill_error`` key proves nothing on its own. Only a record
+    carrying the ``output_spill_failed`` taxonomy code is believed; anything
+    else falls through to the ordinary handling below it.
+
+    Without that check, a bare ``spill_error["code"]`` subscript raised
+    ``KeyError`` straight out of ``grade()`` -- fatal on the re-grade path
+    this branch exists to serve -- and a target-authored value of any length
+    was interpolated verbatim into ``GradeResult.evidence``, which, unlike
+    the runner's own recorded messages, has no length bound.
+    """
+    grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
+    execution = _execution(output=None, artifacts={"output_spill_error": planted})
+
+    result = await grader.grade(_sample(), execution)
+
+    # Falls through to the "no output and no artifact reference" branch
+    # rather than raising or reporting a spill failure that never happened.
+    assert result.status is GradeStatus.UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_spill_record_still_wins_over_a_stale_output_ref() -> None:
+    """The ordering rule this branch was built around, re-pinned now that the
+    branch also validates the record: when a real spill-failure record sits
+    beside an ``output_ref`` a target wrote itself, the failure is still the
+    honest report -- those bytes were never written.
+    """
+    grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
+    execution = _execution(
+        output=None,
+        artifacts={
+            "output_ref": "sha256:" + "ab" * 32,
+            "output_spill_error": {
+                "type": "OSError",
+                "code": "output_spill_failed",
+                "message": "no space left on device",
+            },
+        },
+    )
+
+    result = await grader.grade(_sample(), execution)
+
+    assert result.status is GradeStatus.ERROR
+    assert "output_spill_failed" in str(result.evidence["reason"])
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_output_ref_is_truncated_before_it_reaches_the_evidence() -> None:
+    """``output_ref`` is target-controlled -- the key is not reserved, and a
+    target is free to put a megabyte of text under it. ``GradeResult.evidence``
+    has no length bound of its own (unlike the runner's recorded messages,
+    which go through ``_safe_error_message``), so without ``_bounded_ref``
+    that value is copied verbatim into every report that renders the grade.
+
+    A genuine reference is a 71-character ``sha256:`` digest, so this branch
+    never fires on real data -- which is exactly why it needs a test: nothing
+    else in the suite reaches it, and the truncation the CHANGELOG and
+    ADR-0020 both cite as hardening would otherwise ship unexercised.
+    """
+    grader = _grader(HarnessResult(status=HarnessStatus.COMPLETED, resolved=True, message="ok"))
+    execution = _execution(output=None, artifacts={"output_ref": "z" * 5000})
+
+    result = await grader.grade(_sample(), execution)
+
+    reason = str(result.evidence["reason"])
+    assert result.status is GradeStatus.ERROR
+    assert "...[truncated]" in reason
+    # Bounded to the cap plus the marker and the surrounding sentence, rather
+    # than growing with whatever the target sent.
+    assert len(reason) < 500
+    assert "z" * 200 not in reason

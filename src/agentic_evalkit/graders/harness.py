@@ -55,14 +55,19 @@ from agentic_evalkit.benchmarks.harness import (
     HarnessStatus,
 )
 from agentic_evalkit.models import (
+    OUTPUT_REF_KEY,
+    OUTPUT_SPILL_ERROR_KEY,
+    OUTPUT_SPILL_FAILED_CODE,
     EvalSample,
     ExecutionStatus,
     GradeResult,
     GradeStatus,
     NormalizedExecutionResult,
+    is_output_spill_error_record,
 )
 
 __all__ = ["HarnessGrader", "HarnessPredictor"]
+
 
 #: A function that builds the harness's expected input (its "prediction")
 #: from an executed sample. For SWE-bench specifically, this is a small
@@ -74,6 +79,29 @@ HarnessPredictor = Callable[[EvalSample, NormalizedExecutionResult], dict[str, J
 #: image and then run a full test suite for each instance, so 30 minutes is
 #: a safe per-instance limit that gives it enough time to finish.
 _DEFAULT_TIMEOUT_SECONDS = 1800.0
+
+#: How much of an ``output_ref`` to quote in a grade's evidence. A reference
+#: the runner wrote is a 71-character ``sha256:`` digest, so this never
+#: touches a real one -- but ``artifacts`` is target-controlled, the key is
+#: not reserved, and ``GradeResult.evidence`` has no length bound of its own
+#: (unlike the runner's recorded messages, which go through
+#: ``_safe_error_message``). Without a cap, a target returning a megabyte of
+#: text under that key gets it copied verbatim into every report that
+#: renders the grade.
+_EVIDENCE_REF_MAX_CHARS = 128
+
+
+def _bounded_ref(value: JsonValue) -> str:
+    """Quote an ``output_ref`` for a grade's evidence without copying it wholesale.
+
+    See ``_EVIDENCE_REF_MAX_CHARS``: the value is target-controlled and the
+    evidence it lands in is not length-bounded, so an over-long one is
+    truncated with a marker rather than embedded whole.
+    """
+    text = repr(value)
+    if len(text) <= _EVIDENCE_REF_MAX_CHARS:
+        return text
+    return f"{text[:_EVIDENCE_REF_MAX_CHARS]}...[truncated]"
 
 
 class HarnessGrader:
@@ -147,7 +175,53 @@ class HarnessGrader:
             # caller can't recover the original inline patch from here, and
             # needs to re-grade using the original, unspilled execution
             # data instead.
-            if "output_ref" in execution.artifacts:
+            #
+            # There are two ways a spill can leave ``output=None`` behind,
+            # and both are handled below. Either the spill succeeded and
+            # left an ``output_ref`` pointing at the stored bytes, or it
+            # failed -- the artifact store refused or couldn't write them --
+            # and left an ``output_spill_error`` record with nothing to
+            # point at. Neither one means "the system under test produced
+            # nothing": there really was an answer in both cases, it just
+            # isn't reachable from this result. The second case is the
+            # unrecoverable one, since those bytes were never stored
+            # anywhere at all.
+            #
+            # The failure case is checked first on purpose. ``output_ref``
+            # is only ever written by a spill that succeeded, but nothing
+            # stops a target from putting its own ``output_ref`` in
+            # ``artifacts`` before the runner's spill ran and failed. If
+            # both keys are somehow present, the honest report is the one
+            # that doesn't send the reader chasing bytes that were never
+            # written.
+            #
+            # ``artifacts`` is target-controlled, though, so the mere
+            # presence of the key proves nothing -- a target is free to put
+            # anything at all under that name. The record is only believed
+            # when it looks like one the runner wrote: a mapping carrying
+            # the ``OutputSpillFailed`` taxonomy code. Anything else falls
+            # through to the branches below, so a target cannot hijack this
+            # diagnosis by guessing a key name, no unguarded subscript can
+            # raise ``KeyError`` out of a re-grade, and no unbounded
+            # target-authored string reaches the evidence (which, unlike the
+            # runner's own messages, is not length-bounded).
+            if is_output_spill_error_record(execution.artifacts.get(OUTPUT_SPILL_ERROR_KEY)):
+                return self._result(
+                    sample,
+                    now,
+                    status=GradeStatus.ERROR,
+                    score=None,
+                    hard_gate=False,
+                    evidence={
+                        "reason": (
+                            f"execution output could not be spilled to the artifact store "
+                            f"({OUTPUT_SPILL_FAILED_CODE!r}); the output existed but was never "
+                            "persisted, so it cannot be re-graded from this result -- re-run "
+                            "the sample, or re-grade from the original, unspilled execution."
+                        )
+                    },
+                )
+            if OUTPUT_REF_KEY in execution.artifacts:
                 return self._result(
                     sample,
                     now,
@@ -157,8 +231,8 @@ class HarnessGrader:
                     evidence={
                         "reason": (
                             "execution output was spilled to artifact "
-                            f"{execution.artifacts['output_ref']!r}; the harness grader "
-                            "needs the inline patch. This should not happen inside "
+                            f"{_bounded_ref(execution.artifacts[OUTPUT_REF_KEY])}; the harness "
+                            "grader needs the inline patch. This should not happen inside "
                             "EvalRunner.run, which grades before spilling -- re-grade "
                             "from the original, unspilled execution instead."
                         )

@@ -43,3 +43,11 @@ agentic-evalkit-runs/
 id_rsa*
 .pypirc
 .npmrc
+.bmad-loop/runs/
+.bmad-loop/cache/
+.bmad-loop/policy.toml
+# bmad-loop hook registrations that bake in an absolute hook-script path (unlike
+# .claude/settings.json, which uses $CLAUDE_PROJECT_DIR and is portable). Machine-
+# specific, so they are never committed; re-create with `bmad-loop init --cli <name>`.
+.gemini/
+.github/copilot/

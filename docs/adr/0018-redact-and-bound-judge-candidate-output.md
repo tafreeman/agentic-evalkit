@@ -54,7 +54,11 @@ applied to `candidate_output` only:
    parameter, using the same public `RedactionPolicy`/
    `DEFAULT_REDACTION_POLICY` contract from `agentic_evalkit.reporters.base`
    that `EvalRunner` already imports and applies at its own spill boundary.
-   `None` (or a `RedactionPolicy()` with empty `secret_patterns`) opts out.
+   `RedactionPolicy()` (with empty `secret_patterns`) is the supported way to
+   opt out. `None` is also accepted, for backward compatibility, and behaves
+   identically, but is deprecated (emits a `DeprecationWarning` and is
+   normalized internally to `RedactionPolicy()`; deprecated since 0.4.0,
+   removed in 0.5.0).
    A new private method, `JudgeGrader._redact_candidate_output`, compiles
    `redaction_policy.secret_patterns` and substitutes matches with the same
    `"[REDACTED]"` marker `reporters.base` uses -- reimplemented locally
@@ -139,8 +143,10 @@ applied to `candidate_output` only:
   redaction-default-on posture (`redaction_policy: RedactionPolicy | None =
   DEFAULT_REDACTION_POLICY`), not a new posture for this codebase: any
   existing `JudgeGrader` caller now gets redaction and truncation
-  automatically, unless it explicitly opts out with `redaction_policy=None`
-  and/or `max_candidate_output_chars=None`.
+  automatically, unless it explicitly opts out with
+  `redaction_policy=RedactionPolicy()` and/or
+  `max_candidate_output_chars=None`. (`redaction_policy=None` also opts out,
+  identically, but is deprecated -- see the Decision section.)
 - `JudgeRequest.candidate_output` may now differ from `execution.output`'s
   literal content. A `JudgeClient` implementer must not assume
   byte-for-byte fidelity between the two; `JudgeGrader`'s class docstring
@@ -156,8 +162,10 @@ applied to `candidate_output` only:
   itself.
 - A caller who needs the judge to see genuinely full-fidelity output (for
   example, a debugging session where secrecy and cost are not concerns)
-  must explicitly pass `redaction_policy=None` and
+  must explicitly pass `redaction_policy=RedactionPolicy()` and
   `max_candidate_output_chars=None`; this is an opt-out, not the default.
+  (`redaction_policy=None` remains an accepted, deprecated spelling of the
+  same opt-out.)
 
 ## Validation
 
