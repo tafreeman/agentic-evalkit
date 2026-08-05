@@ -8,6 +8,7 @@ from agentic_evalkit.reporters.base import (
     RedactionPolicy,
     Reporter,
     apply_redaction,
+    redact_text,
 )
 from agentic_evalkit.reporters.html import HtmlReporter
 from agentic_evalkit.reporters.json import JsonReporter
@@ -59,4 +60,5 @@ __all__ = [
     "RedactionPolicy",
     "Reporter",
     "apply_redaction",
+    "redact_text",
 ]

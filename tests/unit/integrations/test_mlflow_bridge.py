@@ -163,6 +163,22 @@ def _fetch(tracking_uri: str, run_id: str) -> mlflow.entities.Run:
     return mlflow.client.MlflowClient(tracking_uri=tracking_uri).get_run(run_id)
 
 
+def test_truncation_never_returns_more_than_the_limit_it_was_given() -> None:
+    """Including the degenerate case where the limit is shorter than the marker.
+
+    The obvious implementation computes ``value[: limit - len(marker)]``,
+    which for a small limit is a negative slice bound: it trims from the end
+    and then appends the marker, returning something *longer* than the
+    limit. This module's real limits (6000, 8000) never reach that branch,
+    which is exactly why it would sit there unnoticed.
+    """
+    from agentic_evalkit.integrations.mlflow import _TRUNCATION_MARKER, _truncate
+
+    assert _truncate("short", 100) == "short"
+    for limit in range(0, len(_TRUNCATION_MARKER) + 20):
+        assert len(_truncate("x" * 200, limit)) <= limit, f"overflowed at limit={limit}"
+
+
 # --- Phase 1: exporting a run ----------------------------------------------
 
 
@@ -590,6 +606,57 @@ def test_evalkit_grader_becomes_a_working_mlflow_scorer() -> None:
 
     assert feedback.metadata["evalkit_status"] == "pass"
     assert feedback.error is None
+
+
+def test_a_secret_inside_a_grader_rationale_is_scrubbed_before_it_reaches_mlflow() -> None:
+    """The one transmit path that cannot go through ``redact_for_export``.
+
+    A scorer is handed one row at a time and never sees an ``EvalRunResult``,
+    so the run-level redaction pass has nothing to work on here. The
+    rationale is not always a safe fixed string either: the built-in harness
+    grader interpolates an exception message into it, and an exception raised
+    while handling target output is a well-known way for a credential to end
+    up in an error message.
+    """
+
+    class _LeakyGrader:
+        async def grade(
+            self, sample: EvalSample, execution: NormalizedExecutionResult
+        ) -> GradeResult:
+            return GradeResult(
+                sample_id=sample.sample_id,
+                grader="leaky@1",
+                status=GradeStatus.PASS,
+                score=1.0,
+                evidence={"reason": f"upstream call failed with token {_PLANTED_TOKEN}"},
+                created_at=_FINISHED_AT,
+            )
+
+    scorer = as_mlflow_scorer(_LeakyGrader(), name="evk_leaky")
+    feedback = scorer(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert _PLANTED_TOKEN not in (feedback.rationale or "")
+    assert "[REDACTED]" in (feedback.rationale or "")
+
+
+def test_rationale_redaction_can_be_opted_out_of_deliberately() -> None:
+    class _LeakyGrader:
+        async def grade(
+            self, sample: EvalSample, execution: NormalizedExecutionResult
+        ) -> GradeResult:
+            return GradeResult(
+                sample_id=sample.sample_id,
+                grader="leaky@1",
+                status=GradeStatus.PASS,
+                score=1.0,
+                evidence={"reason": f"token {_PLANTED_TOKEN}"},
+                created_at=_FINISHED_AT,
+            )
+
+    scorer = as_mlflow_scorer(_LeakyGrader(), name="evk_leaky", redaction_policy=RedactionPolicy())
+    feedback = scorer(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert _PLANTED_TOKEN in (feedback.rationale or "")
 
 
 def test_a_non_verdict_grade_becomes_an_error_not_a_failing_score() -> None:

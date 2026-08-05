@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   narrower than the enforced one.
 - `errors.IntegrationUnavailable`, raised when an integration's optional
   extra is not installed, carrying the `pip install` line that fixes it.
+- `reporters.redact_text` applies a `RedactionPolicy`'s secret patterns to a
+  single free-standing string. It exists for the one transmit path that has
+  no run to scrub: the rationale `as_mlflow_scorer` attaches to a feedback
+  object, synthesized from a grade's evidence one row at a time.
 
 ### Changed
 

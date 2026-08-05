@@ -65,6 +65,15 @@ the consequences of getting them wrong are not the same as for a local file.
   default to whatever the caller passes.** The destination is a shared
   server. Opting out remains possible and explicit, by passing
   `RedactionPolicy()`.
+- **The one transmit path that cannot use `redact_for_export` scrubs its own
+  text instead.** A scorer (`as_mlflow_scorer`) is handed one row at a time
+  and never sees an `EvalRunResult`, so there is nothing for the run-level
+  pass to operate on; but the rationale it attaches to a feedback object is
+  synthesized from a grade's evidence, which is not always a fixed string —
+  `HarnessGrader` interpolates an exception message into it, and a caller's
+  own grader may put anything there. `reporters.redact_text` applies the same
+  patterns to that single string. Sinks that transmit a whole run continue to
+  go through `redact_for_export`, and only through it.
 - **Exports never mutate the host library's process-global state.** The
   MLflow bridge goes through `MlflowClient` with explicit run IDs rather
   than the fluent `mlflow.start_run` / `set_experiment` API, so exporting a
@@ -162,6 +171,10 @@ the consequences of getting them wrong are not the same as for a local file.
   outcome never becomes a `0.0` numeric score, that demotion changes the
   score name rather than only its metadata, and that supplying a client makes
   the Langfuse package unnecessary.
+- `tests/unit/integrations/test_mlflow_bridge.py` additionally pins that a
+  secret planted in a grader's rationale is scrubbed before it reaches a
+  feedback object, and that `_truncate` never returns more than the limit it
+  was given for any limit.
 - `uv run mypy` type-checks both bridges against the installed client
   libraries, which ship `py.typed`.
 

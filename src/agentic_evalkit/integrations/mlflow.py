@@ -60,7 +60,7 @@ from agentic_evalkit.models import (
     GradeStatus,
     NormalizedExecutionResult,
 )
-from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY
+from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY, redact_text
 from agentic_evalkit.stats import aggregate_run, comparability_snapshot, compare_runs
 
 if TYPE_CHECKING:
@@ -132,8 +132,20 @@ class _MlflowRun(Protocol):
 
 
 def _truncate(value: str, limit: int) -> str:
+    """Cut ``value`` to at most ``limit`` characters, marking that it was cut.
+
+    The degenerate branch is not decoration. With ``limit`` smaller than the
+    marker itself, ``value[: limit - len(marker)]`` is a *negative* slice
+    bound, which trims from the end and then has the marker appended --
+    returning a string longer than the limit, from a function whose whole
+    job is to stay under it. This module's own limits (6000, 8000) never
+    reach that branch, but the helper is called with a caller-adjacent
+    constant and must not have a footgun waiting in it.
+    """
     if len(value) <= limit:
         return value
+    if limit <= len(_TRUNCATION_MARKER):
+        return value[:limit]
     return value[: limit - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
 
 
@@ -712,6 +724,7 @@ def as_mlflow_scorer(
     *,
     name: str,
     adapter: str = "mlflow-genai",
+    redaction_policy: RedactionPolicy = DEFAULT_REDACTION_POLICY,
 ) -> Any:  # mlflow.genai.scorers.Scorer, unimportable at module scope
     """Expose an ``agentic-evalkit`` grader as an MLflow custom scorer.
 
@@ -745,6 +758,10 @@ def as_mlflow_scorer(
         adapter: Value recorded as the synthesized sample's ``adapter``.
             Only identifies where the sample came from; it does not select
             any behaviour.
+        redaction_policy: Patterns scrubbed from the rationale before it is
+            attached to the feedback. A scorer never sees a whole run, so
+            this is the only redaction available on this path -- see
+            :func:`_rationale_of`. Pass ``RedactionPolicy()`` to opt out.
 
     Returns:
         An ``mlflow.genai.scorers.Scorer`` ready to pass to
@@ -809,7 +826,7 @@ def as_mlflow_scorer(
             value=(
                 grade.score if grade.score is not None else _GRADE_TO_FEEDBACK_VALUE[grade.status]
             ),
-            rationale=_rationale_of(grade),
+            rationale=_rationale_of(grade, redaction_policy),
             source=source,
             metadata=metadata,
         )
@@ -817,13 +834,27 @@ def as_mlflow_scorer(
     return wrapped
 
 
-def _rationale_of(grade: GradeResult) -> str | None:
-    """Pull a human-readable justification out of a grade's evidence, if it has one.
+def _rationale_of(grade: GradeResult, policy: RedactionPolicy) -> str | None:
+    """Pull a human-readable justification out of a grade's evidence, and scrub it.
 
     Graders here record their justification under a ``reason`` key by
     convention rather than by contract, so this reads that key when it holds
     a string and otherwise returns ``None`` -- an absent rationale is better
     than one invented by stringifying a dict of internals.
+
+    The scrub is not belt-and-braces. This is the one place in the bridge
+    where text reaches the host platform *without* passing through
+    :func:`~agentic_evalkit.integrations.base.redact_for_export`, because a
+    scorer is handed one row at a time and never sees an ``EvalRunResult``
+    to redact. A rationale is not always a fixed string either: the built-in
+    harness grader interpolates an exception message into it
+    (``f"could not build harness prediction: {error}"``), and a caller's own
+    grader may put anything under ``reason``. An exception raised while
+    handling target output is a well-trodden way for a credential to end up
+    inside an error message, so the same patterns that guard the export path
+    guard this one.
     """
     reason = grade.evidence.get("reason")
-    return reason if isinstance(reason, str) else None
+    if not isinstance(reason, str):
+        return None
+    return redact_text(reason, policy)

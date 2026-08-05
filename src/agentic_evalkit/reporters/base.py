@@ -336,6 +336,28 @@ def _redact_sample(
     return sample.model_copy(update=updates)
 
 
+def redact_text(value: str, policy: RedactionPolicy) -> str:
+    """Apply ``policy``'s secret patterns to one free-standing string.
+
+    :func:`apply_redaction` is the right entry point whenever there is a
+    whole :class:`~agentic_evalkit.models.EvalRunResult` to scrub, and it
+    remains the only one the reporters use. This exists for the narrower
+    case where a single caller-visible string is about to leave the process
+    without any run around it -- the rationale
+    ``agentic_evalkit.integrations.mlflow.as_mlflow_scorer`` attaches to a
+    host-platform feedback object, for example, which is synthesized from a
+    grade's evidence rather than copied out of a run.
+
+    ``policy.evidence_keys`` is not consulted, because a bare string has no
+    keys to drop; only ``secret_patterns`` applies. Passing a policy with no
+    patterns returns ``value`` unchanged, which is the same opt-out
+    :class:`RedactionPolicy` gives everywhere else.
+    """
+    if not policy.secret_patterns:
+        return value
+    return _redact_string(value, tuple(re.compile(p) for p in policy.secret_patterns))
+
+
 def apply_redaction(run: EvalRunResult, policy: RedactionPolicy) -> EvalRunResult:
     """Return a new, redacted copy of ``run`` with ``policy`` applied.
 
@@ -364,4 +386,10 @@ def apply_redaction(run: EvalRunResult, policy: RedactionPolicy) -> EvalRunResul
     return run.model_copy(update={"samples": redacted_samples})
 
 
-__all__ = ["DEFAULT_REDACTION_POLICY", "RedactionPolicy", "Reporter", "apply_redaction"]
+__all__ = [
+    "DEFAULT_REDACTION_POLICY",
+    "RedactionPolicy",
+    "Reporter",
+    "apply_redaction",
+    "redact_text",
+]
