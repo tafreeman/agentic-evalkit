@@ -83,6 +83,18 @@ the consequences of getting them wrong are not the same as for a local file.
   `stats.compare.comparability_snapshot` reads the same two tables
   `compare_runs` loops over, so an exporter can never advertise a provenance
   surface narrower than the one actually enforced.
+- **A demoted judge publishes under a different name, on both platforms.**
+  Advisory feedback is written as `<name>.advisory` and a withheld verdict as
+  a categorical marker. Both hosts aggregate by name, so renaming *is* the
+  demotion: an advisory value written under the gating name has already moved
+  the aggregate, and any gate reading it, before anyone reads the metadata
+  explaining that it should not have counted.
+- **Judge authority is re-evaluated per row, never captured once.** A scorer
+  object is typically built at import and reused for the length of an
+  evaluation or the lifetime of a service, so an authority resolved at
+  construction would let a calibration that expires mid-run keep gating
+  indefinitely. Both time-dependent halves of ADR-0007 D-1 — expiry and the
+  90-day age limit — are only honest if they are asked again each time.
 - **A grade outcome that is not a verdict is never rendered as a failing
   score.** `ABSTAIN`, `ERROR` and `UNAVAILABLE` become a host-platform error
   or a categorical marker, never `False` or `0.0`, so no aggregate a host
@@ -175,6 +187,18 @@ the consequences of getting them wrong are not the same as for a local file.
   secret planted in a grader's rationale is scrubbed before it reaches a
   feedback object, and that `_truncate` never returns more than the limit it
   was given for any limit.
+- `tests/unit/reporters/test_redaction_policy.py` pins that the sweep
+  reaches every free-form field a run carries — `sample.input`,
+  `sample.reference`, `sample.metadata`, `sample.expected_artifacts`,
+  `execution.tool_calls`, `execution.environment_metadata`, and
+  `grade.oracle_provenance` — not only the four output-side fields it
+  originally covered.
+- `tests/unit/integrations/test_mlflow_bridge.py` additionally pins that the
+  gated scorer exposes the parameter names MLflow dispatches on (a wrapper
+  declaring only `**kwargs` is handed no row data at all), that authority is
+  re-evaluated per row, that an advisory verdict is renamed, and that
+  `allow_cross_environment` actually reaches `compare_runs` rather than being
+  refused by the tag pre-check in front of it.
 - `uv run mypy` type-checks both bridges against the installed client
   libraries, which ship `py.typed`.
 

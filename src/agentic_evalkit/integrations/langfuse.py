@@ -42,6 +42,7 @@ from agentic_evalkit.stats import aggregate_run, comparability_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from datetime import datetime
 
     from agentic_evalkit.graders.calibration import CalibrationArtifact
     from agentic_evalkit.models import EvalRunResult, SampleResult
@@ -139,7 +140,11 @@ def _resolve_client(client: LangfuseClient | None) -> LangfuseClient:
     return constructed
 
 
-def _run_metadata(run: EvalRunResult, calibration: CalibrationArtifact | None) -> dict[str, Any]:
+def _run_metadata(
+    run: EvalRunResult,
+    calibration: CalibrationArtifact | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Build the root observation's metadata: manifest, provenance, and the run body.
 
     The full run body goes in under ``run`` because Langfuse has nowhere
@@ -165,7 +170,7 @@ def _run_metadata(run: EvalRunResult, calibration: CalibrationArtifact | None) -
         "run": run.model_dump(mode="json"),
     }
     if calibration is not None:
-        authority = judge_authority(calibration)
+        authority = judge_authority(calibration, now=now)
         metadata["judge"] = {
             "authority": str(authority.level),
             "can_gate": authority.level is AuthorityLevel.GATING,
@@ -189,7 +194,13 @@ def _sample_metadata(result: SampleResult) -> dict[str, Any]:
     }
 
 
-def _score_sample(client: LangfuseClient, result: SampleResult, observation_id: str) -> None:
+def _score_sample(
+    client: LangfuseClient,
+    result: SampleResult,
+    *,
+    trace_id: str | None,
+    observation_id: str,
+) -> None:
     """Record one sample's outcome, keeping non-verdicts out of the numeric score.
 
     A graded verdict becomes a numeric score under ``evalkit.grade``. A
@@ -197,12 +208,20 @@ def _score_sample(client: LangfuseClient, result: SampleResult, observation_id: 
     not be trusted -- becomes a categorical score under
     ``evalkit.grade_status`` instead, so it is visible in Langfuse without
     ever being averaged into the numeric one (ADR-0008).
+
+    ``trace_id`` is passed alongside ``observation_id`` rather than left to
+    be inferred. An observation ID identifies a span *within* a trace, so a
+    score carrying only the former does not say what it is attached to; the
+    Langfuse API expects the trace as the anchor, and omitting it risks the
+    score being dropped or filed against nothing -- which would silently
+    lose the outcome this whole export exists to record.
     """
     grade = result.grade
     if grade is None:
         client.create_score(
             name=f"{_NAMESPACE}.grade_status",
             value=str(result.execution.status),
+            trace_id=trace_id,
             observation_id=observation_id,
             data_type="CATEGORICAL",
             comment="execution did not complete, so grading never ran",
@@ -212,6 +231,7 @@ def _score_sample(client: LangfuseClient, result: SampleResult, observation_id: 
         client.create_score(
             name=f"{_NAMESPACE}.grade",
             value=_GRADE_TO_SCORE[grade.status],
+            trace_id=trace_id,
             observation_id=observation_id,
             data_type="NUMERIC",
             comment=grade.grader,
@@ -220,6 +240,7 @@ def _score_sample(client: LangfuseClient, result: SampleResult, observation_id: 
         client.create_score(
             name=f"{_NAMESPACE}.grade_status",
             value=str(grade.status),
+            trace_id=trace_id,
             observation_id=observation_id,
             data_type="CATEGORICAL",
             comment=f"{grade.grader} produced no verdict on the system under test",
@@ -235,6 +256,7 @@ def log_eval_run(
     trace_name: str | None = None,
     extra_metadata: Mapping[str, Any] | None = None,
     flush: bool = True,
+    now: datetime | None = None,
 ) -> str | None:
     """Write a finished run into Langfuse as one trace, and return its trace ID.
 
@@ -261,6 +283,9 @@ def log_eval_run(
             manifest's ``run_name``.
         extra_metadata: Additional metadata merged into the root
             observation, for the caller's own bookkeeping.
+        now: The moment to evaluate ``calibration``'s expiry and age
+            against. Defaults to the current UTC time; a fixed value makes
+            the exported judge-authority metadata deterministic.
         flush: Whether to flush before returning. Defaults to ``True``,
             because the Langfuse client batches in the background and a
             short-lived process -- a CI job, a script -- routinely exits
@@ -279,7 +304,7 @@ def log_eval_run(
     resolved = _resolve_client(client)
     redacted = redact_for_export(run, redaction_policy)
 
-    metadata = _run_metadata(redacted, calibration)
+    metadata = _run_metadata(redacted, calibration, now)
     if extra_metadata:
         metadata.update(extra_metadata)
 
@@ -299,7 +324,12 @@ def log_eval_run(
                 metadata=_sample_metadata(result),
             )
             try:
-                _score_sample(resolved, result, child.id)
+                _score_sample(
+                    resolved,
+                    result,
+                    trace_id=trace_id or getattr(child, "trace_id", None),
+                    observation_id=child.id,
+                )
             finally:
                 child.end()
     finally:

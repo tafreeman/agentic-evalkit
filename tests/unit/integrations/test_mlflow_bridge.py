@@ -245,14 +245,51 @@ def test_pass_rate_is_exported_with_its_confidence_interval(tracking_uri: str) -
 def test_absent_measurements_are_omitted_rather_than_logged_as_zero(tracking_uri: str) -> None:
     """A metric MLflow never received is honest; one defaulted to 0.0 is invented.
 
-    No sample in this fixture records latency or cost, so those metrics must
-    simply not exist on the run -- writing 0.0 would put a fabricated
-    observation in a chart.
+    This asserts over ``score_mean``, a metric the exporter really does emit
+    and which really can be ``None``. An earlier version of this test looked
+    for latency and cost keys instead -- which the exporter never emits under
+    any input, so the assertion held no matter what the None-filter did and
+    could not have failed.
+
+    ``score_mean`` is absent when no grade carries a numeric score, while
+    ``score_count`` is a genuine ``0`` and must still be written: the
+    distinction between "we measured nothing" and "we measured zero" is the
+    one the filter has to get right.
     """
-    mlflow_run_id = log_eval_run(_run(), tracking_uri=tracking_uri)
+    unscored = _run(statuses=(GradeStatus.PASS, GradeStatus.FAIL))
+    unscored = unscored.model_copy(
+        update={
+            "samples": tuple(
+                result.model_copy(update={"grade": result.grade.model_copy(update={"score": None})})
+                for result in unscored.samples
+            )
+        }
+    )
+    mlflow_run_id = log_eval_run(unscored, tracking_uri=tracking_uri)
     metrics = _fetch(tracking_uri, mlflow_run_id).data.metrics
 
-    assert not [key for key in metrics if "latency" in key or "cost" in key]
+    assert "evalkit.score_mean" not in metrics
+    assert metrics["evalkit.score_count"] == 0.0
+    assert metrics["evalkit.summary.total"] == 2.0
+
+
+def test_exported_counts_come_from_the_samples_not_from_a_stale_summary(
+    tracking_uri: str,
+) -> None:
+    """``aggregate_run`` recounts rather than trusting ``run.summary`` -- prove it survives export.
+
+    Every other fixture here carries a summary that already agrees with its
+    samples, so nothing distinguishes "recounted" from "copied". This run's
+    summary is deliberately wrong: it claims four passes and no errors, while
+    the samples say two passes, one fail and one error.
+    """
+    lying = _run().model_copy(update={"summary": RunSummary(total=4, passed=4, failed=0, errors=0)})
+    mlflow_run_id = log_eval_run(lying, tracking_uri=tracking_uri)
+    metrics = _fetch(tracking_uri, mlflow_run_id).data.metrics
+
+    assert metrics["evalkit.summary.passed"] == 2.0
+    assert metrics["evalkit.summary.failed"] == 1.0
+    assert metrics["evalkit.summary.errors"] == 1.0
 
 
 def test_secrets_in_target_output_are_scrubbed_before_transmission(tracking_uri: str) -> None:
@@ -339,7 +376,9 @@ def test_export_works_inside_the_callers_own_active_run(tracking_uri: str) -> No
 
 def test_calibration_artifact_travels_with_the_result_it_backed(tracking_uri: str) -> None:
     calibration = _good_calibration()
-    mlflow_run_id = log_eval_run(_run(), tracking_uri=tracking_uri, calibration=calibration)
+    mlflow_run_id = log_eval_run(
+        _run(), tracking_uri=tracking_uri, calibration=calibration, now=_STARTED_AT
+    )
     client = mlflow.client.MlflowClient(tracking_uri=tracking_uri)
 
     local = client.download_artifacts(mlflow_run_id, CALIBRATION_ARTIFACT_PATH)
@@ -356,6 +395,7 @@ def test_uncalibrated_judge_is_tagged_advisory_on_the_exported_run(tracking_uri:
         _run(),
         tracking_uri=tracking_uri,
         calibration=_good_calibration(calibrated_at=None),
+        now=_STARTED_AT,
     )
     tags = _fetch(tracking_uri, mlflow_run_id).data.tags
 
@@ -433,6 +473,50 @@ def test_comparison_is_refused_when_the_sampling_seed_differs(tracking_uri: str)
         compare_mlflow_runs(left, right, seed=1234, tracking_uri=tracking_uri)
 
 
+def test_allow_cross_environment_actually_reaches_the_comparison(tracking_uri: str) -> None:
+    """The flag must not be strangled by the cheap pre-check in front of it.
+
+    ADR-0015 lets a caller waive a mismatch on the environment and code
+    fingerprints alone -- the routine case being two runs captured on
+    different CI images. But those two fields are exported as provenance
+    tags like every other, so a tag pre-check with no notion of waivability
+    refuses the pair *before* ``compare_runs`` is ever reached, leaving the
+    documented parameter inert in exactly the case it exists for. The pair
+    below differs only in ``environment_fingerprint``.
+    """
+    left_run = _run(run_id="run-a")
+    right_run = _run(run_id="run-b").model_copy(
+        update={
+            "manifest": _run(run_id="run-b").manifest.model_copy(
+                update={"environment_fingerprint": "sha256:env-b"}
+            )
+        }
+    )
+    left = log_eval_run(left_run, tracking_uri=tracking_uri)
+    right = log_eval_run(right_run, tracking_uri=tracking_uri)
+
+    with pytest.raises(IncompatibleRuns, match="environment_fingerprint"):
+        compare_mlflow_runs(left, right, seed=1234, tracking_uri=tracking_uri)
+
+    waived = compare_mlflow_runs(
+        left, right, seed=1234, tracking_uri=tracking_uri, allow_cross_environment=True
+    )
+    assert waived.waived_provenance_fields == ("environment_fingerprint",)
+
+
+def test_the_waiver_never_extends_beyond_the_two_fields_adr_0015_allows(
+    tracking_uri: str,
+) -> None:
+    """A non-waivable field must still refuse, even with the flag set."""
+    left = log_eval_run(_run(run_id="run-a", adapter="gsm8k@1"), tracking_uri=tracking_uri)
+    right = log_eval_run(_run(run_id="run-b", adapter="gsm8k@2"), tracking_uri=tracking_uri)
+
+    with pytest.raises(IncompatibleRuns, match="adapter"):
+        compare_mlflow_runs(
+            left, right, seed=1234, tracking_uri=tracking_uri, allow_cross_environment=True
+        )
+
+
 def test_comparison_is_refused_against_a_run_this_package_never_exported(
     tracking_uri: str,
 ) -> None:
@@ -493,6 +577,110 @@ def _good_calibration(
         false_negative=5,
         threshold=0.8,
     )
+
+
+def test_the_gated_scorer_actually_receives_the_row_mlflow_dispatches() -> None:
+    """The wrapper must declare the parameter names MLflow filters on.
+
+    MLflow dispatches to a scorer by narrowing the row to the names in
+    ``inspect.signature(scorer.__call__).parameters``. A wrapper declaring
+    only ``**kwargs`` has parameters ``{"kwargs"}``, which matches no row key,
+    so the filter yields ``{}`` and the judge is called with *nothing* --
+    scoring an empty row and returning a confident verdict about it, while
+    every test that calls the wrapper directly still passes. This asserts
+    against the signature MLflow actually reads.
+    """
+    import inspect as _inspect
+
+    received: list[dict[str, object]] = []
+
+    def judge(inputs=None, outputs=None, expectations=None):
+        received.append({"inputs": inputs, "outputs": outputs, "expectations": expectations})
+        return True
+
+    gated = calibration_gate(judge, calibration=_good_calibration(), now=_STARTED_AT)
+
+    dispatch_params = set(_inspect.signature(gated.__call__).parameters)
+    assert {"inputs", "outputs", "expectations"} <= dispatch_params, (
+        f"MLflow would pass no row data; __call__ exposes {dispatch_params}"
+    )
+
+    gated(inputs={"q": "x"}, outputs={"a": "y"}, expectations={"expected_response": "y"})
+    assert received == [
+        {"inputs": {"q": "x"}, "outputs": {"a": "y"}, "expectations": {"expected_response": "y"}}
+    ]
+
+
+def test_a_wrapped_judge_that_wants_fewer_arguments_still_works() -> None:
+    """MLflow lets a scorer declare only the parameters it needs, so we must too.
+
+    A judge from ``make_judge`` typically wants ``inputs`` and ``outputs``
+    only. Forwarding the full row unconditionally would raise ``TypeError``.
+    """
+    seen: list[tuple[object, object]] = []
+
+    def narrow_judge(inputs=None, outputs=None):
+        seen.append((inputs, outputs))
+        return True
+
+    gated = calibration_gate(narrow_judge, calibration=_good_calibration(), now=_STARTED_AT)
+    feedback = gated(inputs={"q": "x"}, outputs={"a": "y"}, expectations={"e": 1})
+
+    assert seen == [({"q": "x"}, {"a": "y"})]
+    assert feedback.value is True
+
+
+def test_authority_is_re_evaluated_per_row_not_frozen_at_wrap_time() -> None:
+    """A calibration that expires mid-run must stop gating, not keep gating forever.
+
+    A scorer object is typically built once and reused across a long
+    evaluation, or for the lifetime of a service. Resolving the authority in
+    the wrapper body would capture ``datetime.now(UTC)`` at construction, so
+    both time-dependent halves of ADR-0007 D-1 -- expiry, and the 90-day age
+    limit -- would be answered once and never asked again.
+
+    This drives the clock through the public ``now`` parameter rather than
+    sleeping, so it is deterministic; the production path resolves ``now``
+    per call the same way.
+    """
+    calibration = _good_calibration(
+        calibrated_at=_STARTED_AT - timedelta(days=1),
+        expires_at=_STARTED_AT + timedelta(days=1),
+    )
+
+    before_expiry = calibration_gate(
+        lambda **_: True, calibration=calibration, name="j", now=_STARTED_AT
+    )
+    after_expiry = calibration_gate(
+        lambda **_: True,
+        calibration=calibration,
+        name="j",
+        now=_STARTED_AT + timedelta(days=2),
+    )
+
+    assert before_expiry(inputs={}, outputs={}).metadata["evalkit_authority"] == "gating"
+    withheld = after_expiry(inputs={}, outputs={})
+    assert withheld.metadata["evalkit_authority"] == "unavailable"
+    assert withheld.value is None
+
+
+def test_an_advisory_verdict_is_published_under_a_different_feedback_name() -> None:
+    """Renaming is the demotion; metadata alone would be too late.
+
+    MLflow aggregates assessments by name. An advisory value written under
+    the gating name has already moved the aggregate -- and any release gate
+    reading it -- by the time anyone reads the metadata saying it should not
+    have counted.
+    """
+    gating = calibration_gate(
+        lambda **_: True, calibration=_good_calibration(), name="faithfulness", now=_STARTED_AT
+    )
+    advisory = calibration_gate(
+        lambda **_: True, calibration=None, name="faithfulness", now=_STARTED_AT
+    )
+
+    assert gating(inputs={}, outputs={}).name == "faithfulness"
+    assert advisory(inputs={}, outputs={}).name == "faithfulness.advisory"
 
 
 def test_calibrated_judge_verdict_passes_through_and_is_marked_gating() -> None:

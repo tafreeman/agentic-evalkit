@@ -15,6 +15,7 @@ from agentic_evalkit.stats.aggregate import (
 from agentic_evalkit.stats.compare import (
     DATASET_IDENTITY_FIELDS_CHECKED,
     PROVENANCE_FIELDS_CHECKED,
+    WAIVABLE_SNAPSHOT_KEYS,
     ComparisonResult,
     comparability_snapshot,
     compare_runs,
@@ -25,6 +26,7 @@ from agentic_evalkit.stats.reliability import consistency_at_k, pass_at_k
 __all__ = [
     "DATASET_IDENTITY_FIELDS_CHECKED",
     "PROVENANCE_FIELDS_CHECKED",
+    "WAIVABLE_SNAPSHOT_KEYS",
     "AggregateStats",
     "ComparisonResult",
     "ContinuousEstimate",

@@ -52,6 +52,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no run to scrub: the rationale `as_mlflow_scorer` attaches to a feedback
   object, synthesized from a grade's evidence one row at a time.
 
+### Fixed
+
+- `apply_redaction` now sweeps every free-form field a run carries. It
+  previously covered only the output side -- `output`, `structured_output`,
+  `error`, `artifacts` and grade `evidence` -- leaving `sample.input` (the
+  prompt, which routinely holds the credential the agent under test is meant
+  to use), `sample.reference`, `sample.metadata`,
+  `sample.expected_artifacts`, `execution.tool_calls` (where a target's own
+  API calls carry their headers), `execution.environment_metadata` and
+  `grade.oracle_provenance` untouched. Every report format and both new
+  exporters are affected, since all of them write the whole run.
+
 ### Changed
 
 - `docs/prior-art.md` now covers MLflow and Langfuse, and records the MLflow

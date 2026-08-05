@@ -78,6 +78,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DATASET_IDENTITY_FIELDS_CHECKED",
     "PROVENANCE_FIELDS_CHECKED",
+    "WAIVABLE_SNAPSHOT_KEYS",
     "ComparisonResult",
     "comparability_snapshot",
     "compare_runs",
@@ -147,6 +148,15 @@ _DATASET_CHECKS: tuple[tuple[str, str, Callable[[ResolvedDataset], object]], ...
 #: Derived from :data:`_DATASET_CHECKS` row names, mirroring how
 #: :data:`PROVENANCE_FIELDS_CHECKED` is derived from its own table.
 DATASET_IDENTITY_FIELDS_CHECKED: frozenset[str] = frozenset(name for name, _, _ in _DATASET_CHECKS)
+
+#: The waivable field names as :func:`comparability_snapshot` keys them, so a
+#: consumer of that snapshot can tell which entries ``compare_runs`` would
+#: forgive under ``allow_cross_environment``. Derived from the same table as
+#: everything else here: an exporter or a pre-check that hardcoded these two
+#: names would silently stop matching the day ADR-0015's waiver set changed.
+WAIVABLE_SNAPSHOT_KEYS: frozenset[str] = frozenset(
+    f"manifest.{name}" for name, _, _, waivable in _PROVENANCE_CHECKS if waivable
+)
 
 #: The only provenance fields that ``compare_runs(...,
 #: allow_cross_environment=True)`` is allowed to waive on a mismatch

@@ -14,7 +14,9 @@ installed signatures, so mypy fails here if a Langfuse release moves one.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+import pytest
 
 from agentic_evalkit.graders.calibration import CalibrationArtifact
 from agentic_evalkit.integrations.base import AuthorityLevel
@@ -38,9 +40,6 @@ from agentic_evalkit.models import (
     SamplingPolicy,
 )
 from agentic_evalkit.reporters import RedactionPolicy
-
-if TYPE_CHECKING:
-    import pytest
 
 _STARTED_AT = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 _FINISHED_AT = datetime(2026, 8, 4, 12, 5, 0, tzinfo=UTC)
@@ -178,6 +177,30 @@ def test_the_recorder_really_satisfies_the_declared_client_protocol() -> None:
     assert isinstance(_RecordingClient(), LangfuseClient)
 
 
+def test_the_real_langfuse_client_satisfies_the_declared_protocol() -> None:
+    """The half the recorder cannot prove: that the protocol matches Langfuse.
+
+    Every other test here drives a stand-in, so they would all keep passing
+    if ``LangfuseClient`` described a client Langfuse never shipped. This is
+    the only assertion that touches the real class. It builds one against an
+    unroutable host with tracing disabled -- construction alone contacts
+    nothing, and no export is performed.
+
+    Note the limit of what this proves: ``runtime_checkable`` protocols check
+    method *names*, not signatures. Argument-level drift is caught by mypy
+    over ``integrations/langfuse.py``, not here.
+    """
+    langfuse = pytest.importorskip("langfuse", reason="the langfuse extra is not installed")
+
+    client = langfuse.Langfuse(
+        public_key="pk-lf-not-a-real-key",
+        secret_key="sk-lf-not-a-real-key",  # noqa: S106
+        host="http://127.0.0.1:1",
+        tracing_enabled=False,
+    )
+    assert isinstance(client, LangfuseClient)
+
+
 def test_export_creates_a_root_observation_with_one_child_per_sample() -> None:
     client = _RecordingClient()
     log_eval_run(_run(), client=client)
@@ -295,7 +318,7 @@ def test_flush_can_be_left_to_a_caller_managing_the_client_lifecycle() -> None:
 
 def test_calibration_summary_travels_with_the_export() -> None:
     client = _RecordingClient()
-    log_eval_run(_run(), client=client, calibration=_calibration())
+    log_eval_run(_run(), client=client, calibration=_calibration(), now=_STARTED_AT)
 
     judge = client.observations[0]["metadata"]["judge"]
     assert judge["authority"] == "gating"
@@ -334,6 +357,13 @@ def test_an_uncalibrated_judge_scores_under_a_suffixed_name() -> None:
 
 
 def test_a_judge_proven_unreliable_writes_no_numeric_score_at_all() -> None:
+    """Asserting only on ``scores[0]`` would let the withheld value through.
+
+    Deleting the early return would leave the categorical marker first and a
+    numeric 0.9 second, and a test reading only the first entry would still
+    pass while the verdict it claims was withheld sat in the aggregate. So
+    this asserts over the whole list.
+    """
     client = _RecordingClient()
     level = score_with_calibration_gate(
         client,
@@ -343,9 +373,29 @@ def test_a_judge_proven_unreliable_writes_no_numeric_score_at_all() -> None:
     )
 
     assert level is AuthorityLevel.UNAVAILABLE
+    assert len(client.scores) == 1
     assert client.scores[0]["name"] == "faithfulness.unavailable"
     assert client.scores[0]["data_type"] == "CATEGORICAL"
     assert client.scores[0]["value"] == "unavailable"
+    assert not [s for s in client.scores if s["data_type"] == "NUMERIC"]
+    assert 0.9 not in [s["value"] for s in client.scores]
+
+
+def test_every_sample_score_names_the_trace_it_belongs_to() -> None:
+    """An observation ID alone does not say what a score is attached to.
+
+    An observation is a span *within* a trace, so a score carrying only
+    ``observation_id`` is under-specified for the API and risks being filed
+    against nothing -- silently losing the outcome the export exists to
+    record.
+    """
+    client = _RecordingClient()
+    log_eval_run(_run(statuses=(GradeStatus.PASS, None)), client=client)
+
+    assert client.scores
+    for score in client.scores:
+        assert score["trace_id"], f"score {score['name']} carries no trace_id"
+        assert score["observation_id"]
 
 
 def test_the_reason_for_a_demotion_is_recorded_where_a_human_will_see_it() -> None:

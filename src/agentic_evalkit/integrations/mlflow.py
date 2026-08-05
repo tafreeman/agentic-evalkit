@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import tempfile
 import time
@@ -61,7 +62,12 @@ from agentic_evalkit.models import (
     NormalizedExecutionResult,
 )
 from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY, redact_text
-from agentic_evalkit.stats import aggregate_run, comparability_snapshot, compare_runs
+from agentic_evalkit.stats import (
+    WAIVABLE_SNAPSHOT_KEYS,
+    aggregate_run,
+    comparability_snapshot,
+    compare_runs,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -111,6 +117,17 @@ _NAMESPACE = "evalkit"
 _MAX_PARAM_LENGTH = 6000
 _MAX_TAG_LENGTH = 8000
 _TRUNCATION_MARKER = "...[truncated]"
+
+#: Appended to a feedback name when a judge may report but may not gate.
+#: MLflow aggregates assessments by name, so the rename IS the demotion --
+#: metadata alone would leave the aggregate already moved by the time anyone
+#: read the explanation.
+_ADVISORY_SUFFIX = ".advisory"
+
+#: MLflow's Default experiment, which every fresh tracking store creates.
+#: Resolved by name rather than by id -- see :func:`_resolve_experiment_id`.
+_DEFAULT_EXPERIMENT_NAME = "Default"
+_DEFAULT_EXPERIMENT_ID = "0"
 
 
 class _MlflowRunData(Protocol):
@@ -270,15 +287,25 @@ def _resolve_experiment_id(client: Any, experiment: str | None) -> str:
     and passing it explicitly leaves the caller's configuration exactly as
     it was found.
 
-    ``"0"`` is MLflow's Default experiment, used when no name is given --
-    the same place an unconfigured ``mlflow.start_run()`` would land.
+    With no name given, this resolves MLflow's Default experiment *by name*
+    rather than assuming the literal id ``"0"``. On a fresh store the two are
+    the same thing, but an id is a store-local fact and not a constant: a
+    tracking server whose Default experiment has been deleted and recreated
+    hands out a different one, and writing to a hardcoded ``"0"`` there
+    either fails or lands the run somewhere nobody is looking. Falling back
+    to ``"0"`` only when the lookup finds nothing keeps the old behaviour for
+    the case it was right for.
     """
-    if experiment is None:
-        return "0"
-    existing = client.get_experiment_by_name(experiment)
+    name = experiment if experiment is not None else _DEFAULT_EXPERIMENT_NAME
+    existing = client.get_experiment_by_name(name)
     if existing is not None:
         experiment_id: str = existing.experiment_id
         return experiment_id
+    if experiment is None:
+        # A store with no Default experiment at all is unusual enough that
+        # creating one is more surprising than using MLflow's own reserved
+        # id for it.
+        return _DEFAULT_EXPERIMENT_ID
     created: str = client.create_experiment(experiment)
     return created
 
@@ -292,6 +319,7 @@ def log_eval_run(
     calibration: CalibrationArtifact | None = None,
     redaction_policy: RedactionPolicy = DEFAULT_REDACTION_POLICY,
     extra_tags: Mapping[str, str] | None = None,
+    now: datetime | None = None,
 ) -> str:
     """Write a finished run into MLflow, evidence and all, and return its MLflow run ID.
 
@@ -339,6 +367,11 @@ def log_eval_run(
         extra_tags: Additional tags to set, for the caller's own bookkeeping
             (a git SHA, a CI job ID). Written verbatim, without this
             module's namespace prefix.
+        now: The moment to evaluate ``calibration``'s expiry and age
+            against. Defaults to the current UTC time. Passing a fixed
+            value makes the exported judge-authority tags deterministic,
+            which is what keeps a test asserting them from turning red on
+            the day its fixture's calibration happens to expire.
 
     Returns:
         The MLflow run ID that now holds this run.
@@ -353,7 +386,7 @@ def log_eval_run(
 
     tags = _provenance_tags(redacted)
     if calibration is not None:
-        authority = judge_authority(calibration)
+        authority = judge_authority(calibration, now=now)
         tags[f"{_NAMESPACE}.judge.authority"] = str(authority.level)
         tags[f"{_NAMESPACE}.judge.calibration_id"] = calibration.calibration_id
         if authority.reason is not None:
@@ -442,7 +475,9 @@ def _load_exported_run(client: Any, run_id: str, dst_path: str) -> EvalRunResult
     return EvalRunResult.model_validate(payload)
 
 
-def _snapshot_mismatches(left: _MlflowRun, right: _MlflowRun) -> list[str]:
+def _snapshot_mismatches(
+    left: _MlflowRun, right: _MlflowRun, *, allow_cross_environment: bool = False
+) -> list[str]:
     """Compare two runs' provenance tags, reporting only differences both sides declared.
 
     This is a fast pre-check, not the decision. It exists so that a
@@ -450,21 +485,30 @@ def _snapshot_mismatches(left: _MlflowRun, right: _MlflowRun) -> list[str]:
     downloading two full run bodies, and so the error names the offending
     field even when a body is large or slow to fetch.
 
-    A field is only reported when *both* runs carry the tag. A tag missing
-    on one side means that run was exported by a version that did not write
-    it, which is a gap in knowledge, not evidence of a difference -- and
-    inventing a mismatch from it would refuse a comparison that is actually
-    fine. The real :func:`~agentic_evalkit.stats.compare_runs` runs
-    afterwards regardless and remains the authority, so anything this misses
-    is still caught; nothing this reports can be a false alarm.
+    Its one hard requirement is that its refusals stay a *subset* of
+    ``compare_runs``' refusals -- it may fail a pair earlier, never fail one
+    that ``compare_runs`` would accept. Two rules keep it there:
+
+    * A field is only reported when *both* runs carry the tag. A tag missing
+      on one side means that run was exported by a version that did not
+      write it, which is a gap in knowledge, not evidence of a difference.
+    * When ``allow_cross_environment`` is set, the fields ADR-0015 permits
+      waiving are skipped, because ``compare_runs`` would waive rather than
+      refuse them. Without this the flag would be *inert*: the pre-check
+      would raise on an environment-fingerprint difference before
+      ``compare_runs`` ever saw the pair, so the one case the flag exists
+      for -- two runs captured on different CI images -- could never
+      compare. The waivable set is imported rather than spelled out here, so
+      it cannot drift from the table that enforces it.
     """
     prefix = f"{_NAMESPACE}.provenance."
+    waived = WAIVABLE_SNAPSHOT_KEYS if allow_cross_environment else frozenset()
     left_tags = {k: v for k, v in left.data.tags.items() if k.startswith(prefix)}
     right_tags = {k: v for k, v in right.data.tags.items() if k.startswith(prefix)}
     return [
         f"{key.removeprefix(prefix)} differs: {left_tags[key]!r} != {right_tags[key]!r}"
         for key in sorted(set(left_tags) & set(right_tags))
-        if left_tags[key] != right_tags[key]
+        if left_tags[key] != right_tags[key] and key.removeprefix(prefix) not in waived
     ]
 
 
@@ -518,7 +562,9 @@ def compare_mlflow_runs(
 
     left_meta = client.get_run(left_run_id)
     right_meta = client.get_run(right_run_id)
-    mismatches = _snapshot_mismatches(left_meta, right_meta)
+    mismatches = _snapshot_mismatches(
+        left_meta, right_meta, allow_cross_environment=allow_cross_environment
+    )
     if mismatches:
         raise IncompatibleRuns(
             message=(
@@ -618,27 +664,57 @@ def calibration_gate(
     from mlflow.entities import AssessmentSource, AssessmentSourceType, Feedback
     from mlflow.genai.scorers import scorer as scorer_decorator
 
-    authority = judge_authority(calibration, judge_fingerprint=judge_fingerprint, now=now)
     scorer_name = name or getattr(scorer, "name", None) or "evalkit_gated_judge"
-    # Every value in Feedback.metadata must be a string (mlflow.entities
-    # types it dict[str, str]), so the level enum and the reason are
-    # rendered rather than passed through.
-    base_metadata = {
-        "evalkit_authority": str(authority.level),
-        "evalkit_can_gate": str(authority.level is AuthorityLevel.GATING).lower(),
-    }
-    if authority.reason is not None:
-        base_metadata["evalkit_authority_reason"] = authority.reason
-    if authority.calibration_id is not None:
-        base_metadata["evalkit_calibration_id"] = authority.calibration_id
-
     source = AssessmentSource(
         source_type=AssessmentSourceType.LLM_JUDGE,
         source_id=scorer_name,
     )
 
+    # The parameters below are declared explicitly rather than collected with
+    # **kwargs, and that is load-bearing rather than stylistic. MLflow
+    # dispatches to a scorer by filtering the row down to the names in
+    # ``inspect.signature(scorer.__call__).parameters``
+    # (mlflow/genai/scorers/base.py). A function declaring only **kwargs has
+    # parameters ``{"kwargs"}``, which matches no row key at all, so the
+    # filter yields an empty dict and the judge is invoked with NO data --
+    # scoring nothing, and returning a verdict about nothing, while looking
+    # like it worked. ``trace`` is accepted and forwarded for the same
+    # reason: a wrapped scorer that asks for it must still receive it.
+    #
+    # ``session`` is deliberately NOT declared. MLflow treats any scorer
+    # naming it as session-level and then rejects it for also naming
+    # ``inputs``/``outputs``/``trace``, since a session scorer is called once
+    # per session rather than per row. Gating a session-level judge would
+    # need its own wrapper shape; this one is per-row.
     @scorer_decorator(name=scorer_name)
-    def gated(**kwargs: Any) -> Feedback:  # MLflow chooses the kwargs
+    def gated(
+        inputs: Any = None,
+        outputs: Any = None,
+        expectations: Any = None,
+        trace: Any = None,
+    ) -> Feedback:
+        # Re-evaluated per row, not captured once at wrap time. A scorer
+        # object is typically built at import and then used across a long
+        # evaluation, so an authority frozen at construction would let a
+        # calibration that expires mid-run keep on gating -- and with a
+        # long-lived process, keep gating indefinitely. The two
+        # time-dependent halves of ADR-0007 D-1 (expiry, and the 90-day age
+        # limit) are only honest if they are asked again each time. An
+        # explicit ``now`` still pins the instant, so tests stay
+        # deterministic.
+        authority = judge_authority(calibration, judge_fingerprint=judge_fingerprint, now=now)
+        # Every value in Feedback.metadata must be a string (mlflow.entities
+        # types it dict[str, str]), so the level enum and the reason are
+        # rendered rather than passed through.
+        metadata = {
+            "evalkit_authority": str(authority.level),
+            "evalkit_can_gate": str(authority.level is AuthorityLevel.GATING).lower(),
+        }
+        if authority.reason is not None:
+            metadata["evalkit_authority_reason"] = authority.reason
+        if authority.calibration_id is not None:
+            metadata["evalkit_calibration_id"] = authority.calibration_id
+
         if authority.level is AuthorityLevel.UNAVAILABLE:
             # Withheld, not failed. The wrapped scorer is never called: its
             # answer would be unusable, and calling a judge whose verdict
@@ -647,17 +723,56 @@ def calibration_gate(
                 name=scorer_name,
                 error=authority.reason,
                 source=source,
-                metadata=base_metadata,
+                metadata=metadata,
             )
-        result = scorer(**kwargs)
+
+        forwarded = _forwardable(
+            scorer,
+            {
+                "inputs": inputs,
+                "outputs": outputs,
+                "expectations": expectations,
+                "trace": trace,
+            },
+        )
+        result = scorer(**forwarded)
+        # An advisory verdict is published under a DIFFERENT feedback name,
+        # mirroring the Langfuse bridge. Renaming is the demotion: MLflow
+        # aggregates assessments by name, so an advisory value written under
+        # the gating name has already moved the aggregate by the time anyone
+        # reads the metadata explaining that it should not have.
+        published = (
+            scorer_name
+            if authority.level is AuthorityLevel.GATING
+            else f"{scorer_name}{_ADVISORY_SUFFIX}"
+        )
         # _attach_authority is typed to return Any because it cannot name
         # Feedback at module scope; the cast restores the real type here,
         # where the class is in scope.
-        return cast(
-            "Feedback", _attach_authority(result, scorer_name, source, base_metadata, Feedback)
-        )
+        return cast("Feedback", _attach_authority(result, published, source, metadata, Feedback))
 
     return gated
+
+
+def _forwardable(target: Callable[..., Any], row: dict[str, Any]) -> dict[str, Any]:
+    """Narrow ``row`` to the arguments ``target`` can actually accept.
+
+    The wrapped scorer is somebody else's function and is entitled to
+    declare only the parameters it needs -- MLflow explicitly supports that,
+    and a judge built by ``make_judge`` typically wants only ``inputs`` and
+    ``outputs``. Forwarding the full row unconditionally would raise
+    ``TypeError`` on the ones that do. A target that declares ``**kwargs``
+    gets everything, since it can take it.
+    """
+    try:
+        parameters = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        # A builtin or C-implemented callable with no introspectable
+        # signature: send everything and let it decide.
+        return row
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return row
+    return {key: value for key, value in row.items() if key in parameters}
 
 
 def _attach_authority(
@@ -787,9 +902,7 @@ def as_mlflow_scorer(
         sample = EvalSample(
             sample_id=sample_id,
             input=inputs if isinstance(inputs, dict) else {"input": inputs},
-            reference=(
-                expected.get("expected_response") if isinstance(expected, dict) else str(expected)
-            ),
+            reference=_reference_from(expected),
             source_digest=f"sha256:{sample_id}",
             adapter=adapter,
         )
@@ -832,6 +945,27 @@ def as_mlflow_scorer(
         )
 
     return wrapped
+
+
+def _reference_from(expectations: object) -> str | None:
+    """Turn MLflow's ``expectations`` into the string ``EvalSample.reference`` needs.
+
+    MLflow lets an expectation hold any JSON value -- a list of acceptable
+    answers, a nested object -- while ``reference`` is typed ``str | None``.
+    Passing a dict through would raise a validation error inside the scorer,
+    turning a perfectly ordinary dataset into a crash. A non-string
+    expectation is serialised canonically instead, so an exact-match grader
+    at least compares something stable rather than a repr whose key order
+    could vary.
+    """
+    if not isinstance(expectations, dict):
+        return None if expectations is None else str(expectations)
+    expected = expectations.get("expected_response")
+    if expected is None:
+        return None
+    if isinstance(expected, str):
+        return expected
+    return json.dumps(expected, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _rationale_of(grade: GradeResult, policy: RedactionPolicy) -> str | None:
