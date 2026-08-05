@@ -72,9 +72,16 @@ from agentic_evalkit.models.grades import GradeStatus
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from agentic_evalkit.models.datasets import ResolvedDataset
     from agentic_evalkit.models.runs import EvalRunManifest, EvalRunResult, SampleResult
 
-__all__ = ["PROVENANCE_FIELDS_CHECKED", "ComparisonResult", "compare_runs"]
+__all__ = [
+    "DATASET_IDENTITY_FIELDS_CHECKED",
+    "PROVENANCE_FIELDS_CHECKED",
+    "ComparisonResult",
+    "comparability_snapshot",
+    "compare_runs",
+]
 
 #: The manifest provenance checks that ``_describe_mismatches`` actually
 #: performs, one row per field, as ``(declared field name, human-readable
@@ -116,6 +123,30 @@ _PROVENANCE_CHECKS: tuple[tuple[str, str, Callable[[EvalRunManifest], object], b
 
 #: Derived from :data:`_PROVENANCE_CHECKS` row names -- see the table's note.
 PROVENANCE_FIELDS_CHECKED: frozenset[str] = frozenset(name for name, _, _, _ in _PROVENANCE_CHECKS)
+
+#: The *resolved* dataset identity checks ``_describe_mismatches`` performs,
+#: in the same ``(declared field name, human-readable label, reader)`` shape
+#: as :data:`_PROVENANCE_CHECKS` above -- minus the waivable column, because
+#: none of these is waivable under any flag. These four sit apart from the
+#: manifest table for a real reason: they are read off
+#: :class:`~agentic_evalkit.models.datasets.ResolvedDataset` (the dataset a
+#: run actually drew from) rather than off the manifest, so they can never
+#: join :meth:`EvalRunManifest.provenance_field_names`, whose contract is
+#: specifically about manifest fields (``tests/contract/test_provenance_drift.py``
+#: pins that set exactly). Keeping them in a table anyway means
+#: :func:`comparability_snapshot` can export every value ``compare_runs``
+#: compares without a second hand-maintained list drifting away from the
+#: comparisons that actually run.
+_DATASET_CHECKS: tuple[tuple[str, str, Callable[[ResolvedDataset], object]], ...] = (
+    ("dataset_id", "dataset id", lambda d: d.dataset_id),
+    ("revision", "dataset revision", lambda d: d.revision),
+    ("config", "dataset config", lambda d: d.config),
+    ("split", "dataset split", lambda d: d.split),
+)
+
+#: Derived from :data:`_DATASET_CHECKS` row names, mirroring how
+#: :data:`PROVENANCE_FIELDS_CHECKED` is derived from its own table.
+DATASET_IDENTITY_FIELDS_CHECKED: frozenset[str] = frozenset(name for name, _, _ in _DATASET_CHECKS)
 
 #: The only provenance fields that ``compare_runs(...,
 #: allow_cross_environment=True)`` is allowed to waive on a mismatch
@@ -221,22 +252,15 @@ def _describe_mismatches(
     left_dataset, right_dataset = left.resolved_dataset, right.resolved_dataset
     left_manifest, right_manifest = left.manifest, right.manifest
 
-    if left_dataset.dataset_id != right_dataset.dataset_id:
-        mismatches.append(
-            f"dataset id differs: {left_dataset.dataset_id!r} != {right_dataset.dataset_id!r}"
-        )
-    if left_dataset.revision != right_dataset.revision:
-        mismatches.append(
-            f"dataset revision differs: {left_dataset.revision!r} != {right_dataset.revision!r}"
-        )
-    if left_dataset.config != right_dataset.config:
-        mismatches.append(
-            f"dataset config differs: {left_dataset.config!r} != {right_dataset.config!r}"
-        )
-    if left_dataset.split != right_dataset.split:
-        mismatches.append(
-            f"dataset split differs: {left_dataset.split!r} != {right_dataset.split!r}"
-        )
+    # The resolved-dataset identity checks loop over _DATASET_CHECKS for the
+    # same reason the manifest checks below loop over _PROVENANCE_CHECKS: so
+    # the set of comparisons that actually run is the only place the field
+    # list lives. The message wording ("dataset id differs: ...") is
+    # unchanged from when these four were written out one by one.
+    for _name, label, read_dataset in _DATASET_CHECKS:
+        left_value, right_value = read_dataset(left_dataset), read_dataset(right_dataset)
+        if left_value != right_value:
+            mismatches.append(f"{label} differs: {left_value!r} != {right_value!r}")
     # The manifest-provenance fields are compared by looping over the
     # checks table below, so the set of "fields we checked" is always
     # derived from the comparisons that actually ran (see
@@ -251,6 +275,52 @@ def _describe_mismatches(
         else:
             mismatches.append(f"{label} differs: {left_value!r} != {right_value!r}")
     return mismatches, waived
+
+
+def comparability_snapshot(run: EvalRunResult) -> dict[str, str]:
+    """Every value ``compare_runs`` compares, rendered as text for export elsewhere.
+
+    Returned keys are ``"dataset.<field>"`` for the resolved-dataset identity
+    checks and ``"manifest.<field>"`` for the manifest provenance checks --
+    both read straight off :data:`_DATASET_CHECKS` and
+    :data:`_PROVENANCE_CHECKS`, the same two tables ``_describe_mismatches``
+    loops over. That derivation is the whole point: an exporter that wrote
+    its own list of provenance fields would be a third copy, free to fall
+    behind the comparisons that actually decide comparability, and the run it
+    exported would then advertise provenance it was never checked against.
+
+    Values are rendered with :func:`str`, not :func:`repr`, because the
+    intended consumers are host-platform tag stores where these become
+    searchable facets a human reads and filters on (``manifest.adapter =
+    'gsm8k@1'``). That rendering is lossy in one direction only: a field
+    holding the string ``"None"`` renders identically to one holding ``None``.
+    Two *differing* runs can therefore look equal here, but two *equal* runs
+    can never look different -- so a caller comparing snapshots may miss a
+    mismatch, and can never invent one. That asymmetry is why
+    :func:`~agentic_evalkit.integrations.mlflow.compare_mlflow_runs` treats a
+    snapshot comparison strictly as a fast pre-check and still runs the real
+    :func:`compare_runs` over the exported run bodies before reporting any
+    number.
+
+    Args:
+        run: The run to describe.
+
+    Returns:
+        A flat ``{key: rendered value}`` mapping, safe to write into a tag or
+        label store. Never contains sample outputs, grades, or evidence --
+        only the identity and policy fields that decide comparability.
+    """
+    snapshot = {
+        f"dataset.{name}": str(read_dataset(run.resolved_dataset))
+        for name, _, read_dataset in _DATASET_CHECKS
+    }
+    snapshot.update(
+        {
+            f"manifest.{name}": str(read_manifest(run.manifest))
+            for name, _, read_manifest, _ in _PROVENANCE_CHECKS
+        }
+    )
+    return snapshot
 
 
 def _is_pass(sample: SampleResult) -> bool:

@@ -58,6 +58,7 @@ __all__ = [
     "DatasetSplitNotFound",
     "GraderError",
     "IncompatibleRuns",
+    "IntegrationUnavailable",
     "ManifestValidationError",
     "OfflineCacheMiss",
     "OutputSpillFailed",
@@ -245,6 +246,20 @@ class OfflineCacheMiss(AgenticEvalkitError):
 
 class PluginCompatibilityError(AgenticEvalkitError):
     """A plugin failed to load, or its plugin-API version isn't one this package supports."""
+
+
+class IntegrationUnavailable(AgenticEvalkitError):
+    """A host-platform integration can't run because its optional extra isn't installed.
+
+    Raised only by ``agentic_evalkit.integrations`` (ADR-0022), and only for
+    a *missing capability* -- the MLflow or Langfuse client library is not
+    importable, so the export never starts. It is deliberately not used for
+    failures that happen once the export is under way: an authentication
+    rejection, an unreachable tracking server, or a value the host platform
+    refuses are that platform's own errors, and they propagate unwrapped so
+    the caller sees the real diagnosis rather than a message from here
+    paraphrasing it.
+    """
 
 
 # --- Execution target errors (design §8) -------------------------------------

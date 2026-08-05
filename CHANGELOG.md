@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Host-platform bridges (ADR-0022): a new `agentic_evalkit.integrations`
+  subpackage that carries this package's validity controls into MLflow and
+  Langfuse, so a team already on either platform can adopt them without
+  leaving it. Reached through the new `mlflow` and `langfuse` extras; the
+  base install is unchanged and `agentic_evalkit.integrations` imports
+  neither client library.
+  - `integrations.mlflow.log_eval_run` exports a finished run as an MLflow
+    run: the manifest as params, recounted outcomes and the pass rate with
+    its confidence interval as metrics, every provenance field
+    `compare_runs` checks as searchable tags, and the full redacted run body
+    and calibration artifact as artifacts. It goes through `MlflowClient`
+    with explicit run IDs, so it never mutates the caller's tracking URI,
+    experiment, or active run.
+  - `integrations.mlflow.calibration_gate` wraps a scorer the user already
+    has -- including one from `mlflow.genai.judges.make_judge` -- so its
+    verdict is demoted to advisory when its calibration evidence is thin, and
+    withheld entirely when that evidence is present and bad (ADR-0007 D-1).
+    MLflow's judge *alignment* and this *authority gating* are complementary
+    controls, not competing ones.
+  - `integrations.mlflow.as_mlflow_scorer` exposes any grader here as an
+    MLflow custom scorer, mapping non-verdict outcomes (`ABSTAIN`, `ERROR`,
+    `UNAVAILABLE`) to a feedback error rather than to a failing score, so
+    they stay out of MLflow's aggregates (ADR-0008).
+  - `integrations.mlflow.compare_mlflow_runs` compares two MLflow run IDs and
+    refuses the pair -- naming every mismatched field -- unless they are
+    provably comparable. `seed` is required and keyword-only.
+  - `integrations.langfuse.log_eval_run` and
+    `integrations.langfuse.score_with_calibration_gate` mirror the surface
+    onto Langfuse, where demotion renames the score (Langfuse aggregates by
+    score name) and non-verdict outcomes become categorical scores rather
+    than numeric zeros.
+- `stats.comparability_snapshot`, plus the derived
+  `stats.DATASET_IDENTITY_FIELDS_CHECKED`, expose every value `compare_runs`
+  compares as text for export. Both are derived from the same tables
+  `compare_runs` loops over, so an exported provenance surface can never be
+  narrower than the enforced one.
+- `errors.IntegrationUnavailable`, raised when an integration's optional
+  extra is not installed, carrying the `pip install` line that fixes it.
+
+### Changed
+
+- `docs/prior-art.md` now covers MLflow and Langfuse, and records the MLflow
+  supersession trigger: if MLflow ships calibration gating natively, both the
+  differentiator and the bridge's argument need re-examining.
+
 ### Deprecated
 
 - `EvalRunner(redaction_policy=None)` and `JudgeGrader(redaction_policy=None)`
