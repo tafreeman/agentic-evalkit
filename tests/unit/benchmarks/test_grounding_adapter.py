@@ -146,6 +146,90 @@ def test_prepare_rejects_a_row_that_is_not_a_task_at_all() -> None:
         _prepare({"question": "where is the rest of the record?"})
 
 
+# ---------------------------------------------------------------------------
+# Malformed-input contract for the task record itself.
+#
+# The cases above cover the ways a task can be internally inconsistent -- a
+# quote that doesn't match its document, evidence pointing at a document that
+# isn't there. The cases below cover the other half: a task that is merely
+# empty where it has to be populated, or that repeats itself. These matter
+# because an empty field is what a broken upstream export produces, and
+# because every one of them would otherwise survive into grading and score as
+# something. A task with no documents grades a system that was shown nothing;
+# a task with no gold spans has no answer key, so `reference` would be read
+# off an empty tuple; a task whose required_evidence repeats an ID inflates
+# the denominator the grounding grader divides by, quietly moving the score.
+# Each is rejected at `prepare`, before a sample exists, so the run fails
+# instead of reporting a number nobody can defend.
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_rejects_a_blank_task_id() -> None:
+    """The task ID becomes the sample ID, which is the join key for every
+    per-sample result downstream; a blank one would collide across tasks."""
+    with pytest.raises(DatasetSchemaMismatch, match="task_id must be a nonempty string"):
+        _prepare(_task_data(task_id="   "))
+
+
+def test_prepare_rejects_a_blank_question() -> None:
+    """A task with no question asks the system under test nothing, so whatever
+    it answers cannot be graded against the gold spans."""
+    with pytest.raises(DatasetSchemaMismatch, match="empty question"):
+        _prepare(_task_data(question="  \n "))
+
+
+def test_prepare_rejects_a_task_with_no_documents() -> None:
+    """No corpus means the system is shown nothing to cite. That must fail
+    here rather than grading as an honest abstention or a citation miss."""
+    with pytest.raises(DatasetSchemaMismatch, match="has no documents"):
+        _prepare(_task_data(documents=[]))
+
+
+def test_prepare_rejects_a_blank_document_id() -> None:
+    """Document IDs are what required_evidence and gold spans join against; a
+    blank one cannot be referenced, so the task's answer key is unreachable."""
+    data = _task_data()
+    data["documents"][0]["doc_id"] = "   "
+    with pytest.raises(DatasetSchemaMismatch, match="doc_id must be a nonempty string"):
+        _prepare(data)
+
+
+def test_prepare_rejects_a_document_with_blank_text() -> None:
+    """An empty document is unciteable, and a canary can't be embedded in it,
+    so the tripwire this benchmark depends on would be silently absent."""
+    data = _task_data()
+    data["documents"][1]["text"] = "   "
+    with pytest.raises(DatasetSchemaMismatch, match="empty text"):
+        _prepare(data)
+
+
+def test_prepare_rejects_a_blank_canary_token() -> None:
+    """A whitespace-only canary passes the "is not None" check but would match
+    everywhere in any text, so it would flag every answer as having taken the
+    bait. It is rejected separately from an absent canary."""
+    data = _task_data()
+    data["documents"][0]["canary"] = "   "
+    with pytest.raises(DatasetSchemaMismatch, match="empty canary token"):
+        _prepare(data)
+
+
+def test_prepare_rejects_duplicate_required_evidence_ids() -> None:
+    """Required evidence is the denominator for evidence recall. Repeating an
+    ID would let one cited document satisfy two slots or count twice, moving
+    the grade without any change in what the system actually cited."""
+    data = _task_data(required_evidence=["doc-a", "doc-a"])
+    with pytest.raises(DatasetSchemaMismatch, match="duplicate required_evidence ids"):
+        _prepare(data)
+
+
+def test_prepare_rejects_a_task_with_no_gold_spans() -> None:
+    """`prepare` reads `reference` off `gold_spans[0]`. Without the check here
+    that would be an IndexError from inside the adapter rather than the typed
+    schema error the adapter's contract promises."""
+    with pytest.raises(DatasetSchemaMismatch, match="has no gold spans"):
+        _prepare(_task_data(gold_spans=[]))
+
+
 def test_validate_oracle_accepts_a_prepared_sample() -> None:
     adapter = GroundedCitationAdapter()
     assert adapter.validate_oracle(_prepare(_task_data())) is True
