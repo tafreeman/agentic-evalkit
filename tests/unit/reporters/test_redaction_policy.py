@@ -5,12 +5,25 @@ out of a report before it's written (design doc §12, plan Task 13).
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
 
 from agentic_evalkit.artifacts import ArtifactStore
-from agentic_evalkit.models import EvalRunResult, is_output_spill_error_record
+from agentic_evalkit.models import (
+    DatasetRef,
+    EvalRunManifest,
+    EvalRunResult,
+    EvalSample,
+    ExecutionStatus,
+    GradeResult,
+    GradeStatus,
+    NormalizedExecutionResult,
+    ResolvedDataset,
+    SampleResult,
+    is_output_spill_error_record,
+)
 from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY, RedactionPolicy, apply_redaction
 from agentic_evalkit.reporters.base import _is_artifact_digest
 
@@ -507,3 +520,101 @@ def test_the_digest_exemption_matches_what_the_artifact_store_actually_mints(
     ref = store.put_bytes(b'{"answer": "42"}', media_type="application/json")
 
     assert _is_artifact_digest(ref.digest)
+
+
+def test_the_sweep_covers_every_free_form_field_a_run_carries() -> None:
+    """The sweep is only worth anything if it reaches everywhere a secret can sit.
+
+    For a long time it did not. It swept the target's ``output``,
+    ``structured_output``, ``error`` and ``artifacts``, plus a grade's
+    ``evidence`` -- the *output* side -- on the tacit assumption that
+    everything else was benign harness or dataset content. Six fields were
+    left untouched, and each is a real hiding place:
+
+    * ``sample.input`` is the prompt, which routinely contains the very
+      credential the agent under test is meant to use, or customer data
+      lifted from a production trace to make a regression case;
+    * ``sample.metadata`` and ``sample.expected_artifacts`` are
+      adapter-authored and carry whatever the adapter put there;
+    * ``sample.reference`` is dataset content, which is not automatically
+      safe;
+    * ``execution.tool_calls`` records the arguments the target sent to a
+      tool, which is exactly where an API key travels;
+    * ``execution.environment_metadata`` records the environment, which is
+      where connection strings live;
+    * ``grade.oracle_provenance`` records how an external checker was
+      invoked -- a command line, an image reference, a registry URL.
+
+    This is parametrised over the whole set rather than written per field so
+    that a future field added to any of these models is a conscious decision
+    about redaction rather than a silent omission.
+    """
+    token = "hf_" + "z" * 30
+    at = datetime(2026, 8, 4, tzinfo=UTC)
+    run = EvalRunResult(
+        run_id="run-001",
+        manifest=EvalRunManifest(
+            run_name="n",
+            dataset_ref=DatasetRef(provider="p", dataset_id="d"),
+            adapter="a",
+            grader="g",
+            target_name="t",
+        ),
+        resolved_dataset=ResolvedDataset(dataset_id="d", revision="v1"),
+        samples=(
+            SampleResult(
+                sample=EvalSample(
+                    sample_id="s0",
+                    input={"prompt": f"use {token} to authenticate"},
+                    reference=f"reference {token}",
+                    metadata={"note": f"meta {token}"},
+                    expected_artifacts={"spec": f"artifact {token}"},
+                    source_digest="sha256:x",
+                    adapter="a",
+                ),
+                execution=NormalizedExecutionResult(
+                    sample_id="s0",
+                    attempt=1,
+                    output={"answer": f"out {token}"},
+                    tool_calls=({"name": "http", "args": f"header {token}"},),
+                    environment_metadata={"conn": f"env {token}"},
+                    status=ExecutionStatus.COMPLETED,
+                    started_at=at,
+                    finished_at=at,
+                ),
+                grade=GradeResult(
+                    sample_id="s0",
+                    grader="g",
+                    status=GradeStatus.PASS,
+                    evidence={"reason": f"ev {token}"},
+                    oracle_provenance={"cmd": f"docker run --token {token}"},
+                    created_at=at,
+                ),
+            ),
+        ),
+        started_at=at,
+    )
+
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY).samples[0]
+
+    leaked = [
+        name
+        for name, value in (
+            ("sample.input", redacted.sample.input),
+            ("sample.reference", redacted.sample.reference),
+            ("sample.metadata", redacted.sample.metadata),
+            ("sample.expected_artifacts", redacted.sample.expected_artifacts),
+            ("execution.output", redacted.execution.output),
+            ("execution.tool_calls", redacted.execution.tool_calls),
+            ("execution.environment_metadata", redacted.execution.environment_metadata),
+            ("grade.evidence", redacted.grade.evidence),
+            ("grade.oracle_provenance", redacted.grade.oracle_provenance),
+        )
+        if token in repr(value)
+    ]
+    assert leaked == [], f"secret survived redaction in: {leaked}"
+
+    # tool_calls must still be a tuple afterwards: every collection on a wire
+    # model is a tuple by contract (ADR-0002), and the generic JSON sweep
+    # turns any sequence into a list, so this field needs its own pass.
+    assert isinstance(redacted.execution.tool_calls, tuple)

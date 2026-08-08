@@ -53,10 +53,14 @@ ADR_DIR = Path("docs/adr")
 #: statistical bar before a judge may gate a release, a structured way for
 #: a judge to report refusal/error instead of just failing outright, and
 #: skipping an expensive bias-check probe when its result would not
-#: actually be used), and 0021 (MCP stdio execution target -- a fourth
+#: actually be used), 0021 (MCP stdio execution target -- a fourth
 #: built-in adapter that evaluates a tool behind any MCP stdio server by
 #: spawning the server fresh for every sample and making exactly one
-#: tools/call). Each prefix matches exactly one file under docs/adr/.
+#: tools/call), and 0022 (host-platform integration boundary -- the rules
+#: for exporting a run into somebody else's system, principally that
+#: redaction is applied exactly once on the way out and that no host
+#: library is ever a required dependency). Each prefix matches exactly one
+#: file under docs/adr/.
 REQUIRED_ADR_PREFIXES = (
     "0001",
     "0002",
@@ -79,6 +83,7 @@ REQUIRED_ADR_PREFIXES = (
     "0019",
     "0020",
     "0021",
+    "0022",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
@@ -234,6 +239,7 @@ NUMBER_WORDS = {
     "nineteen": 19,
     "twenty": 20,
     "twenty-one": 21,
+    "twenty-two": 22,
 }
 
 

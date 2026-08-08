@@ -46,6 +46,26 @@ agentic-evalkit = "agentic_evalkit.cli:app"
 
 [project.optional-dependencies]
 swebench = ["swebench>=4.1,<5", "docker>=7.1,<8"]
+# ADR-0022. `mlflow-skinny` rather than `mlflow`: the bridge only ever calls
+# the tracking client and the genai scorer surface, both of which skinny
+# provides, while the full distribution additionally pulls scikit-learn,
+# scipy, pyarrow and a web server that no export path here touches. Because
+# `mlflow` itself depends on `mlflow-skinny`, this pin is already satisfied
+# for anyone who has the full package installed -- it narrows what we
+# require without constraining what a user may have.
+mlflow = ["mlflow-skinny>=3,<4"]
+# The floor is an API boundary, not a guess. This bridge builds its root
+# observation with `start_observation(as_type="evaluator")`, which landed in
+# 3.3.1 -- 3.3.0 and every earlier 3.x exposes only `start_span` /
+# `start_generation`, so `pip install agentic-evalkit[langfuse]` against a
+# project already pinning one of those would resolve happily and then raise
+# AttributeError on the first export rather than at install time. The `<5`
+# ceiling is the usual major-version guard and admits all of 4.x, which is
+# what the lockfile resolves and what CI type-checks against. The surface
+# this module calls (`start_observation`, `create_score`, `flush`, span
+# `.end`/`.id`/`.trace_id`) is unchanged across 3.3.1 and 4.x, which is why the range
+# spans the major rather than being pinned to one side of it.
+langfuse = ["langfuse>=3.3.1,<5"]
 
 [dependency-groups]
 dev = [
@@ -59,6 +79,17 @@ dev = [
   "pytest-repeat>=0.9,<1",
   "ruff>=0.6,<1",
   "types-pyyaml>=6,<7",
+  # The two integration extras are installed for development so the bridge
+  # tests exercise the real client libraries rather than a stand-in of what
+  # we imagine their APIs to be, and so mypy type-checks the calls into them
+  # (both ship py.typed). The MLflow bridge is tested against a local
+  # tracking directory with no server and no network; the Langfuse bridge
+  # has no offline mode, so it is tested against its declared protocol.
+  # Both mirror the extras' own ranges deliberately: a development
+  # environment resolving a version the extra forbids would type-check and
+  # test against a surface no user can actually install.
+  "mlflow-skinny>=3,<4",
+  "langfuse>=3.3.1,<5",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -127,3 +158,13 @@ runtime-evaluated-base-classes = ["agentic_evalkit.models.base.FrozenModel", "py
 python_version = "3.11"
 strict = true
 packages = ["agentic_evalkit"]
+
+# ADR-0022: the integration extras are optional by design, so a contributor
+# who installs only the base package must still be able to run mypy. Both
+# libraries ship py.typed, so when they ARE installed (as in the dev group
+# and in CI) their real types are used and the bridge is checked against
+# them properly; this override only stops the missing-import error on a
+# machine without them, and never silences a genuine type error.
+[[tool.mypy.overrides]]
+module = ["mlflow.*", "langfuse.*"]
+ignore_missing_imports = true

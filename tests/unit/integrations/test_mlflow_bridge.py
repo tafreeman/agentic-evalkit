@@ -1,0 +1,1073 @@
+"""The MLflow bridge, exercised against a real MLflow store on local disk.
+
+These are not mock tests. Every assertion below goes through the actual
+MLflow client into an actual tracking store in a temporary directory, and
+reads back what MLflow really persisted -- no network, no server, and no
+stand-in for the library's behaviour. That matters here more than usual,
+because the failures this bridge can have are precisely the ones a mock
+cannot show you: MLflow coercing every param to a string, silently dropping
+a metric it will not accept, or storing a tag under a name that search
+cannot find.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from agentic_evalkit.errors import IncompatibleRuns
+from agentic_evalkit.graders.calibration import CalibrationArtifact
+from agentic_evalkit.integrations.mlflow import (
+    CALIBRATION_ARTIFACT_PATH,
+    RUN_ARTIFACT_PATH,
+    as_mlflow_scorer,
+    calibration_gate,
+    compare_mlflow_runs,
+    log_eval_run,
+)
+from agentic_evalkit.models import (
+    DatasetRef,
+    DatasetSelection,
+    EvalRunManifest,
+    EvalRunResult,
+    EvalSample,
+    ExecutionStatus,
+    GradeResult,
+    GradeStatus,
+    NormalizedExecutionResult,
+    ResolvedDataset,
+    RunSummary,
+    SampleResult,
+    SamplingPolicy,
+)
+from agentic_evalkit.reporters import RedactionPolicy
+
+mlflow = pytest.importorskip("mlflow", reason="the mlflow extra is not installed")
+
+_STARTED_AT = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
+_FINISHED_AT = datetime(2026, 8, 4, 12, 5, 0, tzinfo=UTC)
+
+#: A string shaped exactly like a Hugging Face token, which
+#: DEFAULT_REDACTION_POLICY matches. Planted in target output so the
+#: redaction assertion below is testing a real pattern rather than a
+#: hand-picked one that happens to work.
+_PLANTED_TOKEN = "hf_abcdefghijklmnopqrstuvwxyz012345"  # a fake token, planted to be redacted
+
+
+@pytest.fixture
+def tracking_uri(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """A private, file-backed MLflow store for one test, with no server involved.
+
+    MLflow 3.x puts its filesystem backend in maintenance mode and refuses
+    it unless ``MLFLOW_ALLOW_FILE_STORE`` is set. That opt-out is exactly
+    what makes a hermetic test possible: the alternative backends are a
+    SQL database or a running tracking server, and neither belongs in a unit
+    suite. ``monkeypatch`` scopes the variable to the test.
+    """
+    monkeypatch.setenv("MLFLOW_ALLOW_FILE_STORE", "true")
+    return tmp_path.joinpath("mlruns").as_uri()
+
+
+def _run(
+    *,
+    run_id: str = "run-001",
+    adapter: str = "gsm8k@1",
+    seed: int | None = 7,
+    revision: str = "abc123",
+    statuses: tuple[GradeStatus | None, ...] = (
+        GradeStatus.PASS,
+        GradeStatus.PASS,
+        GradeStatus.FAIL,
+        None,
+    ),
+    planted_secret: str | None = None,
+) -> EvalRunResult:
+    """Build a run whose sample outcomes the caller chooses.
+
+    ``None`` in ``statuses`` means the sample errored during execution and
+    was never graded -- the case that makes the ADR-0008 assertions below
+    meaningful, since an operational failure must not become a task failure.
+    """
+    samples = []
+    for index, status in enumerate(statuses):
+        sample_id = f"gsm8k:main:test:{index}"
+        errored = status is None
+        output: dict[str, object] | None = None
+        if not errored:
+            output = {"answer": "42"}
+            if planted_secret is not None and index == 0:
+                output = {"answer": "42", "trace": f"called api with {planted_secret}"}
+        samples.append(
+            SampleResult(
+                sample=EvalSample(
+                    sample_id=sample_id,
+                    input={"question": f"q{index}"},
+                    reference="42",
+                    source_digest=f"sha256:{sample_id}",
+                    adapter=adapter,
+                ),
+                execution=NormalizedExecutionResult(
+                    sample_id=sample_id,
+                    attempt=1,
+                    output=output,
+                    status=ExecutionStatus.ERROR if errored else ExecutionStatus.COMPLETED,
+                    started_at=_STARTED_AT,
+                    finished_at=_FINISHED_AT,
+                ),
+                grade=(
+                    None
+                    if errored
+                    else GradeResult(
+                        sample_id=sample_id,
+                        grader="normalized-exact@1",
+                        status=status,
+                        score=1.0 if status is GradeStatus.PASS else 0.0,
+                        evidence={"reason": "compared against the reference"},
+                        created_at=_FINISHED_AT,
+                    )
+                ),
+            )
+        )
+    return EvalRunResult(
+        run_id=run_id,
+        manifest=EvalRunManifest(
+            run_name="gsm8k-smoke",
+            dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+            adapter=adapter,
+            grader="normalized-exact@1",
+            target_name="echo-target",
+            target_fingerprint="sha256:target-a",
+            selection=DatasetSelection(offset=0, limit=4),
+            sampling=SamplingPolicy(seed=seed, attempts=1),
+            attempts=1,
+            environment_fingerprint="sha256:env-a",
+            code_fingerprint="sha256:code-a",
+        ),
+        resolved_dataset=ResolvedDataset(
+            dataset_id="openai/gsm8k",
+            revision=revision,
+            config="main",
+            split="test",
+            row_count=4,
+        ),
+        samples=tuple(samples),
+        summary=RunSummary(total=4, passed=2, failed=1, errors=1),
+        started_at=_STARTED_AT,
+        finished_at=_FINISHED_AT,
+    )
+
+
+def _fetch(tracking_uri: str, run_id: str) -> mlflow.entities.Run:
+    return mlflow.client.MlflowClient(tracking_uri=tracking_uri).get_run(run_id)
+
+
+def test_truncation_never_returns_more_than_the_limit_it_was_given() -> None:
+    """Including the degenerate case where the limit is shorter than the marker.
+
+    The obvious implementation computes ``value[: limit - len(marker)]``,
+    which for a small limit is a negative slice bound: it trims from the end
+    and then appends the marker, returning something *longer* than the
+    limit. This module's real limits (6000, 8000) never reach that branch,
+    which is exactly why it would sit there unnoticed.
+    """
+    from agentic_evalkit.integrations.mlflow import _TRUNCATION_MARKER, _truncate
+
+    assert _truncate("short", 100) == "short"
+    for limit in range(0, len(_TRUNCATION_MARKER) + 20):
+        assert len(_truncate("x" * 200, limit)) <= limit, f"overflowed at limit={limit}"
+
+
+# --- Phase 1: exporting a run ----------------------------------------------
+
+
+def test_export_writes_manifest_params_and_recounted_metrics(tracking_uri: str) -> None:
+    mlflow_run_id = log_eval_run(_run(), tracking_uri=tracking_uri, experiment="evk")
+    data = _fetch(tracking_uri, mlflow_run_id).data
+
+    assert data.params["evalkit.adapter"] == "gsm8k@1"
+    assert data.params["evalkit.grader"] == "normalized-exact@1"
+    assert data.params["evalkit.dataset.revision"] == "abc123"
+    # MLflow stores every param as a string, including numbers. Asserting the
+    # rendered form pins what a consumer actually reads back.
+    assert data.params["evalkit.sampling.seed"] == "7"
+
+    assert data.metrics["evalkit.summary.total"] == 4.0
+    assert data.metrics["evalkit.summary.passed"] == 2.0
+    assert data.metrics["evalkit.summary.errors"] == 1.0
+
+
+def test_operational_failure_is_exported_as_its_own_outcome_not_as_a_task_failure(
+    tracking_uri: str,
+) -> None:
+    """ADR-0008, checked where an export is most likely to lose it.
+
+    The fixture has four samples: two pass, one is graded FAIL, and one
+    errors during execution and is never graded. The property that must
+    survive the trip into MLflow is that those last two stay distinct --
+    ``failed`` counts exactly the one sample a grader judged wrong, and the
+    crashed sample lands in ``errors``. Collapsing them would report a
+    harness that broke as a system that got the answer wrong, which is the
+    misreading the whole outcome taxonomy exists to prevent.
+
+    The pass rate itself keeps the package's own definition from
+    ``aggregate_run`` -- ``passed / total``, with the errored sample in the
+    denominator -- rather than a second definition invented here. That is
+    the conservative direction: an unreliable harness drags the rate down
+    instead of quietly vanishing from it, and a caller who wants the
+    graded-only view has the separate counters to compute it from.
+    """
+    mlflow_run_id = log_eval_run(_run(), tracking_uri=tracking_uri)
+    metrics = _fetch(tracking_uri, mlflow_run_id).data.metrics
+
+    assert metrics["evalkit.summary.failed"] == 1.0
+    assert metrics["evalkit.summary.errors"] == 1.0
+    assert metrics["evalkit.summary.passed"] == 2.0
+    assert metrics["evalkit.summary.total"] == 4.0
+
+    assert metrics["evalkit.pass_rate.numerator"] == 2.0
+    assert metrics["evalkit.pass_rate.denominator"] == 4.0
+    assert metrics["evalkit.pass_rate"] == pytest.approx(0.5)
+
+
+def test_pass_rate_is_exported_with_its_confidence_interval(tracking_uri: str) -> None:
+    """A rate without an interval invites 0.67-from-3 to be read as a finding."""
+    mlflow_run_id = log_eval_run(_run(), tracking_uri=tracking_uri)
+    metrics = _fetch(tracking_uri, mlflow_run_id).data.metrics
+
+    assert "evalkit.pass_rate.lower_bound" in metrics
+    assert "evalkit.pass_rate.upper_bound" in metrics
+    assert metrics["evalkit.pass_rate.lower_bound"] < metrics["evalkit.pass_rate"]
+    assert metrics["evalkit.pass_rate.upper_bound"] > metrics["evalkit.pass_rate"]
+
+
+def test_absent_measurements_are_omitted_rather_than_logged_as_zero(tracking_uri: str) -> None:
+    """A metric MLflow never received is honest; one defaulted to 0.0 is invented.
+
+    This asserts over ``score_mean``, a metric the exporter really does emit
+    and which really can be ``None``. An earlier version of this test looked
+    for latency and cost keys instead -- which the exporter never emits under
+    any input, so the assertion held no matter what the None-filter did and
+    could not have failed.
+
+    ``score_mean`` is absent when no grade carries a numeric score, while
+    ``score_count`` is a genuine ``0`` and must still be written: the
+    distinction between "we measured nothing" and "we measured zero" is the
+    one the filter has to get right.
+    """
+    unscored = _run(statuses=(GradeStatus.PASS, GradeStatus.FAIL))
+    unscored = unscored.model_copy(
+        update={
+            "samples": tuple(
+                result.model_copy(update={"grade": result.grade.model_copy(update={"score": None})})
+                for result in unscored.samples
+            )
+        }
+    )
+    mlflow_run_id = log_eval_run(unscored, tracking_uri=tracking_uri)
+    metrics = _fetch(tracking_uri, mlflow_run_id).data.metrics
+
+    assert "evalkit.score_mean" not in metrics
+    assert metrics["evalkit.score_count"] == 0.0
+    assert metrics["evalkit.summary.total"] == 2.0
+
+
+def test_exported_counts_come_from_the_samples_not_from_a_stale_summary(
+    tracking_uri: str,
+) -> None:
+    """``aggregate_run`` recounts rather than trusting ``run.summary`` -- prove it survives export.
+
+    Every other fixture here carries a summary that already agrees with its
+    samples, so nothing distinguishes "recounted" from "copied". This run's
+    summary is deliberately wrong: it claims four passes and no errors, while
+    the samples say two passes, one fail and one error.
+    """
+    lying = _run().model_copy(update={"summary": RunSummary(total=4, passed=4, failed=0, errors=0)})
+    mlflow_run_id = log_eval_run(lying, tracking_uri=tracking_uri)
+    metrics = _fetch(tracking_uri, mlflow_run_id).data.metrics
+
+    assert metrics["evalkit.summary.passed"] == 2.0
+    assert metrics["evalkit.summary.failed"] == 1.0
+    assert metrics["evalkit.summary.errors"] == 1.0
+
+
+def test_secrets_in_target_output_are_scrubbed_before_transmission(tracking_uri: str) -> None:
+    """The whole export must be redacted, not just the parts we remembered.
+
+    This asserts against the serialized artifact body rather than against a
+    field, because the failure being guarded is a secret surviving anywhere
+    in what left the machine.
+    """
+    mlflow_run_id = log_eval_run(
+        _run(planted_secret=_PLANTED_TOKEN),
+        tracking_uri=tracking_uri,
+    )
+    client = mlflow.client.MlflowClient(tracking_uri=tracking_uri)
+    local = client.download_artifacts(mlflow_run_id, RUN_ARTIFACT_PATH)
+    body = Path(local).read_text(encoding="utf-8")
+
+    assert _PLANTED_TOKEN not in body
+    assert "[REDACTED]" in body
+
+
+def test_redaction_can_be_opted_out_of_deliberately(tracking_uri: str) -> None:
+    """``RedactionPolicy()`` is the supported opt-out, and it must really opt out.
+
+    Without this, a caller who genuinely needs raw output could not tell
+    whether their policy was being honoured or silently overridden.
+    """
+    mlflow_run_id = log_eval_run(
+        _run(planted_secret=_PLANTED_TOKEN),
+        tracking_uri=tracking_uri,
+        redaction_policy=RedactionPolicy(),
+    )
+    client = mlflow.client.MlflowClient(tracking_uri=tracking_uri)
+    local = client.download_artifacts(mlflow_run_id, RUN_ARTIFACT_PATH)
+
+    assert _PLANTED_TOKEN in Path(local).read_text(encoding="utf-8")
+
+
+def test_exported_run_body_round_trips_back_into_the_model(tracking_uri: str) -> None:
+    """The artifact has to be re-parseable, or comparison later is impossible."""
+    original = _run()
+    mlflow_run_id = log_eval_run(original, tracking_uri=tracking_uri)
+    client = mlflow.client.MlflowClient(tracking_uri=tracking_uri)
+    local = client.download_artifacts(mlflow_run_id, RUN_ARTIFACT_PATH)
+
+    restored = EvalRunResult.model_validate_json(Path(local).read_text(encoding="utf-8"))
+    assert restored.run_id == original.run_id
+    assert restored.manifest.adapter == original.manifest.adapter
+    assert len(restored.samples) == len(original.samples)
+
+
+def test_export_does_not_disturb_the_callers_mlflow_configuration(tracking_uri: str) -> None:
+    """A library that reconfigures your process as a side effect is a trap.
+
+    ``mlflow.set_tracking_uri`` and ``set_experiment`` both mutate
+    process-global state that outlives the call, so an export built on the
+    fluent API would silently redirect the caller's own logging afterwards.
+    """
+    before = mlflow.get_tracking_uri()
+    log_eval_run(_run(), tracking_uri=tracking_uri, experiment="evk")
+
+    assert mlflow.get_tracking_uri() == before
+    assert mlflow.active_run() is None
+
+
+def test_export_works_inside_the_callers_own_active_run(tracking_uri: str) -> None:
+    """Exporting must not require the caller to have no run open.
+
+    ``mlflow.start_run`` refuses to start while another run is active unless
+    told to nest, so a fluent-API export would raise here. Going through the
+    client sidesteps that entirely: this creates a sibling run and leaves
+    the caller's own run active and untouched.
+    """
+    mlflow.set_tracking_uri(tracking_uri)
+    try:
+        with mlflow.start_run(run_name="callers-own") as caller_run:
+            exported = log_eval_run(_run(), tracking_uri=tracking_uri)
+            assert exported != caller_run.info.run_id
+            assert mlflow.active_run() is not None
+            assert mlflow.active_run().info.run_id == caller_run.info.run_id
+    finally:
+        mlflow.set_tracking_uri(None)
+
+
+def test_calibration_artifact_travels_with_the_result_it_backed(tracking_uri: str) -> None:
+    calibration = _good_calibration()
+    mlflow_run_id = log_eval_run(
+        _run(), tracking_uri=tracking_uri, calibration=calibration, now=_STARTED_AT
+    )
+    client = mlflow.client.MlflowClient(tracking_uri=tracking_uri)
+
+    local = client.download_artifacts(mlflow_run_id, CALIBRATION_ARTIFACT_PATH)
+    restored = CalibrationArtifact.model_validate_json(Path(local).read_text(encoding="utf-8"))
+    assert restored.calibration_id == calibration.calibration_id
+
+    tags = client.get_run(mlflow_run_id).data.tags
+    assert tags["evalkit.judge.authority"] == "gating"
+
+
+def test_uncalibrated_judge_is_tagged_advisory_on_the_exported_run(tracking_uri: str) -> None:
+    """The authority a judge claimed must be readable next to its results."""
+    mlflow_run_id = log_eval_run(
+        _run(),
+        tracking_uri=tracking_uri,
+        calibration=_good_calibration(calibrated_at=None),
+        now=_STARTED_AT,
+    )
+    tags = _fetch(tracking_uri, mlflow_run_id).data.tags
+
+    assert tags["evalkit.judge.authority"] == "advisory"
+    assert "calibrated_at" in tags["evalkit.judge.authority_reason"]
+
+
+# --- Phase 3: provenance tags and comparison -------------------------------
+
+
+def test_every_field_compare_runs_checks_is_exported_as_a_tag(tracking_uri: str) -> None:
+    """The exported provenance surface must not be narrower than the enforced one.
+
+    Derived from ``comparability_snapshot`` rather than a hand-written list
+    precisely so this stays true when a provenance field is added.
+    """
+    from agentic_evalkit.stats import DATASET_IDENTITY_FIELDS_CHECKED, PROVENANCE_FIELDS_CHECKED
+
+    mlflow_run_id = log_eval_run(_run(), tracking_uri=tracking_uri)
+    tags = _fetch(tracking_uri, mlflow_run_id).data.tags
+
+    for field in PROVENANCE_FIELDS_CHECKED:
+        assert f"evalkit.provenance.manifest.{field}" in tags
+    for field in DATASET_IDENTITY_FIELDS_CHECKED:
+        assert f"evalkit.provenance.dataset.{field}" in tags
+
+
+def test_two_identical_runs_compare_and_report_a_delta(tracking_uri: str) -> None:
+    left = log_eval_run(_run(run_id="run-a"), tracking_uri=tracking_uri)
+    right = log_eval_run(_run(run_id="run-b"), tracking_uri=tracking_uri)
+
+    result = compare_mlflow_runs(left, right, seed=1234, tracking_uri=tracking_uri)
+
+    assert result.estimate == 0.0
+    assert result.paired_count == 4
+    assert result.seed == 1234
+
+
+def test_a_real_improvement_shows_up_as_a_positive_delta(tracking_uri: str) -> None:
+    baseline = log_eval_run(
+        _run(run_id="run-a", statuses=(GradeStatus.FAIL, GradeStatus.FAIL)),
+        tracking_uri=tracking_uri,
+    )
+    candidate = log_eval_run(
+        _run(run_id="run-b", statuses=(GradeStatus.PASS, GradeStatus.PASS)),
+        tracking_uri=tracking_uri,
+    )
+
+    result = compare_mlflow_runs(baseline, candidate, seed=1234, tracking_uri=tracking_uri)
+    assert result.estimate == 1.0
+
+
+def test_comparison_is_refused_when_the_adapter_differs(tracking_uri: str) -> None:
+    """The refusal is the product. A delta across two adapters is meaningless."""
+    left = log_eval_run(_run(run_id="run-a", adapter="gsm8k@1"), tracking_uri=tracking_uri)
+    right = log_eval_run(_run(run_id="run-b", adapter="gsm8k@2"), tracking_uri=tracking_uri)
+
+    with pytest.raises(IncompatibleRuns, match="adapter"):
+        compare_mlflow_runs(left, right, seed=1234, tracking_uri=tracking_uri)
+
+
+def test_comparison_is_refused_when_the_sampling_seed_differs(tracking_uri: str) -> None:
+    """Also pins that the cheap tag pre-check is what refuses this pair.
+
+    The message names the provenance *field* (``manifest.sampling.seed``)
+    rather than the human label ``compare_runs`` would use ("sampling seed
+    differs"), which is the observable difference between the two refusal
+    paths. That ordering is the intended one: a mismatched pair should fail
+    after one metadata read, not after downloading two full run bodies.
+    """
+    left = log_eval_run(_run(run_id="run-a", seed=7), tracking_uri=tracking_uri)
+    right = log_eval_run(_run(run_id="run-b", seed=99), tracking_uri=tracking_uri)
+
+    with pytest.raises(IncompatibleRuns, match=re.escape("manifest.sampling.seed differs")):
+        compare_mlflow_runs(left, right, seed=1234, tracking_uri=tracking_uri)
+
+
+def test_comparison_is_refused_when_the_dataset_revision_differs(tracking_uri: str) -> None:
+    """The dataset-identity half of the pre-check's subset guarantee.
+
+    Every other refusal test here varies a *manifest* field. The pre-check
+    is generic over ``evalkit.provenance.*`` tags, so dataset identity looks
+    covered by construction -- which is exactly how it would go unnoticed if
+    the exporter ever stopped writing those tags, or wrote them under a
+    prefix the pre-check does not read. Two runs of different dataset
+    revisions are not comparable at all, and this is the cheapest place that
+    has to say so.
+    """
+    left = log_eval_run(_run(run_id="run-a", revision="abc123"), tracking_uri=tracking_uri)
+    right = log_eval_run(_run(run_id="run-b", revision="def456"), tracking_uri=tracking_uri)
+
+    with pytest.raises(IncompatibleRuns, match=re.escape("dataset.revision differs")):
+        compare_mlflow_runs(left, right, seed=1234, tracking_uri=tracking_uri)
+
+
+def test_allow_cross_environment_actually_reaches_the_comparison(tracking_uri: str) -> None:
+    """The flag must not be strangled by the cheap pre-check in front of it.
+
+    ADR-0015 lets a caller waive a mismatch on the environment and code
+    fingerprints alone -- the routine case being two runs captured on
+    different CI images. But those two fields are exported as provenance
+    tags like every other, so a tag pre-check with no notion of waivability
+    refuses the pair *before* ``compare_runs`` is ever reached, leaving the
+    documented parameter inert in exactly the case it exists for. The pair
+    below differs only in ``environment_fingerprint``.
+    """
+    left_run = _run(run_id="run-a")
+    right_run = _run(run_id="run-b").model_copy(
+        update={
+            "manifest": _run(run_id="run-b").manifest.model_copy(
+                update={"environment_fingerprint": "sha256:env-b"}
+            )
+        }
+    )
+    left = log_eval_run(left_run, tracking_uri=tracking_uri)
+    right = log_eval_run(right_run, tracking_uri=tracking_uri)
+
+    with pytest.raises(IncompatibleRuns, match="environment_fingerprint"):
+        compare_mlflow_runs(left, right, seed=1234, tracking_uri=tracking_uri)
+
+    waived = compare_mlflow_runs(
+        left, right, seed=1234, tracking_uri=tracking_uri, allow_cross_environment=True
+    )
+    assert waived.waived_provenance_fields == ("environment_fingerprint",)
+
+
+def test_the_waiver_never_extends_beyond_the_two_fields_adr_0015_allows(
+    tracking_uri: str,
+) -> None:
+    """A non-waivable field must still refuse, even with the flag set."""
+    left = log_eval_run(_run(run_id="run-a", adapter="gsm8k@1"), tracking_uri=tracking_uri)
+    right = log_eval_run(_run(run_id="run-b", adapter="gsm8k@2"), tracking_uri=tracking_uri)
+
+    with pytest.raises(IncompatibleRuns, match="adapter"):
+        compare_mlflow_runs(
+            left, right, seed=1234, tracking_uri=tracking_uri, allow_cross_environment=True
+        )
+
+
+def test_comparison_is_refused_against_a_run_this_package_never_exported(
+    tracking_uri: str,
+) -> None:
+    """A tracking server is full of other people's runs, and they are not comparable.
+
+    There is no manifest and no provenance on a foreign run, so no claim
+    about comparability can be supported -- refusing is the only honest
+    answer available.
+    """
+    mlflow.set_tracking_uri(tracking_uri)
+    try:
+        with mlflow.start_run(run_name="somebody-elses-run") as foreign:
+            foreign_id = foreign.info.run_id
+    finally:
+        mlflow.set_tracking_uri(None)
+
+    ours = log_eval_run(_run(), tracking_uri=tracking_uri)
+
+    with pytest.raises(IncompatibleRuns, match="not exported by agentic-evalkit"):
+        compare_mlflow_runs(ours, foreign_id, seed=1234, tracking_uri=tracking_uri)
+
+
+def test_comparison_requires_a_seed() -> None:
+    """Keyword-only and no default, exactly as ``compare_runs`` requires it.
+
+    A comparison read off a shared tracking server is the *most* likely one
+    to be quoted later, so it is the last place a silently irreproducible
+    number should be possible.
+    """
+    with pytest.raises(TypeError, match="seed"):
+        compare_mlflow_runs("a", "b")  # type: ignore[call-arg]
+
+
+# --- Phase 2: graders and judges as scorers --------------------------------
+
+
+def _good_calibration(
+    *,
+    calibrated_at: datetime | None = _STARTED_AT - timedelta(days=1),
+    expires_at: datetime = _STARTED_AT + timedelta(days=30),
+    true_negative: int = 400,
+    false_positive: int = 2,
+) -> CalibrationArtifact:
+    """Calibration large enough to clear the Wilson lower bound, not just the raw rate.
+
+    See the equivalent fixture in test_integration_base.py: raw rates well
+    above the floors still fail to gate on small samples, because the
+    conservative lower bound is what the project floor is applied to.
+    """
+    return CalibrationArtifact(
+        calibration_id="cal-001",
+        judge_fingerprint="sha256:judge-a",
+        expires_at=expires_at,
+        calibrated_at=calibrated_at,
+        true_positive=200,
+        true_negative=true_negative,
+        false_positive=false_positive,
+        false_negative=5,
+        threshold=0.8,
+    )
+
+
+def test_the_gated_scorer_actually_receives_the_row_mlflow_dispatches() -> None:
+    """The wrapper must declare the parameter names MLflow filters on.
+
+    MLflow dispatches to a scorer by narrowing the row to the names in
+    ``inspect.signature(scorer.__call__).parameters``. A wrapper declaring
+    only ``**kwargs`` has parameters ``{"kwargs"}``, which matches no row key,
+    so the filter yields ``{}`` and the judge is called with *nothing* --
+    scoring an empty row and returning a confident verdict about it, while
+    every test that calls the wrapper directly still passes. This asserts
+    against the signature MLflow actually reads.
+    """
+    import inspect as _inspect
+
+    received: list[dict[str, object]] = []
+
+    def judge(inputs=None, outputs=None, expectations=None):
+        received.append({"inputs": inputs, "outputs": outputs, "expectations": expectations})
+        return True
+
+    gated = calibration_gate(judge, calibration=_good_calibration(), now=_STARTED_AT)
+
+    dispatch_params = set(_inspect.signature(gated.__call__).parameters)
+    assert {"inputs", "outputs", "expectations"} <= dispatch_params, (
+        f"MLflow would pass no row data; __call__ exposes {dispatch_params}"
+    )
+
+    gated(inputs={"q": "x"}, outputs={"a": "y"}, expectations={"expected_response": "y"})
+    assert received == [
+        {"inputs": {"q": "x"}, "outputs": {"a": "y"}, "expectations": {"expected_response": "y"}}
+    ]
+
+
+def test_a_wrapped_judge_that_wants_fewer_arguments_still_works() -> None:
+    """MLflow lets a scorer declare only the parameters it needs, so we must too.
+
+    A judge from ``make_judge`` typically wants ``inputs`` and ``outputs``
+    only. Forwarding the full row unconditionally would raise ``TypeError``.
+    """
+    seen: list[tuple[object, object]] = []
+
+    def narrow_judge(inputs=None, outputs=None):
+        seen.append((inputs, outputs))
+        return True
+
+    gated = calibration_gate(narrow_judge, calibration=_good_calibration(), now=_STARTED_AT)
+    feedback = gated(inputs={"q": "x"}, outputs={"a": "y"}, expectations={"e": 1})
+
+    assert seen == [({"q": "x"}, {"a": "y"})]
+    assert feedback.value is True
+
+
+def test_authority_is_re_evaluated_per_row_not_frozen_at_wrap_time() -> None:
+    """A calibration that expires mid-run must stop gating, not keep gating forever.
+
+    A scorer object is typically built once and reused across a long
+    evaluation, or for the lifetime of a service. Resolving the authority in
+    the wrapper body would capture ``datetime.now(UTC)`` at construction, so
+    both time-dependent halves of ADR-0007 D-1 -- expiry, and the 90-day age
+    limit -- would be answered once and never asked again.
+
+    This drives the clock through the public ``now`` parameter rather than
+    sleeping, so it is deterministic; the production path resolves ``now``
+    per call the same way.
+    """
+    calibration = _good_calibration(
+        calibrated_at=_STARTED_AT - timedelta(days=1),
+        expires_at=_STARTED_AT + timedelta(days=1),
+    )
+
+    before_expiry = calibration_gate(
+        lambda **_: True, calibration=calibration, name="j", now=_STARTED_AT
+    )
+    after_expiry = calibration_gate(
+        lambda **_: True,
+        calibration=calibration,
+        name="j",
+        now=_STARTED_AT + timedelta(days=2),
+    )
+
+    assert before_expiry(inputs={}, outputs={}).metadata["evalkit_authority"] == "gating"
+    withheld = after_expiry(inputs={}, outputs={})
+    assert withheld.metadata["evalkit_authority"] == "unavailable"
+    assert withheld.value is None
+
+
+def test_an_advisory_verdict_is_published_under_a_different_feedback_name() -> None:
+    """Renaming is the demotion; metadata alone would be too late.
+
+    MLflow aggregates assessments by name. An advisory value written under
+    the gating name has already moved the aggregate -- and any release gate
+    reading it -- by the time anyone reads the metadata saying it should not
+    have counted.
+    """
+    gating = calibration_gate(
+        lambda **_: True, calibration=_good_calibration(), name="faithfulness", now=_STARTED_AT
+    )
+    advisory = calibration_gate(
+        lambda **_: True, calibration=None, name="faithfulness", now=_STARTED_AT
+    )
+
+    assert gating(inputs={}, outputs={}).name == "faithfulness"
+    assert advisory(inputs={}, outputs={}).name == "faithfulness.advisory"
+
+
+def test_demotion_renames_a_judge_that_returned_a_named_feedback_of_its_own() -> None:
+    """The case the bare-value test above cannot reach, and the realistic one.
+
+    A scorer built by ``make_judge`` does not return ``True``; it returns a
+    fully-formed ``Feedback`` carrying its own name. That goes down the
+    other branch of ``_attach_authority``, which copies the object -- so a
+    version that merged the authority metadata but left ``name`` alone
+    published an advisory verdict under the *gating* name, and MLflow keeps
+    an explicitly-set name rather than overwriting it with the scorer's.
+    Everything the demotion is for (the aggregate, and any release gate
+    keyed on that name) would have counted a verdict that was demoted.
+
+    The judge's own metadata must survive the rename too: demoting a verdict
+    is not licence to discard what the judge reported about it.
+    """
+    from mlflow.entities import Feedback
+
+    def judge_returning_feedback(**_: object) -> Feedback:
+        return Feedback(name="faithfulness", value=0.9, metadata={"judge_model": "gpt-4o"})
+
+    advisory = calibration_gate(
+        judge_returning_feedback, calibration=None, name="faithfulness", now=_STARTED_AT
+    )
+    feedback = advisory(inputs={}, outputs={})
+
+    assert feedback.name == "faithfulness.advisory"
+    assert feedback.value == 0.9
+    assert feedback.metadata["evalkit_authority"] == "advisory"
+    assert feedback.metadata["judge_model"] == "gpt-4o"
+
+
+def test_a_gating_judges_own_feedback_is_published_under_the_wrapper_name() -> None:
+    """The other half: an entitled verdict is not renamed out from under a gate.
+
+    ``calibration_gate`` registers itself with MLflow under ``name``, and a
+    gate a team writes is keyed on that. Publishing a gating verdict under
+    whatever name the wrapped judge happened to use would leave that gate
+    matching nothing -- failing open, which is the one direction this module
+    must never fail in.
+    """
+    from mlflow.entities import Feedback
+
+    gated = calibration_gate(
+        lambda **_: Feedback(name="inner_judge_name", value=True),
+        calibration=_good_calibration(),
+        name="faithfulness",
+        now=_STARTED_AT,
+    )
+    feedback = gated(inputs={}, outputs={})
+
+    assert feedback.name == "faithfulness"
+    assert feedback.value is True
+    assert feedback.metadata["evalkit_can_gate"] == "true"
+
+
+def test_a_multi_metric_scorer_returning_a_list_keeps_each_feedback_intact() -> None:
+    """MLflow permits ``list[Feedback]``, and wrapping one in a Feedback is nonsense.
+
+    ``Scorer.run`` accepts ``int | float | bool | str | Feedback |
+    list[Feedback]``. A list falling through to the bare-value branch would
+    become ``Feedback(value=[Feedback, Feedback])`` -- a value outside
+    ``FeedbackValueType`` entirely, which fails deep inside MLflow's
+    serialization rather than here, long after the useful stack frame.
+
+    Each element keeps its OWN name because they measure different things;
+    collapsing them onto the wrapper's name would merge two metrics into
+    one. Demotion therefore suffixes each rather than replacing it.
+    """
+    from mlflow.entities import Feedback
+
+    def multi_metric(**_: object) -> list[Feedback]:
+        return [Feedback(name="a", value=0.9), Feedback(name="b", value=0.7)]
+
+    advisory = calibration_gate(multi_metric, calibration=None, name="panel", now=_STARTED_AT)
+    results = advisory(inputs={}, outputs={})
+
+    assert isinstance(results, list)
+    assert [f.name for f in results] == ["a.advisory", "b.advisory"]
+    assert [f.value for f in results] == [0.9, 0.7]
+    assert all(f.metadata["evalkit_authority"] == "advisory" for f in results)
+
+
+def test_a_gating_multi_metric_scorer_keeps_its_names_unsuffixed() -> None:
+    from mlflow.entities import Feedback
+
+    gated = calibration_gate(
+        lambda **_: [Feedback(name="a", value=1.0)],
+        calibration=_good_calibration(),
+        name="panel",
+        now=_STARTED_AT,
+    )
+    results = gated(inputs={}, outputs={})
+
+    assert [f.name for f in results] == ["a"]
+    assert results[0].metadata["evalkit_can_gate"] == "true"
+
+
+def test_the_authority_reason_is_scrubbed_before_it_reaches_the_feedback() -> None:
+    """The gate transmits per row and never sees a run, so this is its only sweep.
+
+    ``authority.reason`` interpolates the calibration ID and, on a
+    fingerprint mismatch, both fingerprints verbatim. Those are
+    operator-supplied strings, and this package does not get to assume an
+    operator never put a credential in one.
+    """
+    gated = calibration_gate(
+        lambda **_: True,
+        calibration=_good_calibration(),
+        name="my_judge",
+        judge_fingerprint=f"fp-{_PLANTED_TOKEN}",
+        now=_STARTED_AT,
+    )
+    feedback = gated(inputs={}, outputs={})
+
+    reason = feedback.metadata["evalkit_authority_reason"]
+    assert _PLANTED_TOKEN not in reason
+    assert "[REDACTED]" in reason
+
+
+def test_a_rationale_whose_evidence_key_was_opted_out_is_never_transmitted() -> None:
+    """``evidence_keys`` must mean the same thing on both paths.
+
+    A caller who writes ``RedactionPolicy(evidence_keys=("reason",))`` is
+    saying that field must not leave the machine. ``apply_redaction`` honours
+    that for the run body; the scorer rationale is synthesized from the same
+    key and would otherwise transmit it anyway, pattern-scrubbed but present.
+    """
+
+    class _DeliberatingGrader:
+        async def grade(
+            self, sample: EvalSample, execution: NormalizedExecutionResult
+        ) -> GradeResult:
+            return GradeResult(
+                sample_id=sample.sample_id,
+                grader="deliberating@1",
+                status=GradeStatus.PASS,
+                score=1.0,
+                evidence={"reason": "internal deliberation nobody outside should read"},
+                created_at=_FINISHED_AT,
+            )
+
+    scorer = as_mlflow_scorer(
+        _DeliberatingGrader(),
+        name="evk_opt_out",
+        redaction_policy=RedactionPolicy(evidence_keys=("reason",)),
+    )
+    feedback = scorer(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert feedback.rationale is None
+
+
+def test_a_crashed_export_marks_its_run_failed_rather_than_leaving_it_running(
+    tracking_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An abandoned RUNNING run is worse than one marked FAILED.
+
+    It looks in-flight forever, and anyone reading the experiment cannot
+    tell a crashed export from one still going. Without this test the whole
+    try/except could be deleted and every other assertion would still pass.
+    """
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("tracking server went away")
+
+    monkeypatch.setattr(mlflow.MlflowClient, "log_dict", explode)
+    with pytest.raises(RuntimeError, match="tracking server went away"):
+        log_eval_run(_run(), tracking_uri=tracking_uri, experiment="crash-cleanup")
+
+    monkeypatch.undo()
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+    experiment = client.get_experiment_by_name("crash-cleanup")
+    assert experiment is not None, "the export created no experiment, so this proves nothing"
+    runs = client.search_runs(
+        [experiment.experiment_id], run_view_type=mlflow.entities.ViewType.ALL
+    )
+    assert runs, "the export created no run at all, so this proves nothing"
+    assert runs[0].info.status == "FAILED"
+
+
+def test_calibrated_judge_verdict_passes_through_and_is_marked_gating() -> None:
+    gated = calibration_gate(
+        lambda **_: True,
+        calibration=_good_calibration(),
+        name="my_judge",
+        now=_STARTED_AT,
+    )
+    feedback = gated(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert feedback.value is True
+    assert feedback.metadata["evalkit_authority"] == "gating"
+    assert feedback.metadata["evalkit_can_gate"] == "true"
+
+
+def test_uncalibrated_judge_still_answers_but_cannot_gate() -> None:
+    """Demotion, not suppression. The verdict may well be right.
+
+    Silencing an uncalibrated judge would cost a team all their existing
+    signal the day they adopt the gate; reporting it while marking it
+    unable to gate costs them nothing and tells the truth.
+    """
+    gated = calibration_gate(lambda **_: True, calibration=None, name="my_judge")
+    feedback = gated(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert feedback.value is True
+    assert feedback.metadata["evalkit_authority"] == "advisory"
+    assert feedback.metadata["evalkit_can_gate"] == "false"
+    assert "advisory-only" in feedback.metadata["evalkit_authority_reason"]
+
+
+def test_judge_with_expired_calibration_has_its_verdict_withheld() -> None:
+    """Evidence present and bad: no value at all, only an error.
+
+    MLflow keeps a feedback error out of any aggregate it computes, which is
+    the point -- a verdict from a judge proven untrustworthy must not be
+    quietly averaged into a dashboard.
+    """
+    gated = calibration_gate(
+        lambda **_: True,
+        calibration=_good_calibration(
+            calibrated_at=_STARTED_AT - timedelta(days=200),
+            expires_at=_STARTED_AT - timedelta(days=1),
+        ),
+        name="my_judge",
+        now=_STARTED_AT,
+    )
+    feedback = gated(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert feedback.value is None
+    assert feedback.error is not None
+    assert feedback.metadata["evalkit_authority"] == "unavailable"
+
+
+def test_a_judge_proven_unreliable_is_never_even_called() -> None:
+    """Asking a judge whose answer cannot be used bills the caller for nothing.
+
+    With an LLM judge that call is a real API charge and real latency, so
+    skipping it is a correctness property worth pinning, not an
+    optimization.
+    """
+    calls: list[object] = []
+
+    def expensive_judge(**kwargs: object) -> bool:
+        calls.append(kwargs)
+        return True
+
+    gated = calibration_gate(
+        expensive_judge,
+        calibration=_good_calibration(true_negative=30, false_positive=40),
+        name="my_judge",
+        now=_STARTED_AT,
+    )
+    gated(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert calls == []
+
+
+def test_gating_preserves_metadata_the_wrapped_judge_already_reported() -> None:
+    """Wrapping must add authority, never discard what the judge said."""
+    from mlflow.entities import Feedback
+
+    gated = calibration_gate(
+        lambda **_: Feedback(name="inner", value=0.9, metadata={"judge_model": "gpt-x"}),
+        calibration=_good_calibration(),
+        name="my_judge",
+        now=_STARTED_AT,
+    )
+    feedback = gated(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert feedback.metadata["judge_model"] == "gpt-x"
+    assert feedback.metadata["evalkit_authority"] == "gating"
+
+
+def test_evalkit_grader_becomes_a_working_mlflow_scorer() -> None:
+    from agentic_evalkit.graders.exact import ExactMatchGrader
+
+    scorer = as_mlflow_scorer(
+        ExactMatchGrader(
+            name="normalized-exact@1",
+            extractor=lambda output: str(output.get("answer", "")),
+        ),
+        name="evk_exact",
+    )
+    feedback = scorer(
+        inputs={"question": "2+2?"},
+        outputs={"answer": "42"},
+        expectations={"expected_response": "42"},
+    )
+
+    assert feedback.metadata["evalkit_status"] == "pass"
+    assert feedback.error is None
+
+
+def test_a_secret_inside_a_grader_rationale_is_scrubbed_before_it_reaches_mlflow() -> None:
+    """The one transmit path that cannot go through ``redact_for_export``.
+
+    A scorer is handed one row at a time and never sees an ``EvalRunResult``,
+    so the run-level redaction pass has nothing to work on here. The
+    rationale is not always a safe fixed string either: the built-in harness
+    grader interpolates an exception message into it, and an exception raised
+    while handling target output is a well-known way for a credential to end
+    up in an error message.
+    """
+
+    class _LeakyGrader:
+        async def grade(
+            self, sample: EvalSample, execution: NormalizedExecutionResult
+        ) -> GradeResult:
+            return GradeResult(
+                sample_id=sample.sample_id,
+                grader="leaky@1",
+                status=GradeStatus.PASS,
+                score=1.0,
+                evidence={"reason": f"upstream call failed with token {_PLANTED_TOKEN}"},
+                created_at=_FINISHED_AT,
+            )
+
+    scorer = as_mlflow_scorer(_LeakyGrader(), name="evk_leaky")
+    feedback = scorer(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert _PLANTED_TOKEN not in (feedback.rationale or "")
+    assert "[REDACTED]" in (feedback.rationale or "")
+
+
+def test_rationale_redaction_can_be_opted_out_of_deliberately() -> None:
+    class _LeakyGrader:
+        async def grade(
+            self, sample: EvalSample, execution: NormalizedExecutionResult
+        ) -> GradeResult:
+            return GradeResult(
+                sample_id=sample.sample_id,
+                grader="leaky@1",
+                status=GradeStatus.PASS,
+                score=1.0,
+                evidence={"reason": f"token {_PLANTED_TOKEN}"},
+                created_at=_FINISHED_AT,
+            )
+
+    scorer = as_mlflow_scorer(_LeakyGrader(), name="evk_leaky", redaction_policy=RedactionPolicy())
+    feedback = scorer(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert _PLANTED_TOKEN in (feedback.rationale or "")
+
+
+def test_a_non_verdict_grade_becomes_an_error_not_a_failing_score() -> None:
+    """ADR-0008 again, at the scorer boundary.
+
+    ABSTAIN says the grader declined; it does not say the system under test
+    got the answer wrong. Rendering it as ``False`` would fold a grading
+    outcome into a task outcome, and MLflow would then average it into the
+    score as though the system had failed.
+    """
+
+    class _AbstainingGrader:
+        async def grade(
+            self, sample: EvalSample, execution: NormalizedExecutionResult
+        ) -> GradeResult:
+            return GradeResult(
+                sample_id=sample.sample_id,
+                grader="abstaining@1",
+                status=GradeStatus.ABSTAIN,
+                created_at=_FINISHED_AT,
+            )
+
+    scorer = as_mlflow_scorer(_AbstainingGrader(), name="evk_abstain")
+    feedback = scorer(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert feedback.value is None
+    assert feedback.error is not None
+    assert feedback.metadata["evalkit_status"] == "abstain"

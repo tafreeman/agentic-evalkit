@@ -65,6 +65,7 @@ nav:
       - "0019: Retract unshipped entry-point plugin discovery": adr/0019-retract-unshipped-entry-point-plugin-discovery.md
       - "0020: Wilson lower-bound judge floor and response envelope": adr/0020-wilson-lower-bound-judge-floor-and-response-envelope.md
       - "0021: MCP stdio execution target": adr/0021-mcp-stdio-execution-target.md
+      - "0022: Host-platform integration boundary": adr/0022-host-platform-integration-boundary.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - CLI reference: guides/cli-reference.md
@@ -73,6 +74,7 @@ nav:
       - Targets: guides/targets.md
       - SWE-bench: guides/swebench.md
       - HTTP agent example: guides/http-agent-example.md
+      - MLflow & Langfuse bridge: guides/mlflow-langfuse-bridge.md
 
 markdown_extensions:
   - attr_list

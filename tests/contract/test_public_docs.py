@@ -124,6 +124,7 @@ def test_user_facing_file_set_is_nonempty() -> None:
         "docs/guides/graders.md",
         "docs/guides/targets.md",
         "docs/guides/swebench.md",
+        "docs/guides/mlflow-langfuse-bridge.md",
         "docs/guides/http-agent-example.md",
         "examples/http_agent/README.md",
         "examples/http_agent/run_example.py",

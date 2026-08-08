@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
     from pydantic import JsonValue
 
-    from agentic_evalkit.models import EvalRunResult, GradeResult, SampleResult
+    from agentic_evalkit.models import EvalRunResult, EvalSample, GradeResult, SampleResult
     from agentic_evalkit.models.execution import NormalizedExecutionResult
 
 _REDACTED = "[REDACTED]"
@@ -173,14 +173,91 @@ def _redact_grade(
     evidence_keys: frozenset[str],
     patterns: tuple[re.Pattern[str], ...],
 ) -> GradeResult:
-    if not grade.evidence:
+    """Scrub both free-form dicts a grade carries.
+
+    ``oracle_provenance`` is swept alongside ``evidence`` because it records
+    how an authoritative external checker was invoked -- which harness ran,
+    and how. That routinely means a command line, an image reference, or a
+    registry URL, and any of those can carry a credential. Only
+    ``evidence_keys`` drops whole keys; ``oracle_provenance`` gets the
+    pattern sweep, since its keys are a machine-readable evidence trail
+    rather than free prose to be discarded.
+
+    ``artifact_refs`` is swept too. It reads like a list of harness-minted
+    identifiers, but it is typed as free strings and documented as "pointers
+    (IDs or paths)" -- a grader that stores its working output in object
+    storage records a presigned URL there, signature and all.
+    """
+    updates: dict[str, object] = {}
+    if grade.evidence:
+        redacted_evidence = _redact_evidence(
+            grade.evidence, evidence_keys=evidence_keys, patterns=patterns
+        )
+        if redacted_evidence != grade.evidence:
+            updates["evidence"] = redacted_evidence
+    if grade.oracle_provenance and patterns:
+        redacted_oracle = _redact_json_value(grade.oracle_provenance, patterns)
+        if redacted_oracle != grade.oracle_provenance:
+            updates["oracle_provenance"] = redacted_oracle
+    if grade.artifact_refs and patterns:
+        redacted_refs = tuple(_redact_string(ref, patterns) for ref in grade.artifact_refs)
+        if redacted_refs != grade.artifact_refs:
+            updates["artifact_refs"] = redacted_refs
+    if not updates:
         return grade
-    redacted_evidence = _redact_evidence(
-        grade.evidence, evidence_keys=evidence_keys, patterns=patterns
-    )
-    if redacted_evidence == grade.evidence:
-        return grade
-    return grade.model_copy(update={"evidence": redacted_evidence})
+    return grade.model_copy(update=updates)
+
+
+def _redact_eval_sample(sample: EvalSample, *, patterns: tuple[re.Pattern[str], ...]) -> EvalSample:
+    """Scrub the sample itself, not just what the system under test did with it.
+
+    This was the gap that made the sweep incomplete for a long time. Every
+    other redaction here works on the *output* side -- what the target
+    produced, what the grader concluded -- on the assumption that the input
+    side is benign dataset content. It is not always. ``input`` is the
+    prompt, and a prompt routinely contains the credential the agent is
+    supposed to use, an authorization header to replay, or customer data
+    from a production trace turned into a regression case. ``metadata`` and
+    ``expected_artifacts`` are adapter-authored and can carry the same.
+
+    ``allowed_execution_policy`` is swept for the same reason and is easy to
+    overlook because it reads like harness configuration: it is a free-form
+    ``dict[str, JsonValue]`` the adapter fills in, and a policy describing
+    which tools a target may reach is exactly where an allowlist token or a
+    signed endpoint URL ends up.
+
+    ``grader.parameters`` is swept because its own contract is to be "passed
+    through as-is to whatever grader ``name`` refers to" -- so a sample
+    declaring an external oracle carries that oracle's connection settings,
+    credentials included. The rest of the ``GraderSpec`` (``name``,
+    ``grader_type``, ``hard_gate``) is a declaration, not payload, and is
+    left alone.
+
+    ``tags`` is deliberately left alone: it holds short structural labels an
+    adapter assigns for filtering, never free-form payload, and rewriting a
+    label would break selection without protecting anything.
+    """
+    if not patterns:
+        return sample
+    updates: dict[str, object] = {}
+    for field_name in ("input", "metadata", "expected_artifacts", "allowed_execution_policy"):
+        value = getattr(sample, field_name)
+        if not value:
+            continue
+        redacted_value = _redact_json_value(value, patterns)
+        if redacted_value != value:
+            updates[field_name] = redacted_value
+    if sample.reference is not None:
+        redacted_reference = _redact_string(sample.reference, patterns)
+        if redacted_reference != sample.reference:
+            updates["reference"] = redacted_reference
+    if sample.grader is not None and sample.grader.parameters:
+        redacted_parameters = _redact_json_value(sample.grader.parameters, patterns)
+        if redacted_parameters != sample.grader.parameters:
+            updates["grader"] = sample.grader.model_copy(update={"parameters": redacted_parameters})
+    if not updates:
+        return sample
+    return sample.model_copy(update=updates)
 
 
 def _is_artifact_digest(value: JsonValue | None) -> bool:
@@ -301,7 +378,7 @@ def _redact_execution(
     if not patterns:
         return execution
     updates: dict[str, object] = {}
-    for field_name in ("output", "structured_output", "error", "artifacts"):
+    for field_name in ("output", "structured_output", "error", "artifacts", "environment_metadata"):
         value = getattr(execution, field_name)
         if value is None:
             continue
@@ -312,6 +389,29 @@ def _redact_execution(
             )
         if redacted_value != value:
             updates[field_name] = redacted_value
+    # tool_calls needs its own pass because it is a tuple of dicts, and
+    # _redact_json_value turns every sequence into a list -- assigning that
+    # back would change the field's type on a frozen model whose collections
+    # are tuples by contract (ADR-0002). It is swept rather than trusted
+    # because a tool call records the arguments the target sent to a tool,
+    # which is exactly where an API key travels.
+    if execution.tool_calls:
+        redacted_calls = tuple(
+            cast("dict[str, JsonValue]", _redact_json_value(call, patterns))
+            for call in execution.tool_calls
+        )
+        if redacted_calls != execution.tool_calls:
+            updates["tool_calls"] = redacted_calls
+    # trace_refs needs its own pass for the same tuple-typing reason as
+    # tool_calls. It holds IDs or URLs pointing at an external tracing
+    # system, and a URL is a place a credential travels: a signed trace link
+    # carries its signature in the query string, which is precisely the
+    # shape DEFAULT_REDACTION_POLICY exists to catch. Being a tuple of bare
+    # strings, each element is scrubbed directly rather than walked.
+    if execution.trace_refs:
+        redacted_refs = tuple(_redact_string(ref, patterns) for ref in execution.trace_refs)
+        if redacted_refs != execution.trace_refs:
+            updates["trace_refs"] = redacted_refs
     if not updates:
         return execution
     return execution.model_copy(update=updates)
@@ -324,6 +424,9 @@ def _redact_sample(
     patterns: tuple[re.Pattern[str], ...],
 ) -> SampleResult:
     updates: dict[str, object] = {}
+    redacted_sample = _redact_eval_sample(sample.sample, patterns=patterns)
+    if redacted_sample is not sample.sample:
+        updates["sample"] = redacted_sample
     redacted_execution = _redact_execution(sample.execution, patterns=patterns)
     if redacted_execution is not sample.execution:
         updates["execution"] = redacted_execution
@@ -334,6 +437,28 @@ def _redact_sample(
     if not updates:
         return sample
     return sample.model_copy(update=updates)
+
+
+def redact_text(value: str, policy: RedactionPolicy) -> str:
+    """Apply ``policy``'s secret patterns to one free-standing string.
+
+    :func:`apply_redaction` is the right entry point whenever there is a
+    whole :class:`~agentic_evalkit.models.EvalRunResult` to scrub, and it
+    remains the only one the reporters use. This exists for the narrower
+    case where a single caller-visible string is about to leave the process
+    without any run around it -- the rationale
+    ``agentic_evalkit.integrations.mlflow.as_mlflow_scorer`` attaches to a
+    host-platform feedback object, for example, which is synthesized from a
+    grade's evidence rather than copied out of a run.
+
+    ``policy.evidence_keys`` is not consulted, because a bare string has no
+    keys to drop; only ``secret_patterns`` applies. Passing a policy with no
+    patterns returns ``value`` unchanged, which is the same opt-out
+    :class:`RedactionPolicy` gives everywhere else.
+    """
+    if not policy.secret_patterns:
+        return value
+    return _redact_string(value, tuple(re.compile(p) for p in policy.secret_patterns))
 
 
 def apply_redaction(run: EvalRunResult, policy: RedactionPolicy) -> EvalRunResult:
@@ -364,4 +489,10 @@ def apply_redaction(run: EvalRunResult, policy: RedactionPolicy) -> EvalRunResul
     return run.model_copy(update={"samples": redacted_samples})
 
 
-__all__ = ["DEFAULT_REDACTION_POLICY", "RedactionPolicy", "Reporter", "apply_redaction"]
+__all__ = [
+    "DEFAULT_REDACTION_POLICY",
+    "RedactionPolicy",
+    "Reporter",
+    "apply_redaction",
+    "redact_text",
+]
