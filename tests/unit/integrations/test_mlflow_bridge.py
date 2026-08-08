@@ -738,6 +738,130 @@ def test_a_gating_judges_own_feedback_is_published_under_the_wrapper_name() -> N
     assert feedback.metadata["evalkit_can_gate"] == "true"
 
 
+def test_a_multi_metric_scorer_returning_a_list_keeps_each_feedback_intact() -> None:
+    """MLflow permits ``list[Feedback]``, and wrapping one in a Feedback is nonsense.
+
+    ``Scorer.run`` accepts ``int | float | bool | str | Feedback |
+    list[Feedback]``. A list falling through to the bare-value branch would
+    become ``Feedback(value=[Feedback, Feedback])`` -- a value outside
+    ``FeedbackValueType`` entirely, which fails deep inside MLflow's
+    serialization rather than here, long after the useful stack frame.
+
+    Each element keeps its OWN name because they measure different things;
+    collapsing them onto the wrapper's name would merge two metrics into
+    one. Demotion therefore suffixes each rather than replacing it.
+    """
+    from mlflow.entities import Feedback
+
+    def multi_metric(**_: object) -> list[Feedback]:
+        return [Feedback(name="a", value=0.9), Feedback(name="b", value=0.7)]
+
+    advisory = calibration_gate(multi_metric, calibration=None, name="panel", now=_STARTED_AT)
+    results = advisory(inputs={}, outputs={})
+
+    assert isinstance(results, list)
+    assert [f.name for f in results] == ["a.advisory", "b.advisory"]
+    assert [f.value for f in results] == [0.9, 0.7]
+    assert all(f.metadata["evalkit_authority"] == "advisory" for f in results)
+
+
+def test_a_gating_multi_metric_scorer_keeps_its_names_unsuffixed() -> None:
+    from mlflow.entities import Feedback
+
+    gated = calibration_gate(
+        lambda **_: [Feedback(name="a", value=1.0)],
+        calibration=_good_calibration(),
+        name="panel",
+        now=_STARTED_AT,
+    )
+    results = gated(inputs={}, outputs={})
+
+    assert [f.name for f in results] == ["a"]
+    assert results[0].metadata["evalkit_can_gate"] == "true"
+
+
+def test_the_authority_reason_is_scrubbed_before_it_reaches_the_feedback() -> None:
+    """The gate transmits per row and never sees a run, so this is its only sweep.
+
+    ``authority.reason`` interpolates the calibration ID and, on a
+    fingerprint mismatch, both fingerprints verbatim. Those are
+    operator-supplied strings, and this package does not get to assume an
+    operator never put a credential in one.
+    """
+    gated = calibration_gate(
+        lambda **_: True,
+        calibration=_good_calibration(),
+        name="my_judge",
+        judge_fingerprint=f"fp-{_PLANTED_TOKEN}",
+        now=_STARTED_AT,
+    )
+    feedback = gated(inputs={}, outputs={})
+
+    reason = feedback.metadata["evalkit_authority_reason"]
+    assert _PLANTED_TOKEN not in reason
+    assert "[REDACTED]" in reason
+
+
+def test_a_rationale_whose_evidence_key_was_opted_out_is_never_transmitted() -> None:
+    """``evidence_keys`` must mean the same thing on both paths.
+
+    A caller who writes ``RedactionPolicy(evidence_keys=("reason",))`` is
+    saying that field must not leave the machine. ``apply_redaction`` honours
+    that for the run body; the scorer rationale is synthesized from the same
+    key and would otherwise transmit it anyway, pattern-scrubbed but present.
+    """
+
+    class _DeliberatingGrader:
+        async def grade(
+            self, sample: EvalSample, execution: NormalizedExecutionResult
+        ) -> GradeResult:
+            return GradeResult(
+                sample_id=sample.sample_id,
+                grader="deliberating@1",
+                status=GradeStatus.PASS,
+                score=1.0,
+                evidence={"reason": "internal deliberation nobody outside should read"},
+                created_at=_FINISHED_AT,
+            )
+
+    scorer = as_mlflow_scorer(
+        _DeliberatingGrader(),
+        name="evk_opt_out",
+        redaction_policy=RedactionPolicy(evidence_keys=("reason",)),
+    )
+    feedback = scorer(inputs={"q": "x"}, outputs={"a": "y"})
+
+    assert feedback.rationale is None
+
+
+def test_a_crashed_export_marks_its_run_failed_rather_than_leaving_it_running(
+    tracking_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An abandoned RUNNING run is worse than one marked FAILED.
+
+    It looks in-flight forever, and anyone reading the experiment cannot
+    tell a crashed export from one still going. Without this test the whole
+    try/except could be deleted and every other assertion would still pass.
+    """
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("tracking server went away")
+
+    monkeypatch.setattr(mlflow.MlflowClient, "log_dict", explode)
+    with pytest.raises(RuntimeError, match="tracking server went away"):
+        log_eval_run(_run(), tracking_uri=tracking_uri, experiment="crash-cleanup")
+
+    monkeypatch.undo()
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+    experiment = client.get_experiment_by_name("crash-cleanup")
+    assert experiment is not None, "the export created no experiment, so this proves nothing"
+    runs = client.search_runs(
+        [experiment.experiment_id], run_view_type=mlflow.entities.ViewType.ALL
+    )
+    assert runs, "the export created no run at all, so this proves nothing"
+    assert runs[0].info.status == "FAILED"
+
+
 def test_calibrated_judge_verdict_passes_through_and_is_marked_gating() -> None:
     gated = calibration_gate(
         lambda **_: True,

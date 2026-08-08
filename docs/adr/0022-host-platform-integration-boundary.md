@@ -114,8 +114,12 @@ the consequences of getting them wrong are not the same as for a local file.
 ## Alternatives
 
 1. **Build a self-hosted evaluation dashboard instead.** Rejected: MLflow
-   (27.4K stars, Apache-2.0, self-hostable, 60+ framework integrations) and
-   Langfuse (32.5K stars, self-hostable) already occupy that position.
+   (Apache-2.0, self-hostable, 60+ framework integrations) and Langfuse
+   (self-hostable) already occupy that position, each with a community
+   several orders of magnitude larger than this package's — the same
+   2026-08-04 landscape review the Context section cites. Star counts are
+   deliberately not repeated here: they move continuously, and the argument
+   does not turn on the exact figure.
    Shipping a rival would mean building a UI, a trace store, and an
    integration surface — years of work already done elsewhere — in order to
    deliver one statistical feature. The rigor is the product; the dashboard
@@ -148,9 +152,14 @@ the consequences of getting them wrong are not the same as for a local file.
   their platform or changing their harness.
 - The base install is unchanged. A user who wants neither bridge pays
   nothing, and `agentic_evalkit.integrations` remains free to import.
-- Adding a third host platform requires three deliberate edits — the module,
-  an `EXTERNAL_SINKS` entry, and a `REDACTION_ROUTED_SINKS` entry — and CI
-  fails until the third is made and is truthful.
+- Adding a host platform requires a deliberate edit per transmitting
+  function, not per module: the module itself, an `EXTERNAL_SINKS` entry for
+  every function that sends anything, and that entry's placement in exactly
+  one of `REDACTION_ROUTED_SINKS` (handed a whole run, routes it through
+  `redact_for_export`) or `TEXT_REDACTED_SINKS` (called per row by the host,
+  scrubs with `redact_text`). CI fails until each is made and is truthful.
+  Counting modules rather than functions is what let the two calibration
+  gates and the scorer bridge transmit while registered nowhere.
 - Both host libraries are now development dependencies, so the bridges are
   tested and type-checked against the real client APIs rather than against a
   guess. The MLflow bridge is tested hermetically against a local tracking
@@ -177,8 +186,10 @@ the consequences of getting them wrong are not the same as for a local file.
   active run untouched.
 - `tests/unit/integrations/test_integration_base.py` pins the three authority
   levels against the ADR-0007 D-1 two-tier rule, including that absent
-  evidence yields advisory and present-but-bad evidence yields unavailable,
-  and that a judge proven unreliable is never called at all.
+  evidence yields advisory and present-but-bad evidence yields unavailable.
+  That a judge proven unreliable is never *called* is a property of the
+  wrapper rather than of the decision function, so it is pinned in
+  `tests/unit/integrations/test_mlflow_bridge.py` instead.
 - `tests/unit/integrations/test_langfuse_bridge.py` pins that a non-verdict
   outcome never becomes a `0.0` numeric score, that demotion changes the
   score name rather than only its metadata, and that supplying a client makes

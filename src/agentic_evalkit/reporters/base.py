@@ -182,6 +182,11 @@ def _redact_grade(
     ``evidence_keys`` drops whole keys; ``oracle_provenance`` gets the
     pattern sweep, since its keys are a machine-readable evidence trail
     rather than free prose to be discarded.
+
+    ``artifact_refs`` is swept too. It reads like a list of harness-minted
+    identifiers, but it is typed as free strings and documented as "pointers
+    (IDs or paths)" -- a grader that stores its working output in object
+    storage records a presigned URL there, signature and all.
     """
     updates: dict[str, object] = {}
     if grade.evidence:
@@ -194,6 +199,10 @@ def _redact_grade(
         redacted_oracle = _redact_json_value(grade.oracle_provenance, patterns)
         if redacted_oracle != grade.oracle_provenance:
             updates["oracle_provenance"] = redacted_oracle
+    if grade.artifact_refs and patterns:
+        redacted_refs = tuple(_redact_string(ref, patterns) for ref in grade.artifact_refs)
+        if redacted_refs != grade.artifact_refs:
+            updates["artifact_refs"] = redacted_refs
     if not updates:
         return grade
     return grade.model_copy(update=updates)
@@ -211,6 +220,19 @@ def _redact_eval_sample(sample: EvalSample, *, patterns: tuple[re.Pattern[str], 
     from a production trace turned into a regression case. ``metadata`` and
     ``expected_artifacts`` are adapter-authored and can carry the same.
 
+    ``allowed_execution_policy`` is swept for the same reason and is easy to
+    overlook because it reads like harness configuration: it is a free-form
+    ``dict[str, JsonValue]`` the adapter fills in, and a policy describing
+    which tools a target may reach is exactly where an allowlist token or a
+    signed endpoint URL ends up.
+
+    ``grader.parameters`` is swept because its own contract is to be "passed
+    through as-is to whatever grader ``name`` refers to" -- so a sample
+    declaring an external oracle carries that oracle's connection settings,
+    credentials included. The rest of the ``GraderSpec`` (``name``,
+    ``grader_type``, ``hard_gate``) is a declaration, not payload, and is
+    left alone.
+
     ``tags`` is deliberately left alone: it holds short structural labels an
     adapter assigns for filtering, never free-form payload, and rewriting a
     label would break selection without protecting anything.
@@ -218,7 +240,7 @@ def _redact_eval_sample(sample: EvalSample, *, patterns: tuple[re.Pattern[str], 
     if not patterns:
         return sample
     updates: dict[str, object] = {}
-    for field_name in ("input", "metadata", "expected_artifacts"):
+    for field_name in ("input", "metadata", "expected_artifacts", "allowed_execution_policy"):
         value = getattr(sample, field_name)
         if not value:
             continue
@@ -229,6 +251,10 @@ def _redact_eval_sample(sample: EvalSample, *, patterns: tuple[re.Pattern[str], 
         redacted_reference = _redact_string(sample.reference, patterns)
         if redacted_reference != sample.reference:
             updates["reference"] = redacted_reference
+    if sample.grader is not None and sample.grader.parameters:
+        redacted_parameters = _redact_json_value(sample.grader.parameters, patterns)
+        if redacted_parameters != sample.grader.parameters:
+            updates["grader"] = sample.grader.model_copy(update={"parameters": redacted_parameters})
     if not updates:
         return sample
     return sample.model_copy(update=updates)
@@ -376,6 +402,16 @@ def _redact_execution(
         )
         if redacted_calls != execution.tool_calls:
             updates["tool_calls"] = redacted_calls
+    # trace_refs needs its own pass for the same tuple-typing reason as
+    # tool_calls. It holds IDs or URLs pointing at an external tracing
+    # system, and a URL is a place a credential travels: a signed trace link
+    # carries its signature in the query string, which is precisely the
+    # shape DEFAULT_REDACTION_POLICY exists to catch. Being a tuple of bare
+    # strings, each element is scrubbed directly rather than walked.
+    if execution.trace_refs:
+        redacted_refs = tuple(_redact_string(ref, patterns) for ref in execution.trace_refs)
+        if redacted_refs != execution.trace_refs:
+            updates["trace_refs"] = redacted_refs
     if not updates:
         return execution
     return execution.model_copy(update=updates)

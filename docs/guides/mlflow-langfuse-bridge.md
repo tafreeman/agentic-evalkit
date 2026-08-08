@@ -201,7 +201,7 @@ from agentic_evalkit.integrations.langfuse import log_eval_run, score_with_calib
 
 client = Langfuse()
 
-log_eval_run(result, client=client, calibration=my_calibration_artifact)
+trace_id = log_eval_run(result, client=client, calibration=my_calibration_artifact)
 
 score_with_calibration_gate(
     client,

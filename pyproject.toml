@@ -59,11 +59,11 @@ mlflow = ["mlflow-skinny>=3,<4"]
 # 3.3.1 -- 3.3.0 and every earlier 3.x exposes only `start_span` /
 # `start_generation`, so `pip install agentic-evalkit[langfuse]` against a
 # project already pinning one of those would resolve happily and then raise
-# AttributeError on the first export rather than at install time. The v4
-# ceiling is the usual major-version guard; 4.x is what the lockfile
-# resolves and what CI type-checks against, and the surface this module
-# calls (`start_observation`, `create_score`, `flush`, span `.end`/`.id`/
-# `.trace_id`) is unchanged across 3.3.1 and 4.x, which is why the range
+# AttributeError on the first export rather than at install time. The `<5`
+# ceiling is the usual major-version guard and admits all of 4.x, which is
+# what the lockfile resolves and what CI type-checks against. The surface
+# this module calls (`start_observation`, `create_score`, `flush`, span
+# `.end`/`.id`/`.trace_id`) is unchanged across 3.3.1 and 4.x, which is why the range
 # spans the major rather than being pinned to one side of it.
 langfuse = ["langfuse>=3.3.1,<5"]
 

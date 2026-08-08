@@ -416,10 +416,96 @@ def test_the_reason_for_a_demotion_is_recorded_where_a_human_will_see_it() -> No
 def test_a_string_verdict_is_written_as_a_categorical_score() -> None:
     client = _RecordingClient()
     score_with_calibration_gate(
-        client, name="verdict", value="grounded", calibration=_calibration()
+        client, name="verdict", value="grounded", calibration=_calibration(), now=_STARTED_AT
     )
 
     assert client.scores[0]["data_type"] == "CATEGORICAL"
+    # Pinned to the gating name as well as the data type: the UNAVAILABLE
+    # path also writes CATEGORICAL, so asserting the type alone would pass
+    # even if this judge had been withheld for the wrong reason.
+    assert client.scores[0]["name"] == "verdict"
+
+
+def test_the_comment_is_scrubbed_before_it_reaches_langfuse() -> None:
+    """``comment`` is caller free text going to a shared server.
+
+    This function is handed one score, never a run, so ``redact_for_export``
+    has nothing to operate on and this is the only sweep available -- the
+    same position ``as_mlflow_scorer`` is in with its rationale. The obvious
+    way to build a comment is from target output or an exception message,
+    both well-trodden routes for a credential to reach a string.
+    """
+    client = _RecordingClient()
+    score_with_calibration_gate(
+        client,
+        name="faithfulness",
+        value=0.9,
+        calibration=_calibration(),
+        comment=f"replayed with {_PLANTED_TOKEN}",
+        now=_STARTED_AT,
+    )
+
+    comment = client.scores[0]["comment"]
+    assert _PLANTED_TOKEN not in comment
+    assert "[REDACTED]" in comment
+
+
+def test_the_gate_can_be_pinned_to_an_instant_like_every_other_calibration_call() -> None:
+    """Without ``now`` this function reads the wall clock and cannot be tested.
+
+    Two consequences, and the second is the one that bites: expiry and the
+    90-day age limit are unreachable in a hermetic test, and any test using
+    a fixture whose ``expires_at`` is a fixed date silently becomes a time
+    bomb that goes red the day it passes.
+    """
+    calibration = _calibration(
+        calibrated_at=_STARTED_AT - timedelta(days=1),
+        expires_at=_STARTED_AT + timedelta(days=30),
+    )
+
+    before = _RecordingClient()
+    assert (
+        score_with_calibration_gate(
+            before, name="f", value=0.9, calibration=calibration, now=_STARTED_AT
+        )
+        is AuthorityLevel.GATING
+    )
+
+    after = _RecordingClient()
+    assert (
+        score_with_calibration_gate(
+            after,
+            name="f",
+            value=0.9,
+            calibration=calibration,
+            now=_STARTED_AT + timedelta(days=31),
+        )
+        is AuthorityLevel.UNAVAILABLE
+    )
+    assert after.scores[0]["name"] == "f.unavailable"
+
+
+def test_a_failure_partway_through_still_flushes_what_was_already_built() -> None:
+    """A buffered client plus an exception equals a silently lost export.
+
+    Langfuse batches in a background thread, so an exception escaping with
+    the buffer unflushed discards every span and score recorded before the
+    failure. A caller treating the error as fatal then exits and takes the
+    evidence of what went wrong with it. Langfuse has no equivalent of
+    MLflow's terminal run status, so the partial trace is the only thing a
+    failed export leaves behind.
+    """
+
+    class _FailingClient(_RecordingClient):
+        def create_score(self, **kwargs: Any) -> None:
+            super().create_score(**kwargs)
+            raise RuntimeError("langfuse went away")
+
+    client = _FailingClient()
+    with pytest.raises(RuntimeError, match="langfuse went away"):
+        log_eval_run(_run(), client=client)
+
+    assert client.flushes == 1, "the partial export was never flushed and is lost"
 
 
 def test_missing_langfuse_is_only_an_error_when_no_client_was_supplied(

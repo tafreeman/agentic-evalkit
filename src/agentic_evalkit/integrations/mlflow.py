@@ -610,6 +610,7 @@ def calibration_gate(
     name: str | None = None,
     judge_fingerprint: str | None = None,
     now: datetime | None = None,
+    redaction_policy: RedactionPolicy = DEFAULT_REDACTION_POLICY,
 ) -> Any:  # mlflow.genai.scorers.Scorer, unimportable at module scope
     """Wrap an MLflow scorer so it can only gate a release when its evidence says it may.
 
@@ -652,6 +653,15 @@ def calibration_gate(
             judge cannot gate this one.
         now: The moment to evaluate expiry and age against. Defaults to the
             current UTC time; tests pass a fixed value.
+        redaction_policy: Patterns scrubbed from the authority reason before
+            it is attached to the feedback. Like ``as_mlflow_scorer``, this
+            is called per row and never sees an ``EvalRunResult``, so
+            ``redact_for_export`` has nothing to work on and this is the
+            only redaction available here. The reason is assembled from the
+            calibration's own identifiers and, on a fingerprint mismatch,
+            from both fingerprints verbatim -- operator-supplied strings
+            this package does not get to assume are innocuous. Pass
+            ``RedactionPolicy()`` to opt out.
 
     Returns:
         An ``mlflow.genai.scorers.Scorer`` ready to pass to
@@ -692,7 +702,7 @@ def calibration_gate(
         outputs: Any = None,
         expectations: Any = None,
         trace: Any = None,
-    ) -> Feedback:
+    ) -> Feedback | list[Feedback]:
         # Re-evaluated per row, not captured once at wrap time. A scorer
         # object is typically built at import and then used across a long
         # evaluation, so an authority frozen at construction would let a
@@ -706,12 +716,20 @@ def calibration_gate(
         # Every value in Feedback.metadata must be a string (mlflow.entities
         # types it dict[str, str]), so the level enum and the reason are
         # rendered rather than passed through.
+        # The reason is transmitted, so it is scrubbed on the way out. It
+        # interpolates the calibration ID and, on a mismatch, both judge
+        # fingerprints -- all caller-supplied strings, and a fingerprint is
+        # exactly the kind of field somebody eventually derives from a
+        # credentialed endpoint.
+        reason = (
+            None if authority.reason is None else redact_text(authority.reason, redaction_policy)
+        )
         metadata = {
             "evalkit_authority": str(authority.level),
             "evalkit_can_gate": str(authority.level is AuthorityLevel.GATING).lower(),
         }
-        if authority.reason is not None:
-            metadata["evalkit_authority_reason"] = authority.reason
+        if reason is not None:
+            metadata["evalkit_authority_reason"] = reason
         if authority.calibration_id is not None:
             metadata["evalkit_calibration_id"] = authority.calibration_id
 
@@ -721,7 +739,7 @@ def calibration_gate(
             # cannot be used bills the caller for nothing.
             return Feedback(
                 name=scorer_name,
-                error=authority.reason,
+                error=reason,
                 source=source,
                 metadata=metadata,
             )
@@ -741,15 +759,15 @@ def calibration_gate(
         # aggregates assessments by name, so an advisory value written under
         # the gating name has already moved the aggregate by the time anyone
         # reads the metadata explaining that it should not have.
-        published = (
-            scorer_name
-            if authority.level is AuthorityLevel.GATING
-            else f"{scorer_name}{_ADVISORY_SUFFIX}"
-        )
+        suffix = "" if authority.level is AuthorityLevel.GATING else _ADVISORY_SUFFIX
+        published = f"{scorer_name}{suffix}"
         # _attach_authority is typed to return Any because it cannot name
         # Feedback at module scope; the cast restores the real type here,
         # where the class is in scope.
-        return cast("Feedback", _attach_authority(result, published, source, metadata, Feedback))
+        return cast(
+            "Feedback | list[Feedback]",
+            _attach_authority(result, published, source, metadata, Feedback, suffix=suffix),
+        )
 
     return gated
 
@@ -781,15 +799,27 @@ def _attach_authority(
     source: object,
     metadata: dict[str, str],
     feedback_cls: type[Any],
-) -> Any:  # mlflow.entities.Feedback
+    *,
+    suffix: str = "",
+) -> Any:  # mlflow.entities.Feedback | list[mlflow.entities.Feedback]
     """Carry the authority verdict onto whatever the wrapped scorer returned.
 
     A scorer is allowed to return a bare value (``True``, ``0.8``,
-    ``"good"``) or a full ``Feedback``. Both are normalized to a
-    ``Feedback`` here so the authority metadata has somewhere to live --
-    without it, a gate downstream would have the verdict and no way to know
-    whether it was entitled to act on it, which is the exact failure this
-    whole module exists to prevent.
+    ``"good"``), a full ``Feedback``, or a *list* of them -- MLflow permits
+    all three (``Scorer.run`` accepts ``int | float | bool | str | Feedback
+    | list[Feedback]``). All are normalized here so the authority metadata
+    has somewhere to live -- without it, a gate downstream would have the
+    verdict and no way to know whether it was entitled to act on it, which
+    is the exact failure this whole module exists to prevent.
+
+    The list case is a multi-metric scorer, and it needs its own branch
+    rather than falling through to the bare-value one: wrapping a list of
+    ``Feedback`` in ``Feedback(value=[...])`` produces an object whose
+    ``value`` is not a permitted ``FeedbackValueType`` at all, which fails
+    deep inside MLflow's serialization rather than here. Each element keeps
+    its own name -- they are different metrics, and collapsing them onto one
+    name would merge measurements of different things -- so demotion appends
+    ``suffix`` to each instead of replacing it.
 
     An existing ``Feedback``'s own metadata is preserved and the authority
     keys are merged over it, so wrapping never discards what the judge
@@ -817,18 +847,28 @@ def _attach_authority(
     rebound, and to a freshly built dict rather than to one shared with the
     input.
     """
+    if isinstance(result, list) and result and all(isinstance(i, feedback_cls) for i in result):
+        return [_rebind(item, f"{item.name}{suffix}", metadata, copy.copy(item)) for item in result]
     if isinstance(result, feedback_cls):
-        merged = {**(result.metadata or {}), **metadata}
-        copied = copy.copy(result)
-        copied.metadata = merged
-        copied.name = published_name
-        return copied
+        return _rebind(result, published_name, metadata, copy.copy(result))
     return feedback_cls(
         name=published_name,
         value=result,
         source=source,
         metadata=metadata,
     )
+
+
+def _rebind(original: Any, name: str, metadata: dict[str, str], copied: Any) -> Any:
+    """Point ``copied`` at ``name`` and merge ``metadata`` over what it already had.
+
+    Split out so the single-``Feedback`` and ``list[Feedback]`` branches
+    cannot drift: both must preserve the judge's own metadata, both must
+    rebind the name, and neither may mutate the object it was handed.
+    """
+    copied.metadata = {**(original.metadata or {}), **metadata}
+    copied.name = name
+    return copied
 
 
 def _sample_id_for(inputs: object) -> str:
@@ -999,7 +1039,20 @@ def _rationale_of(grade: GradeResult, policy: RedactionPolicy) -> str | None:
     handling target output is a well-trodden way for a credential to end up
     inside an error message, so the same patterns that guard the export path
     guard this one.
+
+    ``evidence_keys`` is honoured here even though :func:`redact_text` does
+    not consult it, and the distinction is the whole point.
+    :func:`redact_text` takes a bare string and has no keys to drop; this
+    function still has the *grade*, so it knows which key the text came out
+    of. A caller who writes ``RedactionPolicy(evidence_keys=("reason",))``
+    is saying that field must not be transmitted -- and it would be a
+    strange guarantee that held for the run body written by
+    :func:`log_eval_run` and then leaked through the rationale on a feedback
+    object. Dropping the key wins over scrubbing it: an opt-out is a
+    stronger instruction than a pattern match.
     """
+    if "reason" in policy.evidence_keys:
+        return None
     reason = grade.evidence.get("reason")
     if not isinstance(reason, str):
         return None

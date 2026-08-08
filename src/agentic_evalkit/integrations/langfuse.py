@@ -37,7 +37,7 @@ from agentic_evalkit.integrations.base import (
     require_dependency,
 )
 from agentic_evalkit.models import GradeStatus
-from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY
+from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY, redact_text
 from agentic_evalkit.stats import aggregate_run, comparability_snapshot
 
 if TYPE_CHECKING:
@@ -340,9 +340,17 @@ def log_eval_run(
                 child.end()
     finally:
         root.end()
-
-    if flush:
-        resolved.flush()
+        # Flushed in the finally, not after it, so a failure partway through
+        # still ships what was already built. The Langfuse client buffers in
+        # a background thread, so an exception escaping this function with
+        # the buffer unflushed loses every span and score recorded before the
+        # failure -- and a caller that treats the error as fatal and exits
+        # takes the evidence of what went wrong down with it. A partial trace
+        # ending early is diagnosable; nothing at all is not. Langfuse has no
+        # equivalent of MLflow's terminal run status, so this is the only
+        # server-side trace a failed export leaves.
+        if flush:
+            resolved.flush()
     return trace_id
 
 
@@ -356,6 +364,8 @@ def score_with_calibration_gate(
     observation_id: str | None = None,
     judge_fingerprint: str | None = None,
     comment: str | None = None,
+    redaction_policy: RedactionPolicy = DEFAULT_REDACTION_POLICY,
+    now: datetime | None = None,
 ) -> AuthorityLevel:
     """Record a judge's score in Langfuse under the authority its evidence earns.
 
@@ -387,14 +397,30 @@ def score_with_calibration_gate(
             measured against a different judge cannot gate this one.
         comment: Free-text comment stored alongside the score. The
             authority reason is appended to it.
+        redaction_policy: Patterns scrubbed from the comment before it is
+            transmitted. This function never sees an ``EvalRunResult``, so
+            :func:`~agentic_evalkit.integrations.base.redact_for_export` has
+            nothing to operate on and this is the only redaction available
+            on this path -- the same position ``as_mlflow_scorer`` is in
+            with its rationale. ``comment`` is wholly caller-supplied, and
+            the obvious thing to build one from is target output or an
+            exception message, both well-trodden routes for a credential to
+            reach a string. Pass ``RedactionPolicy()`` to opt out.
+        now: The moment to evaluate ``calibration``'s expiry and age
+            against. Defaults to the current UTC time, which is what a live
+            caller wants; tests and reproducible pipelines pass a fixed
+            value. Mirrors
+            :func:`~agentic_evalkit.integrations.mlflow.calibration_gate`,
+            whose authority must be re-resolved per call for the same
+            reason: a calibration that expires must stop gating.
 
     Returns:
         The :class:`~agentic_evalkit.integrations.base.AuthorityLevel` the
         score was written under, so a caller can branch on it.
     """
-    authority = judge_authority(calibration, judge_fingerprint=judge_fingerprint)
+    authority = judge_authority(calibration, judge_fingerprint=judge_fingerprint, now=now)
     parts = [part for part in (comment, authority.reason) if part]
-    full_comment = " | ".join(parts) if parts else None
+    full_comment = redact_text(" | ".join(parts), redaction_policy) if parts else None
     metadata = {
         "evalkit_authority": str(authority.level),
         "evalkit_can_gate": authority.level is AuthorityLevel.GATING,
