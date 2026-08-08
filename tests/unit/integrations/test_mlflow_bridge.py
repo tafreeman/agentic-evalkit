@@ -76,6 +76,7 @@ def _run(
     run_id: str = "run-001",
     adapter: str = "gsm8k@1",
     seed: int | None = 7,
+    revision: str = "abc123",
     statuses: tuple[GradeStatus | None, ...] = (
         GradeStatus.PASS,
         GradeStatus.PASS,
@@ -147,7 +148,7 @@ def _run(
         ),
         resolved_dataset=ResolvedDataset(
             dataset_id="openai/gsm8k",
-            revision="abc123",
+            revision=revision,
             config="main",
             split="test",
             row_count=4,
@@ -470,6 +471,24 @@ def test_comparison_is_refused_when_the_sampling_seed_differs(tracking_uri: str)
     right = log_eval_run(_run(run_id="run-b", seed=99), tracking_uri=tracking_uri)
 
     with pytest.raises(IncompatibleRuns, match=re.escape("manifest.sampling.seed differs")):
+        compare_mlflow_runs(left, right, seed=1234, tracking_uri=tracking_uri)
+
+
+def test_comparison_is_refused_when_the_dataset_revision_differs(tracking_uri: str) -> None:
+    """The dataset-identity half of the pre-check's subset guarantee.
+
+    Every other refusal test here varies a *manifest* field. The pre-check
+    is generic over ``evalkit.provenance.*`` tags, so dataset identity looks
+    covered by construction -- which is exactly how it would go unnoticed if
+    the exporter ever stopped writing those tags, or wrote them under a
+    prefix the pre-check does not read. Two runs of different dataset
+    revisions are not comparable at all, and this is the cheapest place that
+    has to say so.
+    """
+    left = log_eval_run(_run(run_id="run-a", revision="abc123"), tracking_uri=tracking_uri)
+    right = log_eval_run(_run(run_id="run-b", revision="def456"), tracking_uri=tracking_uri)
+
+    with pytest.raises(IncompatibleRuns, match=re.escape("dataset.revision differs")):
         compare_mlflow_runs(left, right, seed=1234, tracking_uri=tracking_uri)
 
 
