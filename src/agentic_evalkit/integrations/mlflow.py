@@ -777,7 +777,7 @@ def _forwardable(target: Callable[..., Any], row: dict[str, Any]) -> dict[str, A
 
 def _attach_authority(
     result: object,
-    scorer_name: str,
+    published_name: str,
     source: object,
     metadata: dict[str, str],
     feedback_cls: type[Any],
@@ -793,7 +793,18 @@ def _attach_authority(
 
     An existing ``Feedback``'s own metadata is preserved and the authority
     keys are merged over it, so wrapping never discards what the judge
-    already reported.
+    already reported. Its ``name``, by contrast, is *replaced* rather than
+    preserved, and that is the demotion actually taking effect. A judge from
+    ``make_judge`` returns a fully-formed ``Feedback`` carrying its own name,
+    so a branch that copied the object and left ``name`` alone would publish
+    an advisory verdict under the gating name -- exactly the failure the
+    caller renamed it to avoid, and invisible in the bare-value case because
+    that branch builds the ``Feedback`` from the published name to begin
+    with. MLflow honours an explicitly-set name (``Scorer.run`` rebinds it
+    only when it is still the default ``"feedback"``, and
+    ``_get_custom_assessment_name`` returns it as given otherwise), so the
+    rename is what reaches the tracking server and what any release gate
+    keyed on the gating name will therefore no longer match.
 
     The copy is made with :func:`copy.copy` rather than the more obvious
     :func:`dataclasses.replace`, because ``replace`` does not work on this
@@ -810,9 +821,10 @@ def _attach_authority(
         merged = {**(result.metadata or {}), **metadata}
         copied = copy.copy(result)
         copied.metadata = merged
+        copied.name = published_name
         return copied
     return feedback_cls(
-        name=scorer_name,
+        name=published_name,
         value=result,
         source=source,
         metadata=metadata,

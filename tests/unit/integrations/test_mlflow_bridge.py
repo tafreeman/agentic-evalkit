@@ -683,6 +683,61 @@ def test_an_advisory_verdict_is_published_under_a_different_feedback_name() -> N
     assert advisory(inputs={}, outputs={}).name == "faithfulness.advisory"
 
 
+def test_demotion_renames_a_judge_that_returned_a_named_feedback_of_its_own() -> None:
+    """The case the bare-value test above cannot reach, and the realistic one.
+
+    A scorer built by ``make_judge`` does not return ``True``; it returns a
+    fully-formed ``Feedback`` carrying its own name. That goes down the
+    other branch of ``_attach_authority``, which copies the object -- so a
+    version that merged the authority metadata but left ``name`` alone
+    published an advisory verdict under the *gating* name, and MLflow keeps
+    an explicitly-set name rather than overwriting it with the scorer's.
+    Everything the demotion is for (the aggregate, and any release gate
+    keyed on that name) would have counted a verdict that was demoted.
+
+    The judge's own metadata must survive the rename too: demoting a verdict
+    is not licence to discard what the judge reported about it.
+    """
+    from mlflow.entities import Feedback
+
+    def judge_returning_feedback(**_: object) -> Feedback:
+        return Feedback(name="faithfulness", value=0.9, metadata={"judge_model": "gpt-4o"})
+
+    advisory = calibration_gate(
+        judge_returning_feedback, calibration=None, name="faithfulness", now=_STARTED_AT
+    )
+    feedback = advisory(inputs={}, outputs={})
+
+    assert feedback.name == "faithfulness.advisory"
+    assert feedback.value == 0.9
+    assert feedback.metadata["evalkit_authority"] == "advisory"
+    assert feedback.metadata["judge_model"] == "gpt-4o"
+
+
+def test_a_gating_judges_own_feedback_is_published_under_the_wrapper_name() -> None:
+    """The other half: an entitled verdict is not renamed out from under a gate.
+
+    ``calibration_gate`` registers itself with MLflow under ``name``, and a
+    gate a team writes is keyed on that. Publishing a gating verdict under
+    whatever name the wrapped judge happened to use would leave that gate
+    matching nothing -- failing open, which is the one direction this module
+    must never fail in.
+    """
+    from mlflow.entities import Feedback
+
+    gated = calibration_gate(
+        lambda **_: Feedback(name="inner_judge_name", value=True),
+        calibration=_good_calibration(),
+        name="faithfulness",
+        now=_STARTED_AT,
+    )
+    feedback = gated(inputs={}, outputs={})
+
+    assert feedback.name == "faithfulness"
+    assert feedback.value is True
+    assert feedback.metadata["evalkit_can_gate"] == "true"
+
+
 def test_calibrated_judge_verdict_passes_through_and_is_marked_gating() -> None:
     gated = calibration_gate(
         lambda **_: True,
