@@ -93,6 +93,12 @@ class LangfuseClient(Protocol):
     This mirrors the pattern ``EvalRunner`` already uses for the dataset
     catalog: declare the narrow protocol locally, accept anything that
     satisfies it.
+
+    ``start_observation`` is what sets the ``langfuse`` extra's lower bound
+    of 3.3.1 in ``pyproject.toml``: earlier 3.x releases expose only
+    ``start_span``/``start_generation``, so a client from one would satisfy
+    neither this protocol nor the first export. Keep the two in step --
+    widening this surface may raise that floor.
     """
 
     def start_observation(

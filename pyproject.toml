@@ -54,7 +54,18 @@ swebench = ["swebench>=4.1,<5", "docker>=7.1,<8"]
 # for anyone who has the full package installed -- it narrows what we
 # require without constraining what a user may have.
 mlflow = ["mlflow-skinny>=3,<4"]
-langfuse = ["langfuse>=3,<5"]
+# The floor is an API boundary, not a guess. This bridge builds its root
+# observation with `start_observation(as_type="evaluator")`, which landed in
+# 3.3.1 -- 3.3.0 and every earlier 3.x exposes only `start_span` /
+# `start_generation`, so `pip install agentic-evalkit[langfuse]` against a
+# project already pinning one of those would resolve happily and then raise
+# AttributeError on the first export rather than at install time. The v4
+# ceiling is the usual major-version guard; 4.x is what the lockfile
+# resolves and what CI type-checks against, and the surface this module
+# calls (`start_observation`, `create_score`, `flush`, span `.end`/`.id`/
+# `.trace_id`) is unchanged across 3.3.1 and 4.x, which is why the range
+# spans the major rather than being pinned to one side of it.
+langfuse = ["langfuse>=3.3.1,<5"]
 
 [dependency-groups]
 dev = [
@@ -74,8 +85,11 @@ dev = [
   # (both ship py.typed). The MLflow bridge is tested against a local
   # tracking directory with no server and no network; the Langfuse bridge
   # has no offline mode, so it is tested against its declared protocol.
+  # Both mirror the extras' own ranges deliberately: a development
+  # environment resolving a version the extra forbids would type-check and
+  # test against a surface no user can actually install.
   "mlflow-skinny>=3,<4",
-  "langfuse>=3,<5",
+  "langfuse>=3.3.1,<5",
 ]
 
 [tool.hatch.build.targets.wheel]

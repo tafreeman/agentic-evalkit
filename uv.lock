@@ -64,7 +64,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1,<1" },
     { name = "huggingface-hub", specifier = ">=0.20,<2" },
     { name = "jinja2", specifier = ">=3,<4" },
-    { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=3,<5" },
+    { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=3.3.1,<5" },
     { name = "mlflow-skinny", marker = "extra == 'mlflow'", specifier = ">=3,<4" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "pyyaml", specifier = ">=6,<7" },
@@ -77,7 +77,7 @@ provides-extras = ["swebench", "mlflow", "langfuse"]
 [package.metadata.requires-dev]
 dev = [
     { name = "build", specifier = ">=1,<2" },
-    { name = "langfuse", specifier = ">=3,<5" },
+    { name = "langfuse", specifier = ">=3.3.1,<5" },
     { name = "mkdocs", specifier = ">=1,<2" },
     { name = "mkdocs-material", specifier = ">=9,<10" },
     { name = "mlflow-skinny", specifier = ">=3,<4" },
