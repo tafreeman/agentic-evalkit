@@ -23,7 +23,7 @@ result you get.
 - Two runs are only compared once we can prove they ran under matching conditions
 - A bug in your own code is never confused with the AI simply getting the answer wrong
 - A fuzzy AI opinion can never override a hard requirement like "the code must compile"
-- Test questions that leaked into the AI's training data get caught before they inflate a score
+- On grounded-citation tasks, a planted marker echoed back in an answer is caught before it inflates a score
 
 None of the tools above solve these problems. Full comparison and
 reasoning: [docs/prior-art.md](docs/prior-art.md).
