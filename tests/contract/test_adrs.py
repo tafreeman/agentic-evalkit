@@ -56,11 +56,16 @@ ADR_DIR = Path("docs/adr")
 #: actually be used), 0021 (MCP stdio execution target -- a fourth
 #: built-in adapter that evaluates a tool behind any MCP stdio server by
 #: spawning the server fresh for every sample and making exactly one
-#: tools/call), and 0022 (host-platform integration boundary -- the rules
+#: tools/call), 0022 (host-platform integration boundary -- the rules
 #: for exporting a run into somebody else's system, principally that
 #: redaction is applied exactly once on the way out and that no host
-#: library is ever a required dependency). Each prefix matches exactly one
-#: file under docs/adr/.
+#: library is ever a required dependency), and 0023 (MCP handshake-era
+#: protocol revision -- the MCP client proposes the newest protocol
+#: revision that still uses the `initialize` handshake, and deliberately
+#: stops short of the later handshake-free revisions it does not
+#: implement, because advertising an unimplemented protocol version
+#: misinforms every peer that negotiates with it). Each prefix matches
+#: exactly one file under docs/adr/.
 REQUIRED_ADR_PREFIXES = (
     "0001",
     "0002",
@@ -84,6 +89,7 @@ REQUIRED_ADR_PREFIXES = (
     "0020",
     "0021",
     "0022",
+    "0023",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
@@ -240,6 +246,7 @@ NUMBER_WORDS = {
     "twenty": 20,
     "twenty-one": 21,
     "twenty-two": 22,
+    "twenty-three": 23,
 }
 
 
