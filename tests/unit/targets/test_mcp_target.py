@@ -25,7 +25,12 @@ import pytest
 
 from agentic_evalkit.models import EvalSample, ExecutionStatus, NormalizedExecutionResult
 from agentic_evalkit.targets import McpTarget
-from agentic_evalkit.targets.mcp import _ProtocolError, _write_frames
+from agentic_evalkit.targets.mcp import (
+    _MCP_PROTOCOL_VERSION,
+    _initialize_frame,
+    _ProtocolError,
+    _write_frames,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -127,7 +132,9 @@ async def test_environment_metadata_carries_server_info() -> None:
     target = _target("happy")
     result = await target.execute(_sample(), attempt=1, timeout_seconds=_TIMEOUT_SECONDS)
     assert result.environment_metadata["server_info"]["name"] == "fixture"
-    assert result.environment_metadata["protocol_version"] == "2025-06-18"
+    # The fixture echoes back whatever revision the client proposed, so this
+    # doubles as an assertion that the proposal really goes over the wire.
+    assert result.environment_metadata["protocol_version"] == _MCP_PROTOCOL_VERSION
 
 
 @pytest.mark.asyncio
@@ -431,6 +438,35 @@ async def test_alien_protocol_version_is_tolerated() -> None:
     result = await target.execute(_sample(), attempt=1, timeout_seconds=_TIMEOUT_SECONDS)
     assert result.status is ExecutionStatus.COMPLETED
     assert result.environment_metadata["protocol_version"] == "9999-01-01"
+
+
+def test_proposed_revision_is_the_newest_handshake_based_one() -> None:
+    """The proposal is 2025-11-25: newest revision built on ``initialize``.
+
+    Deliberately not 2026-07-28 or later. Those revisions removed the
+    handshake entirely -- no ``initialize``, per-request ``_meta`` carrying
+    the version, a mandatory ``server/discover`` RPC -- so naming one inside
+    an ``initialize`` frame would advertise a revision in which that very
+    frame does not exist. This assertion fails the moment somebody bumps the
+    constant past the handshake era without rewriting the exchange.
+    """
+    assert _MCP_PROTOCOL_VERSION == "2025-11-25"
+    assert _MCP_PROTOCOL_VERSION < "2026-01-01"
+
+
+def test_initialize_frame_carries_the_proposed_revision() -> None:
+    """The constant is what actually reaches the wire, in the legacy slot.
+
+    A handshake-era client puts the revision in ``params.protocolVersion``.
+    It must not appear in a ``_meta`` block instead: that is the
+    handshake-free carrier, and using it here would mix eras.
+    """
+    frame = _initialize_frame()
+    params = cast("dict[str, object]", frame["params"])
+    assert params["protocolVersion"] == _MCP_PROTOCOL_VERSION
+    assert frame["method"] == "initialize"
+    assert "_meta" not in frame
+    assert "_meta" not in params
 
 
 @pytest.mark.asyncio

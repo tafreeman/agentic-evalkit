@@ -165,8 +165,22 @@ maps to `ERROR`; an expired deadline maps to `TIMEOUT`.
 is answered with an empty result; any other server-initiated request
 receives a JSON-RPC method-not-found error, matching the empty
 capabilities the client advertised. Version negotiation is deliberately
-tolerant: the client proposes revision 2025-06-18 and accepts whatever
+tolerant: the client proposes revision 2025-11-25 and accepts whatever
 revision string the server echoes.
+
+**Protocol era.** 2025-11-25 is the newest MCP revision built on the
+`initialize` handshake, and everything it added is optional or gated
+behind client capabilities this client never advertises — so proposing
+it claims nothing untrue. The client stops there on purpose. Revision
+2026-07-28 removed the handshake outright: there is no `initialize`,
+each request carries its own version in `_meta`, and servers expose a
+`server/discover` RPC instead. Naming that revision inside an
+`initialize` frame would advertise a revision in which that frame does
+not exist. The practical limit: a server implementing *only* 2026-07-28
+cannot be evaluated through this target, and the attempt fails through
+the normal taxonomy (a JSON-RPC error, or `ServerExited`) rather than
+silently. Servers that support both eras work today, because they still
+answer `initialize`.
 
 **Boundary hardening.** The same byte bounds on stdout and stderr, the
 same concurrent stderr drain, the same kill-then-collect teardown, and

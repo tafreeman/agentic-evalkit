@@ -43,9 +43,33 @@ Version negotiation is deliberately tolerant. The client sends the
 newest protocol revision it knows and accepts whatever revision string
 the server echoes back, because every feature this client actually uses
 -- ``tools/call``, text content blocks, the ``isError`` flag -- is
-wire-identical across the known 2024-11-05 / 2025-03-26 / 2025-06-18
-revisions. Gating on the echoed string would add failure modes without
-protecting anything.
+wire-identical across the known 2024-11-05 / 2025-03-26 / 2025-06-18 /
+2025-11-25 revisions. Gating on the echoed string would add failure
+modes without protecting anything.
+
+That "newest revision it knows" is 2025-11-25, not the newest revision
+MCP has published. 2025-11-25 is the last of the *handshake-based*
+revisions -- the ones this client's three-frame exchange is built on --
+and its additions are all optional or gated behind client capabilities
+this client never advertises, so proposing it claims nothing untrue.
+The 2026-07-28 revision deleted the handshake outright: there is no
+``initialize``, each request instead carries its own version in
+``_meta["io.modelcontextprotocol/protocolVersion"]``, servers must
+implement a ``server/discover`` RPC, and an unsupported version comes
+back as ``UnsupportedProtocolVersionError`` (code -32022). Sending
+2026-07-28 *inside an* ``initialize`` *frame* would be self-contradictory
+-- naming a revision in which the frame carrying it does not exist -- so
+this client stays honestly on the handshake era. Speaking 2026-07-28
+means implementing that handshake-free exchange, which is a separate
+decision, not a wider constant.
+
+One consequence is worth stating plainly: against a server that
+implements *only* 2026-07-28, this client fails. It opens with
+``initialize``, which such a server does not define, and it has no
+fall-forward path. That failure surfaces through the normal taxonomy (a
+JSON-RPC error, or ``ServerExited``) rather than silently, and it is the
+outcome the specification itself predicts for a handshake-era client
+meeting a handshake-free server.
 
 Like the sibling subprocess fingerprint, the full argument vector (and
 any fixed tool name) is hashed into the target fingerprint rather than
@@ -75,7 +99,9 @@ if TYPE_CHECKING:
     from pydantic import JsonValue
 
 _PROTOCOL_VERSION: Final[str] = "1"  # target-protocol version: fingerprint + clientInfo.version
-_MCP_PROTOCOL_VERSION: Final[str] = "2025-06-18"
+# Newest handshake-based MCP revision (see the module docstring for why this
+# deliberately stops short of the handshake-free 2026-07-28 revision).
+_MCP_PROTOCOL_VERSION: Final[str] = "2025-11-25"
 _CLIENT_NAME: Final[str] = "agentic-evalkit"
 _JSONRPC_VERSION: Final[str] = "2.0"
 # The whole exchange is exactly two client requests, so their ids are fixed
