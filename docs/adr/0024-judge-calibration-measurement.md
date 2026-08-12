@@ -52,8 +52,22 @@ its measured accuracy by declining the questions it would have got wrong.
 
 The measurement applies the same decision function the grader applies: a
 score at or above `pass_score_threshold` is a "good" verdict, defaulting to
-the same value `JudgeGrader` defaults to. An artifact measured under any
+the same value `JudgeGrader` defaults to. Candidate text is redacted then
+truncated through the shared `prepare_candidate_output_text` helper with the
+same defaults `JudgeGrader` uses (ADR-0018), so authority cannot be earned
+on a raw string the live grader will rewrite. An artifact measured under any
 other rule would faithfully describe a decision nobody makes in production.
+
+Non-verdict coverage is a gating input when the coverage fields are present.
+ADR-0020 introduced `total_labeled` / `abstained_count` / `error_count` as
+audit-only fields. This ADR activates them: when all three are set,
+`CalibrationArtifact.coverage_failure_reason` refuses gating if
+`(abstained_count + error_count) / total_labeled` exceeds
+`PROJECT_MAX_NON_VERDICT_RATE` (0.05). The failure is insufficient evidence
+(advisory), not proof the judge is bad. Artifacts that omit the fields keep
+the pre-measurement load path. Counting non-verdicts out of the confusion
+matrix alone is not enough — a judge that declines every hard example can
+still present a perfect matrix on the remainder.
 
 `agentic-evalkit calibrate <labeled-set> --output <path>` is the command
 form. It reads the labeled set, measures the judge, writes the artifact as
@@ -177,9 +191,11 @@ care went into them.
   always set, `expires_at` derived from the project maximum age, the
   fingerprint taken from the judge, each verdict landing in the correct
   confusion-matrix cell, every non-verdict counted on its own and never as
-  a class, per-sample isolation of a raised exception, `CancelledError`
-  still propagating, the score threshold pinned to `JudgeGrader`'s default,
-  a thin set yielding `ADVISORY` with the shortfall named, a measurably bad
+  a class, selective non-verdicts blocking `GATING` via the coverage floor,
+  candidate text redacted and truncated with the grader's shared helper,
+  per-sample isolation of a raised exception, `CancelledError` still
+  propagating, the score threshold pinned to `JudgeGrader`'s default, a
+  thin set yielding `ADVISORY` with the shortfall named, a measurably bad
   judge yielding `UNAVAILABLE` rather than `ADVISORY`, and a fully measured
   judge producing an artifact that lets `JudgeGrader` return
   `hard_gate=True`.

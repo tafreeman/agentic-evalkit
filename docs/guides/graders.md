@@ -99,6 +99,9 @@ calibration check. `JudgeGrader` verifies, before it will ever set
 - both TPR (true positive rate) and TNR (true negative rate) meet the
   calibration's threshold **and** the project floor of TNR ≥ 0.95 and
   TPR ≥ 0.85;
+- when coverage counts are present, the non-verdict rate
+  (`(abstained + errored) / total_labeled`) is at most 0.05 — a judge that
+  only answers the easy rows cannot earn gating authority on the remainder;
 - a reversed-order ("position-bias") probe agrees with the primary verdict;
 - the judge returns a parseable, non-abstained structured response (parse
   failures retry at most twice — three attempts total).
@@ -106,7 +109,9 @@ calibration check. `JudgeGrader` verifies, before it will ever set
 Do not write those counts by hand. `measure_calibration` produces them by
 running the judge over answers a human has already labeled, and takes the
 fingerprint from the judge itself, so an artifact can never claim to
-describe a judge other than the one measured:
+describe a judge other than the one measured. Candidate text is redacted
+then truncated with the same defaults `JudgeGrader` uses, so the
+measurement is of the inputs the live grader will actually forward:
 
 ```python
 from agentic_evalkit.graders.judge import JudgeGrader
@@ -134,7 +139,9 @@ grader = JudgeGrader(my_judge_client, calibration=calibration, gate=True)
 is always dated, `expires_at` is derived from the 90-day maximum age, and a
 sample the judge abstained on or errored on is counted separately rather
 than folded into a class, so a judge cannot improve its measured accuracy by
-declining the questions it would have got wrong.
+declining the questions it would have got wrong. Those non-verdict counts
+also feed the coverage floor above: a high abstain/error share blocks
+gating even when the answered rows look perfect.
 
 Whether the result may actually gate is decided in exactly one place —
 `judge_authority`, which reads every floor off the artifact:
@@ -155,8 +162,9 @@ specific reason is always recorded in `evidence["reason"]`:
   verdict.
 - **Absent evidence → advisory only, never gates.** An uncalibrated judge, an
   undated or stale (older than 90 days) calibration, insufficient held-out
-  samples, a fingerprint mismatch, or a position-bias disagreement still
-  yields an advisory score, but `hard_gate` stays `False`.
+  samples, a non-verdict rate above the 0.05 maximum, a fingerprint
+  mismatch, or a position-bias disagreement still yields an advisory score,
+  but `hard_gate` stays `False`.
 
 Either way the grader never silently converts a calibration failure into a
 task failure or a false pass.

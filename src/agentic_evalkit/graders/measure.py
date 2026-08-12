@@ -15,10 +15,13 @@ rather than an implementation detail.
 * **The measurement applies the same decision function the grader applies.**
   :class:`~agentic_evalkit.graders.judge.JudgeGrader` turns a judge's score
   into pass/fail by comparing it against ``pass_score_threshold``. So does
-  this module, using the same parameter with the same default. If the two
-  ever diverged, the artifact would faithfully describe a decision nobody
-  makes in production, which is worse than having no artifact at all -- an
-  unmeasured judge at least announces itself as unmeasured.
+  this module, using the same parameter with the same default. Candidate
+  text is also redacted then truncated with the same helper and defaults
+  the grader uses, so authority is never earned on a raw string the live
+  path will rewrite. If either half ever diverged, the artifact would
+  faithfully describe a decision nobody makes in production, which is worse
+  than having no artifact at all -- an unmeasured judge at least announces
+  itself as unmeasured.
 * **``calibrated_at`` is always set.** The field is optional on the artifact
   so that records written before it existed still load, and an artifact
   without it can never gate (``age_failure_reason``). That is the right
@@ -44,8 +47,14 @@ from agentic_evalkit.graders.calibration import (
     PROJECT_MIN_TPR,
     CalibrationArtifact,
 )
-from agentic_evalkit.graders.judge import JudgeRequest, JudgeResponseStatus
+from agentic_evalkit.graders.judge import (
+    DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
+    JudgeRequest,
+    JudgeResponseStatus,
+    prepare_candidate_output_text,
+)
 from agentic_evalkit.models.calibration import CalibrationLabel
+from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -115,6 +124,8 @@ async def _judge_one(
     *,
     judge_fingerprint: str,
     pass_score_threshold: float,
+    redaction_policy: RedactionPolicy,
+    max_candidate_output_chars: int | None,
 ) -> _JudgeOutcome:
     """Ask the judge about one labeled sample; never let it take the run down.
 
@@ -123,6 +134,11 @@ async def _judge_one(
     our infrastructure failing, not evidence about the judge's accuracy, and
     it must not abort a measurement that may be most of the way through a
     labeled set. So the exception ends this sample and nothing else.
+
+    The candidate text is redacted then truncated with the same helper and
+    defaults ``JudgeGrader`` uses, so the artifact describes the inputs the
+    live grader will actually forward (ADR-0018). Prompt and reference stay
+    untouched for the same reason they do at grade time.
 
     The exception itself is deliberately not retained. It could quote the
     candidate output back at us, and the artifact this feeds is defined to
@@ -134,7 +150,11 @@ async def _judge_one(
     request = JudgeRequest(
         sample_id=sample.sample_id,
         prompt=sample.prompt,
-        candidate_output=sample.candidate_output,
+        candidate_output=prepare_candidate_output_text(
+            sample.candidate_output,
+            redaction_policy=redaction_policy,
+            max_candidate_output_chars=max_candidate_output_chars,
+        ),
         reference=sample.reference,
     )
     try:
@@ -157,6 +177,8 @@ async def measure_calibration(
     calibration_id: str,
     threshold: float = PROJECT_MIN_TPR,
     pass_score_threshold: float = DEFAULT_PASS_SCORE_THRESHOLD,
+    redaction_policy: RedactionPolicy = DEFAULT_REDACTION_POLICY,
+    max_candidate_output_chars: int | None = DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
     now: datetime | None = None,
 ) -> CalibrationArtifact:
     """Run ``judge`` over ``samples`` and record how often it was right.
@@ -166,6 +188,13 @@ async def measure_calibration(
     confusion-matrix cells; a sample the judge declined or failed on lands in
     ``abstained_count``/``error_count`` instead, so a judge cannot improve its
     measured accuracy by refusing the questions it would have got wrong.
+    Those non-verdict counts also feed the coverage floor on the artifact:
+    a high abstain/error share blocks gating even when the answered rows look
+    perfect (ADR-0024).
+
+    Candidate text is redacted then truncated with the same defaults
+    :class:`~agentic_evalkit.graders.judge.JudgeGrader` uses, so the
+    measurement is of the inputs the grader will actually send.
 
     Whether the returned artifact is *good enough to gate* is not decided
     here and cannot be read off these counts by eye -- pass it to
@@ -191,6 +220,13 @@ async def measure_calibration(
             counts as "good". Must match the value the ``JudgeGrader`` that
             will use this artifact was built with, or the artifact describes
             a different decision than the one being gated on.
+        redaction_policy: Secret patterns applied to ``candidate_output``
+            before the judge sees it. Defaults to the same policy
+            ``JudgeGrader`` defaults to; pass the same override the
+            consuming grader uses.
+        max_candidate_output_chars: Length bound applied after redaction.
+            Defaults to the same bound ``JudgeGrader`` defaults to; ``None``
+            disables truncation.
         now: The moment to record as ``calibrated_at``. Defaults to the
             current UTC time; tests pass a fixed value. Must be
             timezone-aware -- ``CalibrationArtifact`` rejects a naive
@@ -213,6 +249,8 @@ async def measure_calibration(
             sample,
             judge_fingerprint=judge_fingerprint,
             pass_score_threshold=pass_score_threshold,
+            redaction_policy=redaction_policy,
+            max_candidate_output_chars=max_candidate_output_chars,
         )
         if outcome == "abstained":
             abstained_count += 1

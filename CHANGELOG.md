@@ -62,11 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `judge.fingerprint` rather than a parameter, always sets
     `calibrated_at` and derives `expires_at` from the project's maximum
     calibration age, applies the same pass threshold `JudgeGrader` applies,
-    isolates a per-sample judge failure, and counts an abstention, refusal,
-    timeout, unparseable response or scoreless verdict into
-    `abstained_count`/`error_count` rather than into a class -- so a judge
-    cannot improve its measured accuracy by declining the questions it
-    would have got wrong.
+    redacts then truncates candidate text with the same helper and defaults
+    the grader uses, isolates a per-sample judge failure, and counts an
+    abstention, refusal, timeout, unparseable response or scoreless verdict
+    into `abstained_count`/`error_count` rather than into a class -- so a
+    judge cannot improve its measured accuracy by declining the questions it
+    would have got wrong. When those coverage fields are present, a
+    non-verdict rate above `PROJECT_MAX_NON_VERDICT_RATE` (0.05) blocks
+    gating as insufficient evidence, so a judge also cannot earn authority
+    by answering only the easy rows.
   - `agentic-evalkit calibrate <labeled-set> --output <path>` is the command
     form. It writes the artifact as JSON and prints the authority level and
     reason, exiting `0` when the judge earned gating authority and `3` when

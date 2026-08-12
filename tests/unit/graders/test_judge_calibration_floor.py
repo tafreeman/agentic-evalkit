@@ -390,6 +390,46 @@ def test_project_floor_constants_match_ratified_values() -> None:
     assert judge.PROJECT_MIN_TNR == 0.95
     assert judge.PROJECT_MIN_TPR == 0.85
     assert judge.PROJECT_MAX_CALIBRATION_AGE_DAYS == 90
+    assert judge.PROJECT_MAX_NON_VERDICT_RATE == 0.05
+
+
+def test_high_non_verdict_rate_blocks_gating_as_insufficient_coverage() -> None:
+    """A perfect matrix on answered rows cannot gate when coverage is selective.
+
+    Counts that clear every accuracy floor still fail usability when the
+    judge declined or errored on more than the project maximum share of the
+    labeled set. Missing coverage fields keep older artifacts loadable.
+    """
+    calibration = _artifact(
+        true_positive=1900,
+        false_negative=100,
+        true_negative=1940,
+        false_positive=60,
+        total_labeled=4500,
+        abstained_count=300,
+        error_count=200,
+    )
+    reason = calibration.usability_failure_reason()
+    assert reason is not None
+    assert "non-verdict rate" in reason
+    assert "0.05" in reason
+
+
+def test_missing_coverage_fields_do_not_invent_a_non_verdict_failure() -> None:
+    """Pre-measurement artifacts omit coverage counts and must still load-and-gate."""
+    calibration = _artifact()
+    assert calibration.coverage_failure_reason() is None
+    assert calibration.usability_failure_reason() is None
+
+
+def test_non_verdict_rate_at_the_maximum_still_permits_gating() -> None:
+    calibration = _artifact(
+        total_labeled=4000,
+        abstained_count=100,
+        error_count=100,  # 200/4000 = 0.05 exactly
+    )
+    assert calibration.coverage_failure_reason() is None
+    assert calibration.usability_failure_reason() is None
 
 
 async def test_calibration_clearing_the_floor_still_gates() -> None:

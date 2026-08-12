@@ -45,6 +45,12 @@ _MINIMUM_CLASS_SAMPLE_COUNT = 30
 PROJECT_MIN_TNR = 0.95
 PROJECT_MIN_TPR = 0.85
 PROJECT_MAX_CALIBRATION_AGE_DAYS = 90
+# A judge that abstains or errors on the hard examples while answering the
+# easy ones can keep a perfect confusion matrix on the remainder. When
+# coverage counts are present on the artifact, the non-verdict share of the
+# labeled set must stay at or below this fraction before the calibration may
+# gate (ADR-0024 amendment of ADR-0020's audit-only coverage fields).
+PROJECT_MAX_NON_VERDICT_RATE = 0.05
 
 
 class CalibrationArtifact(FrozenModel):
@@ -81,16 +87,19 @@ class CalibrationArtifact(FrozenModel):
             true-positive/true-negative rates -- see ``PROJECT_MIN_TNR``/
             ``PROJECT_MIN_TPR`` above for the project-wide minimum this
             can't go below.
-        total_labeled: How many held-out examples were tested in total, for
-            the record. Optional (added later by ADR-0020, so leaving it out
-            doesn't break older calibration records); nothing currently
-            checks it before gating.
+        total_labeled: How many held-out examples were tested in total.
+            Optional (added later by ADR-0020, so leaving it out doesn't
+            break older calibration records). When present together with
+            ``abstained_count`` and ``error_count``, the non-verdict rate is
+            checked before gating (see :meth:`coverage_failure_reason`).
         abstained_count: Of those examples, how many the judge declined to
-            answer during calibration. Same optional/record-only status as
-            ``total_labeled``.
+            answer during calibration. Optional on older records; when
+            present with the other coverage fields, feeds the non-verdict
+            coverage check.
         error_count: Of those examples, how many the judge errored out on
-            during calibration. Same optional/record-only status as
-            ``total_labeled``.
+            during calibration. Optional on older records; when present
+            with the other coverage fields, feeds the non-verdict coverage
+            check.
     """
 
     calibration_id: str
@@ -276,6 +285,36 @@ class CalibrationArtifact(FrozenModel):
             )
         return None
 
+    def coverage_failure_reason(self) -> str | None:
+        """Return why selective non-verdicts make this calibration unusable to gate.
+
+        Confusion-matrix rates only describe the samples the judge answered.
+        A judge that declines or errors on every hard example can keep a
+        perfect matrix on the remainder and still look floor-clearing. When
+        ``total_labeled``, ``abstained_count``, and ``error_count`` are all
+        recorded (as every artifact from
+        :func:`~agentic_evalkit.graders.measure.measure_calibration` does),
+        the non-verdict share of the labeled set must stay at or below
+        :data:`PROJECT_MAX_NON_VERDICT_RATE`. Missing coverage fields keep
+        the pre-ADR-0024 behavior so older hand-written artifacts still
+        load; the gap is only closed for records that actually carry the
+        counts. Like age and Wilson, this is insufficient evidence
+        (advisory), not proof the judge is bad.
+        """
+        if self.total_labeled is None or self.abstained_count is None or self.error_count is None:
+            return None
+        if self.total_labeled <= 0:
+            return None
+        non_verdicts = self.abstained_count + self.error_count
+        non_verdict_rate = non_verdicts / self.total_labeled
+        if non_verdict_rate > PROJECT_MAX_NON_VERDICT_RATE:
+            return (
+                f"calibration non-verdict rate {non_verdict_rate:.4f} "
+                f"({non_verdicts}/{self.total_labeled}) exceeds the project maximum "
+                f"{PROJECT_MAX_NON_VERDICT_RATE}: insufficient coverage to gate"
+            )
+        return None
+
     def usability_failure_reason(self, *, now: datetime | None = None) -> str | None:
         """Return why this calibration can't gate a release, or ``None`` if it can."""
         if self.is_expired(now=now):
@@ -306,11 +345,17 @@ class CalibrationArtifact(FrozenModel):
         # over in `JudgeGrader.grade`. The Wilson-lower-bound check, on the
         # other hand, IS "not enough evidence" rather than "proof it's bad,"
         # exactly like the age check, so it belongs right here next to it
-        # (ADR-0020). We check age first, since a stale or missing date is a
-        # separate problem from anything about the actual accuracy numbers.
+        # (ADR-0020). Coverage (non-verdict rate) is the same tier: the
+        # matrix may look fine while the judge simply never answered the
+        # hard rows (ADR-0024). We check age first, since a stale or missing
+        # date is a separate problem from anything about the actual accuracy
+        # numbers.
         age_reason = self.age_failure_reason(now=now)
         if age_reason is not None:
             return age_reason
+        coverage_reason = self.coverage_failure_reason()
+        if coverage_reason is not None:
+            return coverage_reason
         return self.wilson_lower_bound_failure_reason()
 
 
@@ -328,9 +373,10 @@ class AuthorityLevel(StrEnum):
       judge's verdict may block a release.
     - ``ADVISORY``: evidence is *absent* or too thin to prove reliability
       (no artifact, no ``calibrated_at``, too few held-out samples, a
-      Wilson lower bound that does not clear the floor, a fingerprint that
-      does not match the live judge). The verdict is still reported --
-      it may well be right -- but it can never gate.
+      Wilson lower bound that does not clear the floor, a non-verdict rate
+      above the project maximum, a fingerprint that does not match the live
+      judge). The verdict is still reported -- it may well be right -- but
+      it can never gate.
     - ``UNAVAILABLE``: evidence is *present and bad* (expired, or a
       measured TNR/TPR genuinely below the project floor on a sufficient
       sample). There is proof this judge should not be trusted here, so

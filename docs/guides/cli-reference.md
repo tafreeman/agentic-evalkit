@@ -181,6 +181,12 @@ Useful options are:
   different decision than the one being gated on.
 - `--format json` writes the artifact and the verdict to stdout together.
 
+Candidate text is redacted then truncated with the same defaults
+`JudgeGrader` uses before it is sent to the judge, so the measurement is of
+the inputs the live grader will actually forward. Abstentions and errors
+count toward a coverage floor as well: a non-verdict rate above 0.05 blocks
+gating even when the answered rows look perfect.
+
 Expect to label more than the 30-sample-per-class minimum implies. Clearing
 the true-negative floor with a 95% Wilson lower bound takes at least 73
 negative examples even from a judge that gets every one of them right.

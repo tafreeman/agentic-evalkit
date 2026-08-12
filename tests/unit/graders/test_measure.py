@@ -28,10 +28,12 @@ from agentic_evalkit.graders.calibration import (
     judge_authority,
 )
 from agentic_evalkit.graders.judge import (
+    DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
     JudgeGrader,
     JudgeRequest,
     JudgeResponse,
     JudgeResponseStatus,
+    prepare_candidate_output_text,
 )
 from agentic_evalkit.graders.measure import DEFAULT_PASS_SCORE_THRESHOLD, measure_calibration
 from agentic_evalkit.models import (
@@ -42,6 +44,7 @@ from agentic_evalkit.models import (
     LabeledJudgeSample,
     NormalizedExecutionResult,
 )
+from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY, RedactionPolicy
 
 _FINGERPRINT = "sha256:stub-judge-v1"
 _NOW = datetime(2026, 8, 10, 12, 0, 0, tzinfo=UTC)
@@ -210,6 +213,71 @@ async def test_the_judge_receives_the_prompt_output_and_reference() -> None:
     assert request.prompt == "what is the answer?"
     assert request.candidate_output == "the answer is 42"
     assert request.reference == "42"
+
+
+async def test_measurement_redacts_secrets_the_way_the_grader_does() -> None:
+    """Authority must not be earned on raw text the live grader will rewrite."""
+    secret = "sk-" + ("a" * 20)
+    sample = LabeledJudgeSample(
+        sample_id="pos-0",
+        prompt="what is the answer?",
+        candidate_output=f"token={secret}",
+        label=CalibrationLabel.GOOD,
+    )
+    judge = _StubJudge()
+
+    await measure_calibration(judge, (sample,), calibration_id="cal-1")
+
+    expected = prepare_candidate_output_text(
+        sample.candidate_output,
+        redaction_policy=DEFAULT_REDACTION_POLICY,
+        max_candidate_output_chars=DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
+    )
+    assert judge.calls[0].candidate_output == expected
+    assert secret not in judge.calls[0].candidate_output
+    assert "[REDACTED]" in judge.calls[0].candidate_output
+
+
+async def test_measurement_truncates_long_candidates_the_way_the_grader_does() -> None:
+    long_output = "x" * (DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS + 50)
+    sample = LabeledJudgeSample(
+        sample_id="pos-0",
+        prompt="what is the answer?",
+        candidate_output=long_output,
+        label=CalibrationLabel.GOOD,
+    )
+    judge = _StubJudge()
+
+    await measure_calibration(judge, (sample,), calibration_id="cal-1")
+
+    expected = prepare_candidate_output_text(
+        long_output,
+        redaction_policy=DEFAULT_REDACTION_POLICY,
+        max_candidate_output_chars=DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
+    )
+    assert judge.calls[0].candidate_output == expected
+    assert "truncated" in judge.calls[0].candidate_output
+
+
+async def test_measurement_honors_an_explicit_redaction_opt_out() -> None:
+    secret = "sk-" + ("b" * 20)
+    sample = LabeledJudgeSample(
+        sample_id="pos-0",
+        prompt="q",
+        candidate_output=secret,
+        label=CalibrationLabel.GOOD,
+    )
+    judge = _StubJudge()
+
+    await measure_calibration(
+        judge,
+        (sample,),
+        calibration_id="cal-1",
+        redaction_policy=RedactionPolicy(),
+        max_candidate_output_chars=None,
+    )
+
+    assert judge.calls[0].candidate_output == secret
 
 
 # --- the confusion matrix ---------------------------------------------------
@@ -406,6 +474,35 @@ async def test_a_fully_measured_judge_earns_gating_authority() -> None:
     assert authority.level is AuthorityLevel.GATING
     assert authority.reason is None
     assert artifact.usability_failure_reason() is None
+    assert artifact.abstained_count == 0
+    assert artifact.error_count == 0
+
+
+async def test_selective_non_verdicts_cannot_earn_gating_authority() -> None:
+    """A judge that only answers the easy rows must not clear the gate.
+
+    Pad a floor-clearing answered set with enough abstentions that the
+    non-verdict rate exceeds the project maximum; the matrix on the answered
+    rows stays perfect, and the coverage check is what blocks GATING.
+    """
+    answered = _labeled_set(positives=_GATING_POSITIVES, negatives=_GATING_NEGATIVES)
+    # 120 answered + 20 abstentions => ~14% non-verdict, above the 5% max.
+    abstaining = tuple(_labeled(f"hard-{i}", CalibrationLabel.BAD) for i in range(20))
+    samples = answered + abstaining
+    responses = {f"neg-{i}": _response(0.0) for i in range(_GATING_NEGATIVES)} | {
+        f"hard-{i}": _response(None, abstained=True) for i in range(20)
+    }
+    judge = _StubJudge(responses)
+
+    artifact = await measure_calibration(judge, samples, calibration_id="cal-selective")
+    authority = judge_authority(artifact, judge_fingerprint=_FINGERPRINT)
+
+    assert artifact.true_positive == _GATING_POSITIVES
+    assert artifact.true_negative == _GATING_NEGATIVES
+    assert artifact.abstained_count == 20
+    assert authority.level is AuthorityLevel.ADVISORY
+    assert authority.reason is not None
+    assert "non-verdict rate" in authority.reason
 
 
 async def test_a_measured_artifact_lets_a_judge_actually_hold_hard_gate() -> None:

@@ -145,8 +145,9 @@ Every wire change is additive; `schema_version` stays `"1"` (ADR-0002).
 - **Additive coverage evidence.** `CalibrationArtifact` gains optional
   `total_labeled`, `abstained_count`, and `error_count` (non-negative when
   present, folded into the existing validator) as recorded coverage evidence.
-  No gate reads them yet; they are documented as forward-looking auditability
-  fields, not a new gating input.
+  Originally audit-only; ADR-0024 activates them as a gating input when all
+  three are present, via `coverage_failure_reason` and
+  `PROJECT_MAX_NON_VERDICT_RATE`.
 
 ## Alternatives
 
