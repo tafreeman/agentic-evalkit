@@ -99,23 +99,58 @@ calibration check. `JudgeGrader` verifies, before it will ever set
 - both TPR (true positive rate) and TNR (true negative rate) meet the
   calibration's threshold **and** the project floor of TNR ≥ 0.95 and
   TPR ≥ 0.85;
+- when coverage counts are present, the non-verdict rate
+  (`(abstained + errored) / total_labeled`) is at most 0.05 — a judge that
+  only answers the easy rows cannot earn gating authority on the remainder;
 - a reversed-order ("position-bias") probe agrees with the primary verdict;
 - the judge returns a parseable, non-abstained structured response (parse
   failures retry at most twice — three attempts total).
 
-```python
-from datetime import UTC, datetime, timedelta
-from agentic_evalkit.graders.judge import CalibrationArtifact, JudgeGrader
+Do not write those counts by hand. `measure_calibration` produces them by
+running the judge over answers a human has already labeled, and takes the
+fingerprint from the judge itself, so an artifact can never claim to
+describe a judge other than the one measured. Candidate text is redacted
+then truncated with the same defaults `JudgeGrader` uses, so the
+measurement is of the inputs the live grader will actually forward:
 
-calibration = CalibrationArtifact(
-    calibration_id="cal-2026-07",
-    judge_fingerprint="judge:my-model:v3-prompt",
-    calibrated_at=datetime.now(UTC),
-    expires_at=datetime.now(UTC) + timedelta(days=30),
-    true_positive=95, true_negative=97, false_positive=3, false_negative=5,
-    threshold=0.85,
+```python
+from agentic_evalkit.graders.judge import JudgeGrader
+from agentic_evalkit.graders.measure import measure_calibration
+from agentic_evalkit.models import CalibrationLabel, LabeledJudgeSample
+
+labeled = (
+    LabeledJudgeSample(
+        sample_id="q-001",
+        prompt="What is 6 × 7?",
+        candidate_output="The answer is 42.",
+        reference="42",
+        label=CalibrationLabel.GOOD,
+    ),
+    ...,
+)
+calibration = await measure_calibration(
+    my_judge_client, labeled, calibration_id="cal-2026-08"
 )
 grader = JudgeGrader(my_judge_client, calibration=calibration, gate=True)
+```
+
+`calibrate` is the command-line form of the same call — see the
+[CLI reference](cli-reference.md#calibrate-a-judge). Either way the artifact
+is always dated, `expires_at` is derived from the 90-day maximum age, and a
+sample the judge abstained on or errored on is counted separately rather
+than folded into a class, so a judge cannot improve its measured accuracy by
+declining the questions it would have got wrong. Those non-verdict counts
+also feed the coverage floor above: a high abstain/error share blocks
+gating even when the answered rows look perfect.
+
+Whether the result may actually gate is decided in exactly one place —
+`judge_authority`, which reads every floor off the artifact:
+
+```python
+from agentic_evalkit.graders.calibration import judge_authority
+
+authority = judge_authority(calibration, judge_fingerprint=my_judge_client.fingerprint)
+print(authority.level, authority.reason)
 ```
 
 Calibration failures demote in two tiers (D-1 as amended 2026-07-04), and the
@@ -127,8 +162,9 @@ specific reason is always recorded in `evidence["reason"]`:
   verdict.
 - **Absent evidence → advisory only, never gates.** An uncalibrated judge, an
   undated or stale (older than 90 days) calibration, insufficient held-out
-  samples, a fingerprint mismatch, or a position-bias disagreement still
-  yields an advisory score, but `hard_gate` stays `False`.
+  samples, a non-verdict rate above the 0.05 maximum, a fingerprint
+  mismatch, or a position-bias disagreement still yields an advisory score,
+  but `hard_gate` stays `False`.
 
 Either way the grader never silently converts a calibration failure into a
 task failure or a false pass.

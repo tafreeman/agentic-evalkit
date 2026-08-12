@@ -90,6 +90,9 @@ from agentic_evalkit.graders.calibration import (
     PROJECT_MAX_CALIBRATION_AGE_DAYS as PROJECT_MAX_CALIBRATION_AGE_DAYS,
 )
 from agentic_evalkit.graders.calibration import (
+    PROJECT_MAX_NON_VERDICT_RATE as PROJECT_MAX_NON_VERDICT_RATE,
+)
+from agentic_evalkit.graders.calibration import (
     PROJECT_MIN_TNR as PROJECT_MIN_TNR,
 )
 from agentic_evalkit.graders.calibration import (
@@ -115,8 +118,33 @@ _MAXIMUM_PARSE_RETRIES = 2
 # before we cut it short when sending it to the judge (ADR-0018). Matches
 # `runner.py`'s own `_LARGE_OUTPUT_THRESHOLD_BYTES` (8192) -- same number,
 # reused for consistency -- but defined again here rather than imported,
-# since that constant is private to `runner.py`.
-_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS = 8192
+# since that constant is private to `runner.py`. Public under this name so
+# measurement (`measure_calibration`) can bind the same default without
+# re-stating the number and drifting from the grader.
+DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS = 8192
+_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS = DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS
+
+
+def prepare_candidate_output_text(
+    candidate_output: str,
+    *,
+    redaction_policy: RedactionPolicy,
+    max_candidate_output_chars: int | None,
+) -> str:
+    """Redact then truncate candidate text the way :class:`JudgeGrader` does.
+
+    Measurement and grading must send the judge the same string for the same
+    raw candidate, or a calibration can grant authority on inputs the live
+    grader will never forward (ADR-0018, ADR-0024). Order is fixed: secrets
+    are blanked first, then length is bounded, never the reverse.
+    """
+    redacted = candidate_output
+    for pattern in redaction_policy.secret_patterns:
+        redacted = re.compile(pattern).sub("[REDACTED]", redacted)
+    if max_candidate_output_chars is None or len(redacted) <= max_candidate_output_chars:
+        return redacted
+    omitted = len(redacted) - max_candidate_output_chars
+    return f"{redacted[:max_candidate_output_chars]}...[truncated, {omitted} chars omitted]"
 
 
 class JudgeRequest(FrozenModel):
@@ -266,7 +294,7 @@ class JudgeGrader:
         pass_score_threshold: float = 0.5,
         name: str = "judge@1",
         redaction_policy: RedactionPolicy | None = DEFAULT_REDACTION_POLICY,
-        max_candidate_output_chars: int | None = _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
+        max_candidate_output_chars: int | None = DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
     ) -> None:
         redaction_policy = _resolve_redaction_policy(redaction_policy, caller="JudgeGrader")
         self._judge = judge
@@ -594,46 +622,31 @@ class JudgeGrader:
     def _redact_candidate_output(self, value: str) -> str:
         """Replace anything that looks like a secret in ``value`` with ``"[REDACTED]"``.
 
-        Just a plain text-in, text-out function. Two other places in this
-        codebase do the same thing (``reporters.base._redact_string`` and
-        ``EvalRunner._redact`` in ``runner.py``), but this module can't
-        import either of those private helpers directly (``runner.py``'s
-        own docstring explains why, and the same reasoning applies here),
-        so this is the same logic written again locally against the same
-        shared :class:`RedactionPolicy` settings.
+        Delegates to :func:`prepare_candidate_output_text` with truncation
+        disabled so the redact step stays independently observable for
+        evidence keys. Measurement uses the same helper end-to-end.
         """
-        redacted = value
-        for pattern in self._compiled_secret_patterns():
-            redacted = pattern.sub("[REDACTED]", redacted)
-        return redacted
+        return prepare_candidate_output_text(
+            value,
+            redaction_policy=self._redaction_policy,
+            max_candidate_output_chars=None,
+        )
 
     def _truncate_candidate_output(self, value: str) -> str:
         """Cut ``value`` down to ``self._max_candidate_output_chars`` and note that we did.
 
         Pass ``None`` to never cut it short (the actual default,
-        ``_DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS``, does have a limit). The
+        :data:`DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS`, does have a limit). The
         marker we add at the end makes it obvious -- to a human or to the
         judge model reading this -- that this isn't the complete original
-        text.
+        text. Uses the shared helper with an empty redaction policy so the
+        truncate step cannot re-apply secret patterns.
         """
-        limit = self._max_candidate_output_chars
-        if limit is None or len(value) <= limit:
-            return value
-        omitted = len(value) - limit
-        return f"{value[:limit]}...[truncated, {omitted} chars omitted]"
-
-    def _compiled_secret_patterns(self) -> tuple[re.Pattern[str], ...]:
-        """Turn the configured secret patterns into ready-to-use regexes, or none.
-
-        Works the same way ``EvalRunner._compiled_secret_patterns`` does in
-        ``runner.py``: you get nothing back when a policy was given that
-        just happens to list no patterns (``RedactionPolicy()`` -- the
-        supported way to opt out of redaction entirely). Normally, though,
-        the default policy
-        (:data:`~agentic_evalkit.reporters.base.DEFAULT_REDACTION_POLICY`)
-        does list real patterns, so the usual case compiles those.
-        """
-        return tuple(re.compile(pattern) for pattern in self._redaction_policy.secret_patterns)
+        return prepare_candidate_output_text(
+            value,
+            redaction_policy=RedactionPolicy(),
+            max_candidate_output_chars=self._max_candidate_output_chars,
+        )
 
     def _calibration_failure_reason(self, *, now: datetime | None = None) -> str | None:
         if self._calibration is None:

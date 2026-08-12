@@ -10,9 +10,22 @@ code that writes ``from agentic_evalkit.graders.judge import
 CalibrationArtifact``, or that reaches for ``judge.PROJECT_MIN_TNR``
 directly, keeps working exactly as before -- nothing outside this package
 needs to change because of the move.
+
+:func:`judge_authority` and its two result types live here too, and were
+moved down from ``integrations.base`` by ADR-0024. They started there
+because a host-platform export was the first thing that needed to label a
+judge's authority, but nothing about the decision is integration-specific:
+it reads a :class:`CalibrationArtifact` and nothing else, and it encodes
+ADR-0007's decision D-1, which is a grading rule. Leaving it there would
+have meant the ``calibrate`` command importing from
+``agentic_evalkit.integrations``, which ADR-0022 forbids -- its dependency
+arrow points outward only. ``integrations.base`` re-exports all three names,
+so every existing import path still resolves and the public surface is
+unchanged.
 """
 
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 
 from pydantic import model_validator
 
@@ -32,6 +45,12 @@ _MINIMUM_CLASS_SAMPLE_COUNT = 30
 PROJECT_MIN_TNR = 0.95
 PROJECT_MIN_TPR = 0.85
 PROJECT_MAX_CALIBRATION_AGE_DAYS = 90
+# A judge that abstains or errors on the hard examples while answering the
+# easy ones can keep a perfect confusion matrix on the remainder. When
+# coverage counts are present on the artifact, the non-verdict share of the
+# labeled set must stay at or below this fraction before the calibration may
+# gate (ADR-0024 amendment of ADR-0020's audit-only coverage fields).
+PROJECT_MAX_NON_VERDICT_RATE = 0.05
 
 
 class CalibrationArtifact(FrozenModel):
@@ -68,16 +87,19 @@ class CalibrationArtifact(FrozenModel):
             true-positive/true-negative rates -- see ``PROJECT_MIN_TNR``/
             ``PROJECT_MIN_TPR`` above for the project-wide minimum this
             can't go below.
-        total_labeled: How many held-out examples were tested in total, for
-            the record. Optional (added later by ADR-0020, so leaving it out
-            doesn't break older calibration records); nothing currently
-            checks it before gating.
+        total_labeled: How many held-out examples were tested in total.
+            Optional (added later by ADR-0020, so leaving it out doesn't
+            break older calibration records). When present together with
+            ``abstained_count`` and ``error_count``, the non-verdict rate is
+            checked before gating (see :meth:`coverage_failure_reason`).
         abstained_count: Of those examples, how many the judge declined to
-            answer during calibration. Same optional/record-only status as
-            ``total_labeled``.
+            answer during calibration. Optional on older records; when
+            present with the other coverage fields, feeds the non-verdict
+            coverage check.
         error_count: Of those examples, how many the judge errored out on
-            during calibration. Same optional/record-only status as
-            ``total_labeled``.
+            during calibration. Optional on older records; when present
+            with the other coverage fields, feeds the non-verdict coverage
+            check.
     """
 
     calibration_id: str
@@ -263,6 +285,36 @@ class CalibrationArtifact(FrozenModel):
             )
         return None
 
+    def coverage_failure_reason(self) -> str | None:
+        """Return why selective non-verdicts make this calibration unusable to gate.
+
+        Confusion-matrix rates only describe the samples the judge answered.
+        A judge that declines or errors on every hard example can keep a
+        perfect matrix on the remainder and still look floor-clearing. When
+        ``total_labeled``, ``abstained_count``, and ``error_count`` are all
+        recorded (as every artifact from
+        :func:`~agentic_evalkit.graders.measure.measure_calibration` does),
+        the non-verdict share of the labeled set must stay at or below
+        :data:`PROJECT_MAX_NON_VERDICT_RATE`. Missing coverage fields keep
+        the pre-ADR-0024 behavior so older hand-written artifacts still
+        load; the gap is only closed for records that actually carry the
+        counts. Like age and Wilson, this is insufficient evidence
+        (advisory), not proof the judge is bad.
+        """
+        if self.total_labeled is None or self.abstained_count is None or self.error_count is None:
+            return None
+        if self.total_labeled <= 0:
+            return None
+        non_verdicts = self.abstained_count + self.error_count
+        non_verdict_rate = non_verdicts / self.total_labeled
+        if non_verdict_rate > PROJECT_MAX_NON_VERDICT_RATE:
+            return (
+                f"calibration non-verdict rate {non_verdict_rate:.4f} "
+                f"({non_verdicts}/{self.total_labeled}) exceeds the project maximum "
+                f"{PROJECT_MAX_NON_VERDICT_RATE}: insufficient coverage to gate"
+            )
+        return None
+
     def usability_failure_reason(self, *, now: datetime | None = None) -> str | None:
         """Return why this calibration can't gate a release, or ``None`` if it can."""
         if self.is_expired(now=now):
@@ -293,9 +345,159 @@ class CalibrationArtifact(FrozenModel):
         # over in `JudgeGrader.grade`. The Wilson-lower-bound check, on the
         # other hand, IS "not enough evidence" rather than "proof it's bad,"
         # exactly like the age check, so it belongs right here next to it
-        # (ADR-0020). We check age first, since a stale or missing date is a
-        # separate problem from anything about the actual accuracy numbers.
+        # (ADR-0020). Coverage (non-verdict rate) is the same tier: the
+        # matrix may look fine while the judge simply never answered the
+        # hard rows (ADR-0024). We check age first, since a stale or missing
+        # date is a separate problem from anything about the actual accuracy
+        # numbers.
         age_reason = self.age_failure_reason(now=now)
         if age_reason is not None:
             return age_reason
+        coverage_reason = self.coverage_failure_reason()
+        if coverage_reason is not None:
+            return coverage_reason
         return self.wilson_lower_bound_failure_reason()
+
+
+class AuthorityLevel(StrEnum):
+    """How much a judge's verdict is allowed to decide, given its calibration evidence.
+
+    This is the three-way outcome of ADR-0007's decision D-1 (as amended
+    2026-07-04), named so it can travel into a host platform's metadata as
+    a label rather than as a bare boolean. The whole reason it has three
+    members instead of two is that "we proved this judge is bad" and "we
+    have no proof either way" are different facts about the world, and
+    collapsing them loses the distinction that makes the control honest.
+
+    - ``GATING``: full calibration evidence clears every floor, so this
+      judge's verdict may block a release.
+    - ``ADVISORY``: evidence is *absent* or too thin to prove reliability
+      (no artifact, no ``calibrated_at``, too few held-out samples, a
+      Wilson lower bound that does not clear the floor, a non-verdict rate
+      above the project maximum, a fingerprint that does not match the live
+      judge). The verdict is still reported -- it may well be right -- but
+      it can never gate.
+    - ``UNAVAILABLE``: evidence is *present and bad* (expired, or a
+      measured TNR/TPR genuinely below the project floor on a sufficient
+      sample). There is proof this judge should not be trusted here, so
+      no verdict is reported at all.
+    """
+
+    GATING = "gating"
+    ADVISORY = "advisory"
+    UNAVAILABLE = "unavailable"
+
+
+class JudgeAuthority(FrozenModel):
+    """The verdict on a judge's own evidence, and why it came out that way.
+
+    Attributes:
+        level: How much this judge's verdict may decide -- see
+            :class:`AuthorityLevel`.
+        reason: Why, in words a reviewer can act on. ``None`` only when
+            ``level`` is :attr:`AuthorityLevel.GATING`, where there is no
+            failure to explain.
+        calibration_id: Which calibration record produced this verdict.
+            ``None`` when no artifact was supplied at all.
+    """
+
+    level: AuthorityLevel
+    reason: str | None = None
+    calibration_id: str | None = None
+
+
+def judge_authority(
+    calibration: CalibrationArtifact | None,
+    *,
+    judge_fingerprint: str | None = None,
+    now: datetime | None = None,
+) -> JudgeAuthority:
+    """Decide what a judge's calibration evidence entitles its verdict to do.
+
+    This is the one place that decision is made, so it is worth being exact
+    about what it is and is not. It does not score anything, does not call a
+    model, and does not look at a verdict -- it looks only at the *evidence
+    about the judge* and returns how far that evidence reaches. A platform
+    that already has a judge it likes can wrap it with this and gain the one
+    property the judge was missing: an inability to block a release it has
+    not earned the right to block. The ``calibrate`` command calls it on the
+    artifact it has just measured, for the same reason and by the same route
+    (ADR-0024).
+
+    The order of checks below is load-bearing and matches
+    :class:`~agentic_evalkit.graders.judge.JudgeGrader` exactly. Proof of a
+    *bad* judge is established first, before anything else, so a judge with
+    expired or sub-floor calibration can never slip out as an advisory pass;
+    only after that does the weaker "not enough proof" family get
+    considered. Every threshold is read from :class:`CalibrationArtifact`
+    itself rather than recomputed here, so the project floors (TNR >= 0.95,
+    TPR >= 0.85, age <= 90 days, the 95% Wilson lower bound) have exactly
+    one definition in this codebase and this function cannot drift from it.
+
+    Args:
+        calibration: The judge's calibration record, or ``None`` if it has
+            none. ``None`` is not an error -- it is the ordinary case for a
+            judge someone just wrote, and it yields
+            :attr:`AuthorityLevel.ADVISORY`.
+        judge_fingerprint: The live judge's fingerprint (model + prompt). If
+            given and it does not match what the calibration was measured
+            against, the calibration describes a different judge and cannot
+            gate this one. Left ``None`` to skip that check, which is right
+            when the host platform does not expose a stable fingerprint.
+        now: The moment to evaluate expiry and age against. Defaults to the
+            current UTC time; tests pass a fixed value.
+
+    Returns:
+        A :class:`JudgeAuthority` carrying the level and the reason.
+    """
+    effective_now = now or datetime.now(UTC)
+
+    if calibration is None:
+        return JudgeAuthority(
+            level=AuthorityLevel.ADVISORY,
+            reason="no calibration artifact was supplied; judge is advisory-only",
+        )
+
+    # Tier one: solid proof the judge is unreliable. Expiry first, then a
+    # measured rate genuinely below the project floor -- the two cases where
+    # the evidence exists and is bad, rather than merely being thin.
+    if calibration.is_expired(now=effective_now):
+        return JudgeAuthority(
+            level=AuthorityLevel.UNAVAILABLE,
+            reason=(
+                f"calibration {calibration.calibration_id!r} expired at "
+                f"{calibration.expires_at.isoformat()}"
+            ),
+            calibration_id=calibration.calibration_id,
+        )
+    floor_reason = calibration.floor_failure_reason()
+    if floor_reason is not None:
+        return JudgeAuthority(
+            level=AuthorityLevel.UNAVAILABLE,
+            reason=floor_reason,
+            calibration_id=calibration.calibration_id,
+        )
+
+    # Tier two: the evidence is not bad, it is just not enough. A judge here
+    # still reports its verdict; it simply may not gate on it.
+    if judge_fingerprint is not None and calibration.judge_fingerprint != judge_fingerprint:
+        return JudgeAuthority(
+            level=AuthorityLevel.ADVISORY,
+            reason=(
+                f"calibration fingerprint {calibration.judge_fingerprint!r} does not "
+                f"match live judge fingerprint {judge_fingerprint!r}"
+            ),
+            calibration_id=calibration.calibration_id,
+        )
+    usability_reason = calibration.usability_failure_reason(now=effective_now)
+    if usability_reason is not None:
+        return JudgeAuthority(
+            level=AuthorityLevel.ADVISORY,
+            reason=usability_reason,
+            calibration_id=calibration.calibration_id,
+        )
+
+    return JudgeAuthority(
+        level=AuthorityLevel.GATING,
+        calibration_id=calibration.calibration_id,
+    )

@@ -9,6 +9,7 @@ file or network access itself.
 """
 
 from agentic_evalkit.models.base import FrozenModel
+from agentic_evalkit.models.calibration import CalibrationLabel, LabeledJudgeSample
 from agentic_evalkit.models.datasets import (
     ContaminationMetadata,
     ContaminationStatus,
@@ -43,6 +44,7 @@ __all__ = [
     "OUTPUT_REF_KEY",
     "OUTPUT_SPILL_ERROR_KEY",
     "OUTPUT_SPILL_FAILED_CODE",
+    "CalibrationLabel",
     "ContaminationMetadata",
     "ContaminationStatus",
     "DatasetRef",
@@ -56,6 +58,7 @@ __all__ = [
     "GradeResult",
     "GradeStatus",
     "GraderSpec",
+    "LabeledJudgeSample",
     "NormalizedExecutionResult",
     "ResolvedDataset",
     "RunSummary",

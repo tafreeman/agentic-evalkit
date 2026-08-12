@@ -64,7 +64,14 @@ ADR_DIR = Path("docs/adr")
 #: revision that still uses the `initialize` handshake, and deliberately
 #: stops short of the later handshake-free revisions it does not
 #: implement, because advertising an unimplemented protocol version
-#: misinforms every peer that negotiates with it). Each prefix matches
+#: misinforms every peer that negotiates with it), and 0024 (judge
+#: calibration measurement -- the package measures a judge against
+#: hand-labeled answers and writes the calibration artifact itself, so a
+#: judge can earn gating authority instead of the gate being able only to
+#: reject one nobody had any way to prove; also records that a calibration
+#: too thin to gate is still written out rather than refused, and moves
+#: `judge_authority` into `graders` so a CLI command can reach it without
+#: crossing ADR-0022's outward-only boundary). Each prefix matches
 #: exactly one file under docs/adr/.
 REQUIRED_ADR_PREFIXES = (
     "0001",
@@ -90,6 +97,7 @@ REQUIRED_ADR_PREFIXES = (
     "0021",
     "0022",
     "0023",
+    "0024",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
@@ -247,6 +255,7 @@ NUMBER_WORDS = {
     "twenty-one": 21,
     "twenty-two": 22,
     "twenty-three": 23,
+    "twenty-four": 24,
 }
 
 

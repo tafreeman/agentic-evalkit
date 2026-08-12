@@ -51,6 +51,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single free-standing string. It exists for the one transmit path that has
   no run to scrub: the rationale `as_mlflow_scorer` attaches to a feedback
   object, synthesized from a grade's evidence one row at a time.
+- Judge calibration can now be *measured*, not just enforced (ADR-0024).
+  Every floor a judge had to clear before it could gate a release was
+  already implemented, but nothing could produce the evidence to clear
+  them: `CalibrationArtifact` was constructed in no production path, so
+  earning gating authority meant hand-writing four confusion-matrix counts
+  and inventing a fingerprint.
+  - `graders.measure.measure_calibration` runs a judge over hand-labeled
+    answers and returns the artifact. It takes the fingerprint from
+    `judge.fingerprint` rather than a parameter, always sets
+    `calibrated_at` and derives `expires_at` from the project's maximum
+    calibration age, applies the same pass threshold `JudgeGrader` applies,
+    redacts then truncates candidate text with the same helper and defaults
+    the grader uses, isolates a per-sample judge failure, and counts an
+    abstention, refusal, timeout, unparseable response or scoreless verdict
+    into `abstained_count`/`error_count` rather than into a class -- so a
+    judge cannot improve its measured accuracy by declining the questions it
+    would have got wrong. When those coverage fields are present, a
+    non-verdict rate above `PROJECT_MAX_NON_VERDICT_RATE` (0.05) blocks
+    gating as insufficient evidence, so a judge also cannot earn authority
+    by answering only the easy rows.
+  - `agentic-evalkit calibrate <labeled-set> --output <path>` is the command
+    form. It writes the artifact as JSON and prints the authority level and
+    reason, exiting `0` when the judge earned gating authority and `3` when
+    it did not. A calibration too thin to gate is still measured and still
+    written: thin evidence is a fact worth recording, and the artifact says
+    so itself.
+  - `models.LabeledJudgeSample` and `models.CalibrationLabel` are the input
+    format -- a `good`/`bad` StrEnum rather than a boolean label. Labeled
+    sets are read as JSON, JSONL, YAML, or CSV through
+    `LocalDatasetProvider`, so reads stay confined to the working directory
+    and YAML stays on `yaml.safe_load`.
+  - The artifact carries counts, identifiers and timestamps only -- no
+    prompt, candidate output, judge rationale, or exception message -- so
+    it can be committed alongside a release without a redaction pass.
 
 ### Fixed
 
@@ -66,6 +100,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `AuthorityLevel`, `JudgeAuthority` and `judge_authority` now live in
+  `graders.calibration` rather than `integrations.base` (ADR-0024). Nothing
+  about the decision was integration-specific -- it reads a
+  `CalibrationArtifact` and nothing else -- and the `calibrate` command
+  needs the same verdict function, which ADR-0022's outward-only dependency
+  arrow forbids it from importing out of `integrations`. All three names are
+  re-exported from `integrations.base` and `integrations`, so every existing
+  import path resolves unchanged.
 - `docs/prior-art.md` now covers MLflow and Langfuse, and records the MLflow
   supersession trigger: if MLflow ships calibration gating natively, both the
   differentiator and the bridge's argument need re-examining.

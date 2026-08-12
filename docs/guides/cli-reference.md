@@ -28,6 +28,7 @@ version.
 | `datasets pull` | Resolve and cache one immutable dataset page. |
 | `init` | Create a manifest from a curated preset. |
 | `validate` | Validate a manifest without executing it. |
+| `calibrate` | Measure a judge against labeled answers and write its calibration. |
 | `run` | Execute a manifest and write canonical JSON. |
 | `report` | Regenerate JSONL, Markdown, or HTML from canonical JSON. |
 | `compare` | Compare compatible runs with a paired bootstrap interval. |
@@ -120,6 +121,79 @@ be exercised before replacing it with a callable, subprocess, or HTTP target.
 
 `validate` checks manifest parsing and typed constraints only. It does not
 resolve a dataset, contact a target, or start an evaluation.
+
+## Calibrate a judge
+
+A model judge may block a release only on measured evidence that it is
+accurate — see [Graders](graders.md) for the rule. `calibrate` produces that
+evidence: it runs a judge over answers a human has already labeled, counts
+what it got right, and writes the calibration artifact.
+
+```bash
+agentic-evalkit calibrate labeled.jsonl --output cal.json
+```
+
+The labeled set is a JSON, JSONL, YAML, or CSV file of rows with five fields
+— `label` is the human's verdict on `candidate_output`, and `reference` is
+optional:
+
+```json
+{"sample_id": "q-001", "prompt": "What is 6 × 7?",
+ "candidate_output": "The answer is 42.", "reference": "42", "label": "good"}
+```
+
+`label` is `good` or `bad`, never a boolean: `good` means the candidate
+output really is a correct answer, so a judge that passes it is right. Rows
+are read from the working directory only, and a row missing a field or
+carrying any other label is rejected rather than counted.
+
+The command prints the counts, the measured rates, and one of three
+verdicts, then exits `0` if the judge earned the right to gate a release and
+`3` if it did not:
+
+```text
+GATING: calibration clears every floor; this judge may gate a release
+ADVISORY: calibration has 12 held-out positive samples, below the required minimum of 30
+UNAVAILABLE: calibration TNR=0.66 is below the project minimum 0.95
+```
+
+`ADVISORY` means the evidence is thin or absent; `UNAVAILABLE` means it is
+present and bad. **The artifact is written either way** — a partially
+measured judge is a real state worth recording, and the file says so itself.
+Feed a `GATING` artifact to a `JudgeGrader` and its verdicts can carry
+`hard_gate=True`.
+
+Useful options are:
+
+- `--judge <spec>` selects the judge to measure. The default, `reference`,
+  is the packaged deterministic stand-in, useful for seeing the command work
+  before wiring up your own; any `module.path:factory` import string naming
+  a zero-argument callable that returns a judge client also works.
+- `--calibration-id <name>` names the calibration. The default is derived
+  from the labeled set's filename and a hash of its exact contents, so two
+  versions of a set cannot share an identity.
+- `--threshold <float>` sets the judge's own pass bar for the measured
+  rates. The project floors apply on top of it and are stricter for the
+  true-negative rate, so lowering this does not lower the real bar.
+- `--pass-score-threshold <float>` sets the score at or above which a judge
+  verdict counts as `good`. It must match the value the `JudgeGrader` that
+  will use the artifact was built with, or the calibration describes a
+  different decision than the one being gated on.
+- `--format json` writes the artifact and the verdict to stdout together.
+
+Candidate text is redacted then truncated with the same defaults
+`JudgeGrader` uses before it is sent to the judge, so the measurement is of
+the inputs the live grader will actually forward. Abstentions and errors
+count toward a coverage floor as well: a non-verdict rate above 0.05 blocks
+gating even when the answered rows look perfect.
+
+Expect to label more than the 30-sample-per-class minimum implies. Clearing
+the true-negative floor with a 95% Wilson lower bound takes at least 73
+negative examples even from a judge that gets every one of them right.
+
+The artifact holds counts, identifiers, and timestamps only — no prompt, no
+candidate output, no judge rationale — so it is safe to commit alongside a
+release.
 
 ## Run an evaluation
 
@@ -217,7 +291,7 @@ instead of producing a misleading comparison.
 | ---: | --- |
 | `0` | Success. |
 | `2` | Invalid input, manifest, schema, or run comparison. |
-| `3` | Missing capability or a failing `doctor` check. |
+| `3` | Missing capability, a failing `doctor` check, or a judge that has not earned gating authority. |
 | `4` | Provider, dataset, integrity, rate-limit, or offline-cache error. |
 | `5` | Evaluation or other infrastructure error. |
 | `130` | The user cancelled an interactive run. |
