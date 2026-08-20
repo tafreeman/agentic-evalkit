@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "suite_id": "software-engineering-baseline-proposal",
+  "status": "proposal",
+  "relationship_to_established_evalkit": "separate",
+  "validation": {
+    "fixture_structure": "validated",
+    "gold_and_noop_controls": "validated",
+    "agent_workflows": "not_run",
+    "evalkit_integration": "not_run",
+    "comparative_baseline": "not_authorized"
+  }
+}
