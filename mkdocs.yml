@@ -68,6 +68,7 @@ nav:
       - "0022: Host-platform integration boundary": adr/0022-host-platform-integration-boundary.md
       - "0023: MCP handshake-era protocol revision": adr/0023-mcp-handshake-era-protocol-revision.md
       - "0024: Judge calibration measurement": adr/0024-judge-calibration-measurement.md
+      - "0025: Claude subscription execution target": adr/0025-claude-subscription-execution-target.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - CLI reference: guides/cli-reference.md

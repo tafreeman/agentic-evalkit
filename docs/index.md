@@ -59,11 +59,11 @@ This resolves the curated GSM8K preset from Hugging Face, runs five samples thro
 
 <div class="stat-strip" markdown>
 <div class="stat-item">
-  <div class="stat-value">24</div>
+  <div class="stat-value">25</div>
   <div class="stat-label">ADRs</div>
 </div>
 <div class="stat-item">
-  <div class="stat-value">4</div>
+  <div class="stat-value">5</div>
   <div class="stat-label">Execution target adapters</div>
 </div>
 <div class="stat-item">
@@ -161,7 +161,7 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 - [Architecture specification](specs/2026-07-02-agentic-evalkit-design.md) — the full design
 - [Prior art & build-vs-buy](prior-art.md) — the recorded decision versus existing frameworks
 - [Implementation plan](plans/2026-07-02-agentic-evalkit-initial-release.md) — initial release plan
-- [ADR index](adr/0001-standalone-boundary.md) — twenty-four architecture decision records, 0001 through 0024
+- [ADR index](adr/0001-standalone-boundary.md) — twenty-five architecture decision records, 0001 through 0025
 </div>
 
 </div>

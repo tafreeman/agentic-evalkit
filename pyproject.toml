@@ -46,6 +46,15 @@ agentic-evalkit = "agentic_evalkit.cli:app"
 
 [project.optional-dependencies]
 swebench = ["swebench>=4.1,<5", "docker>=7.1,<8"]
+# ADR-0025. The Claude Agent SDK is how a Claude *subscription* sign-in is
+# spent programmatically -- there is no wire contract to reach it with the
+# httpx client this package already has. It is an extra, not a dependency,
+# because grading Claude is one target among five and because the SDK
+# additionally needs the Claude Code CLI on PATH, a machine-level
+# prerequisite pip cannot express.
+claude = [
+    "claude-agent-sdk>=0.2,<1",
+]
 # ADR-0022. `mlflow-skinny` rather than `mlflow`: the bridge only ever calls
 # the tracking client and the genai scorer surface, both of which skinny
 # provides, while the full distribution additionally pulls scikit-learn,
@@ -90,6 +99,11 @@ dev = [
   # test against a surface no user can actually install.
   "mlflow-skinny>=3,<4",
   "langfuse>=3.3.1,<5",
+  # Same reasoning, for the `claude` extra: the target tests replay the SDK's
+  # own message dataclasses rather than a stand-in of what we imagine them to
+  # be, so an upstream field rename fails this suite instead of passing it and
+  # failing in production. Mirrors the extra's range for the same reason.
+  "claude-agent-sdk>=0.2,<1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -167,4 +181,11 @@ packages = ["agentic_evalkit"]
 # machine without them, and never silences a genuine type error.
 [[tool.mypy.overrides]]
 module = ["mlflow.*", "langfuse.*"]
+ignore_missing_imports = true
+
+# ADR-0025: same reasoning for the `claude` extra. claude-agent-sdk ships
+# py.typed, so when it IS installed its real types check the target properly;
+# this override only stops the missing-import error without it.
+[[tool.mypy.overrides]]
+module = ["claude_agent_sdk.*"]
 ignore_missing_imports = true
