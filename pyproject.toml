@@ -118,6 +118,11 @@ packages = ["src/agentic_evalkit"]
 # data" -- see pytest-dev/pytest-cov#479 and nedbat/coveragepy#512.
 addopts = "--strict-config --strict-markers -m 'not live' --cov-config=pyproject.toml"
 asyncio_mode = "auto"
+# Default collection is scoped to tests/ so the benchmark fixture repositories
+# under examples/ are never collected as this package's own tests: their
+# modules import their fixture-local `src` package and only resolve when a
+# graded run executes them inside their own working directory.
+testpaths = ["tests"]
 markers = [
   "integration: component integration tests",
   "live: opt-in network tests confined to tests/live",
@@ -137,7 +142,14 @@ line-length = 100
 # reports/ holds pinned run evidence: the committed harness is the exact code
 # that produced the committed outputs, so it is never edited after the run —
 # not even for lint. Library standards apply to src/ and tests/, not evidence.
-extend-exclude = ["reports"]
+extend-exclude = [
+  "reports",
+  # Benchmark fixture repositories are graded material, not library code: they
+  # deliberately contain the defects, mutants, and gold solutions a run is
+  # scored against. Linting or reformatting them would change what the
+  # benchmark measures. Tooling at the baseline root stays linted.
+  "examples/*/fixtures",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "ASYNC", "S", "B", "A", "C4", "SIM", "TCH", "RUF"]
