@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ClaudeAgentTarget` (ADR-0025): a fifth built-in `ExecutionTarget` that
+  grades Claude itself through the Claude Agent SDK, authenticating with a
+  **Claude subscription sign-in** rather than an API key. Previously an
+  operator who paid for a subscription instead of API credits could not
+  express "grade Claude on this dataset" at all -- their only options were to
+  buy API access they did not otherwise need, or to hand-write a
+  `CallableTarget` shim that put credential handling, usage accounting, and
+  failure classification outside every guarantee this package makes. Reached
+  through the new `claude` extra; the base install is unchanged.
+  - Results carry the full harness telemetry -- `input_tokens`,
+    `output_tokens`, `cost_usd`, `latency_ms`, `model_name`, structured
+    output, and the session id as a `trace_refs` entry -- and
+    `environment_metadata` records `auth: claude-subscription` so a reader of
+    the evidence can tell which credential class produced a number.
+    Credentials are resolved entirely by the CLI and never enter this package.
+  - Tools are **off by default** (empty tool set and empty allow-list), so
+    grading an answer cannot touch the filesystem, a shell, or the network;
+    `allowed_tools` opts in explicitly for agentic evaluation.
+  - An exhausted subscription rate-limit window, an assistant-level SDK error,
+    and a failed harness run each produce an `ERROR` result rather than being
+    graded as an empty answer (ADR-0008).
+  - `target_fingerprint` covers model id, system prompt, effort, tool
+    allow-list, turn ceiling, and target name, so `compare_runs` refuses to
+    compare across any change to what the model was asked to do.
+  - **Reproducibility caveat, documented deliberately:** the Agent SDK exposes
+    no sampling temperature and no seed, so runs cannot be pinned the way an
+    API-key target can and repeat runs vary by the model's own
+    nondeterminism. Use multiple attempts and report the spread.
+  - The SDK entry point is an injected constructor argument, mirroring how
+    `HttpTarget` is handed a client, so the whole test suite runs without a
+    CLI, a sign-in, or a network.
+
 - Host-platform bridges (ADR-0022): a new `agentic_evalkit.integrations`
   subpackage that carries this package's validity controls into MLflow and
   Langfuse, so a team already on either platform can adopt them without

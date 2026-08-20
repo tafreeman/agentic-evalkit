@@ -8,7 +8,9 @@ graders never see target-specific response shapes and no target-specific
 type ever leaks into a public model. The initial release shipped exactly
 three adapters;
 [ADR-0021](../adr/0021-mcp-stdio-execution-target.md) added a fourth,
-`McpTarget`.
+`McpTarget`, and
+[ADR-0025](../adr/0025-claude-subscription-execution-target.md) a fifth,
+`ClaudeAgentTarget`.
 
 ## `CallableTarget`
 
@@ -191,6 +193,62 @@ values in the clear) as `SubprocessTarget`.
 `CallableTarget` — manifest/CLI wiring is deliberately deferred
 ([ADR-0021](../adr/0021-mcp-stdio-execution-target.md)).
 
+## `ClaudeAgentTarget`
+
+`ClaudeAgentTarget` grades Claude itself. Unlike every other adapter it
+does not reach a system you already stood up: it drives the Claude Agent
+SDK, which runs a locally installed Claude Code CLI and therefore
+authenticates with your **Claude subscription sign-in** rather than an API
+key. That makes "grade Claude on this dataset" expressible for an operator
+who pays for a subscription instead of API credits.
+
+It needs the `claude` extra plus a one-time sign-in:
+
+```bash
+pip install 'agentic-evalkit[claude]'
+claude
+```
+
+```python
+from agentic_evalkit.targets import ClaudeAgentTarget
+
+target = ClaudeAgentTarget(
+    name="claude-baseline",
+    model="claude-opus-5",
+    prompt_field="question",       # which sample.input key holds the prompt
+    system_prompt="Answer with a single number and nothing else.",
+    effort="high",
+    max_budget_usd=0.10,           # hard per-sample spend ceiling
+)
+```
+
+Tools are **off by default**: the harness is invoked with an empty tool set
+and an empty allow-list, so grading an answer cannot touch the filesystem,
+a shell, or the network. Pass `allowed_tools=[...]` only when you are
+deliberately evaluating agentic behaviour rather than an answer.
+
+Results carry the full harness telemetry — `input_tokens`, `output_tokens`,
+`cost_usd`, `latency_ms`, `model_name`, and the session id as a
+`trace_refs` entry — and `environment_metadata` records
+`auth: claude-subscription`, so a reader of the evidence can tell which
+credential class produced a number. Credentials themselves are resolved
+entirely by the CLI; this package never reads, stores, or forwards them.
+
+An exhausted subscription rate-limit window produces an `ERROR` result, not
+an empty answer, so a spent usage window is never graded as a wrong one
+([ADR-0008](../adr/0008-statistical-comparability.md)).
+
+!!! warning "Weaker reproducibility than an API-key target"
+
+    The Agent SDK exposes no sampling temperature and no seed, so a run
+    cannot be pinned to a fixed sampling configuration and repeat runs vary
+    by the model's own nondeterminism. Use multiple attempts and report the
+    spread rather than treating one run as definitive. The
+    `target_fingerprint` covers every setting that changes what the model
+    is asked to do — model id, system prompt, effort, tool allow-list, turn
+    ceiling — but it cannot detect a silent server-side model revision
+    under a stable model id.
+
 ## Choosing a target
 
 | Situation | Target |
@@ -199,6 +257,7 @@ values in the clear) as `SubprocessTarget`.
 | Your system runs as a separate process/language, or you want strict process isolation | `SubprocessTarget` |
 | Your system is a deployed HTTP service (an agent API, a hosted endpoint) | `HttpTarget` |
 | Your system is a tool behind an MCP stdio server | `McpTarget` |
+| You are grading Claude itself and hold a Claude subscription rather than an API key | `ClaudeAgentTarget` |
 
 For a complete worked example wiring an `HttpTarget` to a real agent
 endpoint with request/response mapping, authentication, timeout, and an

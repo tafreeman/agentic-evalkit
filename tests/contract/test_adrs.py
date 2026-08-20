@@ -98,6 +98,7 @@ REQUIRED_ADR_PREFIXES = (
     "0022",
     "0023",
     "0024",
+    "0025",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
@@ -256,6 +257,7 @@ NUMBER_WORDS = {
     "twenty-two": 22,
     "twenty-three": 23,
     "twenty-four": 24,
+    "twenty-five": 25,
 }
 
 
