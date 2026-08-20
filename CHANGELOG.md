@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     no sampling temperature and no seed, so runs cannot be pinned the way an
     API-key target can and repeat runs vary by the model's own
     nondeterminism. Use multiple attempts and report the spread.
+  - `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` are blanked in the CLI
+    subprocess. The SDK spawns it with `{**os.environ, **options.env}`, so an
+    inherited key would make the CLI authenticate against -- and bill -- an API
+    account while the run was reported with `auth: claude-subscription`. Pass
+    `env=` to evaluate against an API key deliberately.
   - The SDK entry point is an injected constructor argument, mirroring how
     `HttpTarget` is handed a client, so the whole test suite runs without a
     CLI, a sign-in, or a network.

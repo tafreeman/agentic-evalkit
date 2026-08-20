@@ -31,6 +31,19 @@ Two properties of this target are worth knowing before trusting a number from it
 Credentials are resolved entirely by the CLI. This module never reads, stores,
 or forwards them, and no credential can reach a report through it.
 
+**API-key environment variables are blanked in the CLI subprocess.** The SDK
+spawns the CLI with ``{**os.environ, **options.env}``, so an evaluation run in a
+process that has ``ANTHROPIC_API_KEY`` set would hand the child that key and the
+CLI would authenticate with it. For an evidence-first harness that is worse than
+a plain failure: the run would complete, be graded, and be reported as a
+subscription result while actually having billed an API account -- and
+``environment_metadata`` would say ``auth: claude-subscription`` about it. It
+also fails outright when the key is invalid or unfunded. Verified against the
+CLI: an invalid inherited key returns ``401 API key is invalid``, and blanking
+the variable restores the subscription path. Blanked rather than removed,
+because ``options.env`` merges *over* ``os.environ`` and so can only override a
+key, never unset it.
+
 Requires the ``claude`` extra::
 
     pip install 'agentic-evalkit[claude]'
@@ -92,6 +105,27 @@ _SIGN_IN_HINT: Final[str] = (
 QueryFn = Callable[..., AsyncIterator[Any]]
 """Shape of ``claude_agent_sdk.query``; injectable so tests never touch a CLI."""
 
+#: Credential variables blanked in the CLI subprocess so it cannot fall back to
+#: API-key auth. Empty rather than absent: ``ClaudeAgentOptions.env`` is merged
+#: over ``os.environ`` and can only override a key, never remove it.
+_API_KEY_ENV_VARS: Final[tuple[str, ...]] = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+)
+
+
+def subscription_env(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the child-process env that pins the CLI to subscription auth.
+
+    Caller *overrides* apply last, so an operator deliberately evaluating
+    against an API key can still say so -- but they have to say it, rather than
+    getting it by accident from a variable that happened to be set.
+    """
+    env = dict.fromkeys(_API_KEY_ENV_VARS, "")
+    if overrides:
+        env.update(overrides)
+    return env
+
 
 def _fingerprint(
     name: str,
@@ -149,6 +183,7 @@ class ClaudeAgentTarget:
         max_turns: int = 1,
         max_budget_usd: float | None = None,
         cwd: str | None = None,
+        env: dict[str, str] | None = None,
         query_fn: QueryFn | None = None,
     ) -> None:
         """
@@ -165,6 +200,9 @@ class ClaudeAgentTarget:
             max_budget_usd: Hard per-sample spend ceiling.
             cwd: Working directory handed to the CLI. Only meaningful when
                 ``allowed_tools`` grants filesystem access.
+            env: Extra environment for the CLI subprocess, applied over the
+                API-key scrub. Use it to deliberately evaluate against an API
+                key instead of the subscription.
             query_fn: Override for ``claude_agent_sdk.query``. Injected the same
                 way :class:`~agentic_evalkit.targets.http.HttpTarget` is handed a
                 client, so tests drive this target without a CLI or a sign-in.
@@ -184,6 +222,7 @@ class ClaudeAgentTarget:
         self._max_turns = max_turns
         self._max_budget_usd = max_budget_usd
         self._cwd = cwd
+        self._env = env or {}
         self._query: QueryFn = query_fn if query_fn is not None else query
         self._fingerprint = _fingerprint(
             name, model, system_prompt, effort, self._allowed_tools, max_turns
@@ -247,6 +286,10 @@ class ClaudeAgentTarget:
             "allowed_tools": list(self._allowed_tools),
             "max_turns": self._max_turns,
             "permission_mode": "default",
+            # Without this the CLI inherits ANTHROPIC_API_KEY from the parent
+            # process and the run is billed to -- and authenticated by -- an
+            # API account while reporting itself as a subscription result.
+            "env": subscription_env(self._env),
         }
         if self._system_prompt is not None:
             options["system_prompt"] = self._system_prompt

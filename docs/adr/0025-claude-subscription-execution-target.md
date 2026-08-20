@@ -62,9 +62,16 @@ effected that once in adding a fourth.
   allow-list, turn ceiling, and target name are folded into
   `target_fingerprint`, so `compare_runs` refuses to compare across any change
   that alters what the model was asked to do.
-- **Credentials never enter this package.** Resolution belongs entirely to the
-  CLI. Nothing here reads, stores, or forwards a credential, so none can reach a
-  report.
+- **Credentials never enter this package, and the CLI cannot inherit one.**
+  Resolution belongs entirely to the CLI; nothing here reads, stores, or
+  forwards a credential. The SDK spawns the CLI with
+  `{**os.environ, **options.env}`, so `ANTHROPIC_API_KEY` and
+  `ANTHROPIC_AUTH_TOKEN` are blanked in the child. For an evidence-first
+  harness an inherited key is worse than a failure: the run would complete, be
+  graded, and be reported with `auth: claude-subscription` while actually
+  having billed an API account. Blanked rather than removed, because
+  `options.env` can only override a key, never unset it; caller-supplied `env`
+  applies last so deliberate API-key evaluation stays possible.
 - **Wire models reused unchanged.** `EvalSample` in;
   `NormalizedExecutionResult` with `ExecutionStatus` out. No new wire model, and
   no change to any existing one.
@@ -114,12 +121,16 @@ that fails on most machines.
   adapter, and it applies equally to any hosted target.
 - A new failure mode — subscription rate-limit exhaustion — appears in results as
   `ERROR`, and a long run can hit it partway through.
+- An operator holding both a subscription and an API key gets the subscription
+  from this target unless they override `env`. That keeps the recorded
+  `auth: claude-subscription` truthful, which is the point.
 - The `claude` extra must track the SDK's major version; a breaking SDK release
   is a maintenance obligation this package did not previously carry.
 
 ## Validation
 
-- `tests/unit/targets/test_claude_agent.py` covers protocol conformance, text
+- `tests/unit/targets/test_claude_agent.py` covers the credential scrub (both
+  the blanking and the explicit override), protocol conformance, text
   assembly across multiple assistant messages, telemetry mapping, structured
   output, prompt-field extraction and its two failure shapes, option
   forwarding, tools-off-by-default, fingerprint stability and sensitivity to

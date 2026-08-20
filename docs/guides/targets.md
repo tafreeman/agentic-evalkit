@@ -227,6 +227,13 @@ and an empty allow-list, so grading an answer cannot touch the filesystem,
 a shell, or the network. Pass `allowed_tools=[...]` only when you are
 deliberately evaluating agentic behaviour rather than an answer.
 
+If the process running the evaluation has `ANTHROPIC_API_KEY` set, the target
+blanks it (and `ANTHROPIC_AUTH_TOKEN`) in the CLI subprocess. The SDK spawns the
+CLI with `{**os.environ, **options.env}`, so an inherited key would make the CLI
+authenticate against — and bill — an API account while the run reported itself
+as a subscription result. Pass `env={"ANTHROPIC_API_KEY": "..."}` to evaluate
+against an API key deliberately.
+
 Results carry the full harness telemetry — `input_tokens`, `output_tokens`,
 `cost_usd`, `latency_ms`, `model_name`, and the session id as a
 `trace_refs` entry — and `environment_metadata` records

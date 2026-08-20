@@ -23,6 +23,7 @@ from agentic_evalkit.errors import TargetFailure
 from agentic_evalkit.models import EvalSample, ExecutionStatus
 from agentic_evalkit.targets import ClaudeAgentTarget
 from agentic_evalkit.targets.base import ExecutionTarget
+from agentic_evalkit.targets.claude_agent import subscription_env
 
 # ---------------------------------------------------------------------------
 # Builders
@@ -107,6 +108,48 @@ def target(query_fn: Any, **kwargs: Any) -> ClaudeAgentTarget:
 
 async def run(tgt: ClaudeAgentTarget, smpl: EvalSample | None = None, *, attempt: int = 1) -> Any:
     return await tgt.execute(smpl or sample(), attempt=attempt, timeout_seconds=30.0)
+
+
+# ---------------------------------------------------------------------------
+# Credential scrub
+# ---------------------------------------------------------------------------
+
+
+def test_subscription_env_blanks_both_credential_vars() -> None:
+    """Blank, not absent: ClaudeAgentOptions.env merges over os.environ.
+
+    The SDK spawns the CLI with ``{**os.environ, **options.env}``, so an entry
+    can override a value but never remove the key. Empty is what the CLI
+    treats as absent.
+    """
+    assert subscription_env() == {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}
+
+
+def test_subscription_env_lets_an_explicit_override_win() -> None:
+    env = subscription_env({"ANTHROPIC_API_KEY": "explicit"})
+    assert env["ANTHROPIC_API_KEY"] == "explicit"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == ""
+
+
+async def test_cli_subprocess_cannot_inherit_an_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inherited key would make the recorded evidence a lie.
+
+    The run would complete, be graded, and be reported with
+    ``auth: claude-subscription`` in environment_metadata while actually having
+    authenticated against -- and billed -- an API account.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-never-reach-the-cli")
+    fake = replay(assistant("4"), result())
+    await run(target(fake))
+    assert fake.calls[0]["options"].env["ANTHROPIC_API_KEY"] == ""
+
+
+async def test_explicit_env_override_reaches_the_harness() -> None:
+    fake = replay(assistant("4"), result())
+    await run(target(fake, env={"ANTHROPIC_API_KEY": "deliberate"}))
+    assert fake.calls[0]["options"].env["ANTHROPIC_API_KEY"] == "deliberate"
 
 
 # ---------------------------------------------------------------------------
