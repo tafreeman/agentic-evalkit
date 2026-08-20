@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "case_id": "SE-FE-PY-001",
+  "oracle_type": "executable_acceptance",
+  "canary": "ORACLE_ONLY_FE_5819CE",
+  "hard_gates": [
+    {"id": "allowed-change-scope", "kind": "path_policy", "allow": ["src/**", "tests/**"]},
+    {"id": "public-regression", "kind": "pytest", "command": "python -m pytest -q tests"},
+    {"id": "hidden-acceptance", "kind": "pytest", "command": "python -m pytest -q <oracle>/hidden_tests"},
+    {"id": "dependency-policy", "kind": "dependency_diff", "new_dependencies": 0}
+  ],
+  "controls": {
+    "gold_passes": true,
+    "gold_artifact": "gold/idempotency.py",
+    "noop_fails": true,
+    "expected_seed_failure": "hidden-acceptance"
+  },
+  "advisory": ["changed_line_count", "latency_ms", "tokens", "cost_usd"]
+}

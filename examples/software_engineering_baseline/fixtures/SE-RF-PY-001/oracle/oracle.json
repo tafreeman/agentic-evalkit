@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "case_id": "SE-RF-PY-001",
+  "oracle_type": "behavioral_equivalence",
+  "canary": "ORACLE_ONLY_RF_B99E21",
+  "hard_gates": [
+    {"id": "non-empty-patch", "kind": "patch_presence", "minimum_changed_lines": 1},
+    {"id": "allowed-change-scope", "kind": "path_policy", "allow": ["src/**", "tests/**"]},
+    {"id": "public-regression", "kind": "pytest", "command": "python -m pytest -q tests"},
+    {"id": "hidden-equivalence", "kind": "pytest", "command": "python -m pytest -q <oracle>/hidden_tests"},
+    {"id": "dependency-policy", "kind": "dependency_diff", "new_dependencies": 0}
+  ],
+  "controls": {
+    "gold_passes": true,
+    "gold_artifact": "gold/reporting.py",
+    "noop_fails": true,
+    "expected_seed_failure": "non-empty-patch",
+    "note": "The seed already passes behavior gates; a no-op still fails because the task requires a refactor patch."
+  },
+  "scoring": {
+    "behavioral_equivalence": 0.8,
+    "structure_metric": 0.2,
+    "structure_metric_is_advisory": true,
+    "structure_metric_definition": "maximum AST If nodes in any function, lower is better"
+  },
+  "advisory": ["max_if_nodes_per_function", "changed_line_count", "latency_ms", "tokens", "cost_usd"]
+}

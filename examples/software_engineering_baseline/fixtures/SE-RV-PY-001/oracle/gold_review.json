@@ -1,0 +1,25 @@
+{
+  "findings": [
+    {
+      "file": "src/tenant_store.py",
+      "line": 19,
+      "category": "data_isolation",
+      "severity": "critical",
+      "description": "get_invoice filters only by invoice ID, so a caller can retrieve an invoice owned by another tenant when IDs are known. Add tenant_id to the query predicate."
+    },
+    {
+      "file": "src/tenant_store.py",
+      "line": 28,
+      "category": "correctness",
+      "severity": "medium",
+      "description": "list_invoices ignores include_archived and does not filter archived rows when the default false value is used."
+    },
+    {
+      "file": "src/tenant_store.py",
+      "line": 42,
+      "category": "error_semantics",
+      "severity": "high",
+      "description": "delete_invoice returns true unconditionally instead of checking the cursor row count, so a missing invoice is reported as deleted."
+    }
+  ]
+}

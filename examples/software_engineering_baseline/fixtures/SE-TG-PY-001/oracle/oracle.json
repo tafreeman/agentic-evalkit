@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "case_id": "SE-TG-PY-001",
+  "oracle_type": "mutation_tests",
+  "canary": "ORACLE_ONLY_TG_49A4D1",
+  "hard_gates": [
+    {"id": "tests-only-change-scope", "kind": "path_policy", "allow": ["tests/**"], "deny": ["src/**"]},
+    {"id": "reference-passes", "kind": "pytest_with_source", "source": "reference/permissions.py", "command": "python -m pytest -q tests"},
+    {"id": "mutants-killed", "kind": "mutation", "minimum_kill_rate": 1.0, "mutants": ["mutants/first_match.py", "mutants/deny_ignored.py", "mutants/wildcard_exact_only.py"]}
+  ],
+  "controls": {
+    "gold_passes": true,
+    "gold_artifact": "gold_tests/test_permissions_gold.py",
+    "noop_fails": true,
+    "expected_seed_failure": "mutants-killed"
+  },
+  "scoring": {
+    "reference_pass": 0.4,
+    "mutation_kill_rate": 0.6
+  },
+  "advisory": ["test_count", "test_runtime_ms", "latency_ms", "tokens", "cost_usd"]
+}

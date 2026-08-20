@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["findings"],
+  "additionalProperties": false,
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "line", "category", "severity", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "file": {"const": "src/tenant_store.py"},
+          "line": {"type": "integer", "minimum": 1},
+          "category": {"enum": ["data_isolation", "correctness", "error_semantics"]},
+          "severity": {"enum": ["critical", "high", "medium", "low"]},
+          "description": {"type": "string", "minLength": 20}
+        }
+      }
+    }
+  }
+}
