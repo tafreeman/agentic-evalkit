@@ -11,6 +11,19 @@ This directory holds the implementation planning record for `agentic-evalkit`.
   — analysis and phased migration plan for adopting this package inside the
   ARP monorepo, harvesting its eval tooling of value, and retiring its legacy
   in-repo evaluation package (not yet executed; see the follow-on gate below).
+- [`2026-08-16-agentic-evalkit-master-delivery-plan.md`](2026-08-16-agentic-evalkit-master-delivery-plan.md)
+  — the sole execution-order authority for the strictly serial delivery of the
+  low-code YAML/JSON layer, calibration release, ARP migration, judge validation,
+  legacy-package removal, package testing, and final evidence.
+- [`2026-08-16-agentic-evalkit-low-code-integration-layer.md`](2026-08-16-agentic-evalkit-low-code-integration-layer.md)
+  — configuration-first YAML/JSON integration plan for evaluating Python,
+  HTTP, subprocess, and MCP systems through the packaged CLI, with an explicit
+  selected-only extension escape hatch for irreducible domain logic.
+
+M0 of the master plan is complete. Its pinned repository inventories, current
+ARP usage map, package baselines, known failures, and evidence classifications
+are recorded in
+[`../release/2026-08-16-m0-baseline-acceptance.md`](../release/2026-08-16-m0-baseline-acceptance.md).
 
 The corresponding design is
 [`../specs/2026-07-02-agentic-evalkit-design.md`](../specs/2026-07-02-agentic-evalkit-design.md);

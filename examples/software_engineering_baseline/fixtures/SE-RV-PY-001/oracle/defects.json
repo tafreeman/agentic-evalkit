@@ -1,0 +1,31 @@
+{
+  "defects": [
+    {
+      "defect_id": "TENANT-READ-SCOPE",
+      "file": "src/tenant_store.py",
+      "line_start": 18,
+      "line_end": 21,
+      "category": "data_isolation",
+      "severity": "critical",
+      "summary": "get_invoice selects by invoice ID without tenant_id and can return another tenant's invoice"
+    },
+    {
+      "defect_id": "ARCHIVE-FILTER",
+      "file": "src/tenant_store.py",
+      "line_start": 27,
+      "line_end": 35,
+      "category": "correctness",
+      "severity": "medium",
+      "summary": "list_invoices ignores include_archived and always includes archived rows"
+    },
+    {
+      "defect_id": "DELETE-ROWCOUNT",
+      "file": "src/tenant_store.py",
+      "line_start": 37,
+      "line_end": 44,
+      "category": "error_semantics",
+      "severity": "high",
+      "summary": "delete_invoice returns true even when no row matched"
+    }
+  ]
+}

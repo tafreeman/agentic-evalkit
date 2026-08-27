@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "case_id": "SE-RV-PY-001",
+  "oracle_type": "structured_defect_ledger",
+  "canary": "ORACLE_ONLY_RV_77C2B8",
+  "hard_gates": [
+    {"id": "no-repository-changes", "kind": "path_policy", "allow": []},
+    {"id": "output-schema", "kind": "json_schema", "schema": "../repo/review-output.schema.json"},
+    {"id": "critical-recall", "kind": "defect_ledger", "ledger": "defects.json", "severity": "critical", "minimum_recall": 1.0}
+  ],
+  "controls": {
+    "gold_passes": true,
+    "gold_artifact": "gold_review.json",
+    "noop_fails": true,
+    "expected_seed_failure": "critical-recall"
+  },
+  "scoring": {
+    "finding_match": "same file, same category, and candidate line within ledger line range",
+    "precision_weight": 0.4,
+    "recall_weight": 0.6,
+    "severity_exact_match_advisory": true
+  },
+  "advisory": ["severity_accuracy", "latency_ms", "tokens", "cost_usd"]
+}

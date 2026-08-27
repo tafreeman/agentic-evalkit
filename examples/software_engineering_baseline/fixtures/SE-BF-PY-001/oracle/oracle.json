@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "case_id": "SE-BF-PY-001",
+  "oracle_type": "executable_tests",
+  "canary": "ORACLE_ONLY_BF_4D887A",
+  "hard_gates": [
+    {"id": "allowed-change-scope", "kind": "path_policy", "allow": ["src/**", "tests/**"]},
+    {"id": "public-regression", "kind": "pytest", "command": "python -m pytest -q tests"},
+    {"id": "hidden-boundaries", "kind": "pytest", "command": "python -m pytest -q <oracle>/hidden_tests"}
+  ],
+  "controls": {
+    "gold_passes": true,
+    "gold_artifact": "gold/pagination.py",
+    "noop_fails": true,
+    "expected_seed_failure": "hidden-boundaries"
+  },
+  "advisory": ["changed_line_count", "latency_ms", "tokens", "cost_usd"]
+}
