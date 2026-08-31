@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] - 2026-08-31
+
 ### Added
 
 - `ClaudeAgentTarget` (ADR-0025): a fifth built-in `ExecutionTarget` that
