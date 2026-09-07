@@ -54,6 +54,15 @@ of primary-documentation review; the other five columns retain their
 2026-07-11 verification. As always, "not documented" is a documentation-review
 finding on the stated date, not a source audit of that project.
 
+All five controls in the **Here** column ship in the version of
+`agentic-evalkit` currently on PyPI (0.4.0). They did not all land at once —
+see [CHANGELOG.md](../CHANGELOG.md) for the full history — for example, the
+base calibrated-judge gate shipped in 0.1.0, contamination canaries
+([ADR-0013](adr/0013-contamination-metadata-and-canaries.md)) landed in
+0.2.0, and the calibration floor's 95% Wilson lower bound
+([ADR-0020](adr/0020-wilson-lower-bound-judge-floor-and-response-envelope.md))
+superseded ADR-0007's point estimate in 0.3.0.
+
 | Validity control | Here | promptfoo / Inspect / DeepEval / Braintrust / LangSmith | MLflow / Langfuse |
 |---|---|---|---|
 | Model judges gated by calibration evidence (TNR/TPR floors, held-out human labels, position-bias probe, expiry; uncalibrated judges can never hard-gate) | [ADR-0007](adr/0007-objective-first-grading.md) | Model-graded assertions/judges are available everywhere, uncalibrated | Judge **alignment** (MLflow SIMBA optimizer) raises judge–human agreement, but no control withholds an uncalibrated judge's authority |
