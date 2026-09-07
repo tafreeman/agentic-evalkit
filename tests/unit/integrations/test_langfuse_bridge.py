@@ -370,6 +370,7 @@ def test_a_judge_proven_unreliable_writes_no_numeric_score_at_all() -> None:
         name="faithfulness",
         value=0.9,
         calibration=_calibration(true_negative=30, false_positive=40),
+        now=_STARTED_AT,
     )
 
     assert level is AuthorityLevel.UNAVAILABLE
