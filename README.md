@@ -17,7 +17,8 @@ a release.
 Those tools handle the *workflow* side of evals — running lots of prompts,
 wiring checks into CI, tracking experiments over time. Use one of them for
 that. This package solves a narrower, stricter problem: trusting the
-result you get.
+result you get, and these are the controls `agentic-evalkit` itself
+enforces to do it, shipping as of the current release (0.4.0 on PyPI):
 
 - An AI judge has to prove it agrees with real human-labeled answers before it's allowed to approve anything
 - Two runs are only compared once we can prove they ran under matching conditions
@@ -25,8 +26,12 @@ result you get.
 - A fuzzy AI opinion can never override a hard requirement like "the code must compile"
 - On grounded-citation tasks, a planted marker echoed back in an answer is caught before it inflates a score
 
-None of the tools above solve these problems. Full comparison and
-reasoning: [docs/prior-art.md](docs/prior-art.md).
+A documentation review of promptfoo, Inspect, DeepEval, Braintrust,
+LangSmith, MLflow, and Langfuse's own primary docs (most recently
+2026-08-04) found that none of them documents an equivalent control as a
+core concept. Exactly what was checked, on what date, what was *not*
+tested (no source audit was performed on any competing project), and where
+each of those tools is the better choice instead: [docs/prior-art.md](docs/prior-art.md).
 
 Start with the [quickstart guide](docs/guides/quickstart.md). Design
 boundaries: [architecture specification](docs/specs/2026-07-02-agentic-evalkit-design.md).
@@ -43,10 +48,19 @@ agentic-evalkit run eval.yaml --limit 5 --yes
 This resolves the curated GSM8K preset from Hugging Face, runs five samples
 through the packaged smoke target, grades them with a normalized exact-match
 grader, and writes a canonical JSON report. No importer code, manual dataset
-download, `datasets`, `pyarrow`, or Docker is required. See
-[docs/guides/quickstart.md](docs/guides/quickstart.md) for the full walkthrough,
-including the standalone `report` command that regenerates a self-contained
-HTML report from that JSON.
+download, `datasets`, `pyarrow`, or Docker is required.
+
+The run reports `passed=0 failed=5` — that's expected, not a bug. The
+packaged demo target (`zero_target`) always answers `"0"`, so it always
+fails GSM8K grading; the point of this walkthrough is to verify the
+*pipeline* — live dataset resolution, target execution, objective grading,
+and report generation — before you wire in a real system under test. See
+[docs/guides/quickstart.md](docs/guides/quickstart.md) for the full
+walkthrough, including the standalone `report` command that regenerates a
+self-contained HTML report from that JSON. To see the report shape before
+installing anything, a real evaluation run's checked-in JSON/HTML/Markdown
+reports are at
+[scripts/reports/2026-07-26-agent-workflow-eval/](scripts/reports/2026-07-26-agent-workflow-eval/README.md).
 
 ## Python API
 
@@ -67,6 +81,11 @@ manifest = EvalRunManifest(
 )
 ```
 
+**This snippet is abbreviated for brevity** — it omits the catalog, adapter,
+grader, and artifact-store wiring a real run needs. See
+[the HTTP agent example](docs/guides/http-agent-example.md) for the complete,
+runnable Python-API script.
+
 `EvalRunner(...).run(manifest)` then drives dataset resolution, execution,
 and grading end to end. `CallableTarget` satisfies `ExecutionTarget` —
 agentic-evalkit's only system-under-test boundary — which is also exported
@@ -74,9 +93,7 @@ at the top level for anyone implementing a custom target. Everything
 else — additional targets, graders, reporters, dataset providers,
 benchmark adapters, and statistics — is one import away under its own
 subpackage (`agentic_evalkit.graders`, `agentic_evalkit.reporters`, and so
-on); see [the HTTP agent example](docs/guides/http-agent-example.md) for a
-complete, runnable Python-API script with the catalog/adapter/grader/
-artifact-store wiring this snippet omits for brevity.
+on).
 
 ## Optional extras
 
@@ -100,6 +117,7 @@ extras policy.
 - [Targets](docs/guides/targets.md) — callable, subprocess, HTTP, and MCP-stdio execution targets
 - [SWE-bench](docs/guides/swebench.md) — preview/prediction workflow and the harness boundary
 - [HTTP agent example](docs/guides/http-agent-example.md) — evaluating a real HTTP agent endpoint
+- [Example report](scripts/reports/2026-07-26-agent-workflow-eval/README.md) — a real 48-case run's write-up, with the canonical JSON/HTML/Markdown reports it came from
 
 ## Repository boundary
 

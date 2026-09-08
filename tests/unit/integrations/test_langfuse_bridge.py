@@ -332,7 +332,7 @@ def test_calibration_summary_travels_with_the_export() -> None:
 def test_a_calibrated_judge_scores_under_the_ungated_name() -> None:
     client = _RecordingClient()
     level = score_with_calibration_gate(
-        client, name="faithfulness", value=0.9, calibration=_calibration()
+        client, name="faithfulness", value=0.9, calibration=_calibration(), now=_STARTED_AT
     )
 
     assert level is AuthorityLevel.GATING
@@ -370,6 +370,7 @@ def test_a_judge_proven_unreliable_writes_no_numeric_score_at_all() -> None:
         name="faithfulness",
         value=0.9,
         calibration=_calibration(true_negative=30, false_positive=40),
+        now=_STARTED_AT,
     )
 
     assert level is AuthorityLevel.UNAVAILABLE
