@@ -1,0 +1,66 @@
+# Deploy the docs site to GitHub Pages.
+#
+# Triggered by a successful `CI` run on main rather than by the push itself, so a
+# commit that fails its own test/lint/type gate is never the commit that gets
+# published — a push-triggered deploy would race CI and could publish a commit CI
+# was in the middle of rejecting.
+name: docs
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Pages allows one concurrent deployment. Never cancel one in progress: an
+# interrupted deploy can leave the published site in a partial state, and the
+# next successful run is only moments behind anyway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # `workflow_run` fires on failed runs too, so the conclusion has to be checked
+    # explicitly — without this the job would publish the docs of a commit whose
+    # tests just failed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the exact commit CI passed on, not whatever main points at
+          # now. `workflow_run` events carry the triggering run's SHA, and main can
+          # move between CI finishing and this job starting.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.11"
+
+      - run: uv sync --group dev
+
+      - run: uv run mkdocs build --strict
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
