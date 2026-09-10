@@ -19,6 +19,7 @@ from pydantic import JsonValue, ValidationError
 
 from agentic_evalkit.graders.judge import (
     _DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
+    DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS,
     CalibrationArtifact,
     JudgeGrader,
     JudgeRequest,
@@ -33,6 +34,7 @@ from agentic_evalkit.models import (
     NormalizedExecutionResult,
 )
 from agentic_evalkit.reporters.base import DEFAULT_REDACTION_POLICY
+from agentic_evalkit.runner import _LARGE_OUTPUT_THRESHOLD_BYTES
 
 #: A secret-shaped substring matching ``DEFAULT_REDACTION_POLICY``'s
 #: ``hf_[A-Za-z0-9]{16,}`` pattern (20 chars after the prefix).
@@ -396,6 +398,17 @@ async def test_oversized_candidate_output_is_truncated_before_reaching_the_judge
     assert judge.calls[0].candidate_output == expected_received
     assert result.evidence["candidate_output_truncated"] is True
     assert result.evidence["candidate_output_original_chars"] == len(stringified)
+
+
+def test_the_candidate_output_cap_matches_the_runners_spill_threshold() -> None:
+    """The judge's candidate-output character cap must track the runner's
+    large-output byte threshold (ADR-0018).
+
+    If the two defaults ever diverged, the comment above
+    ``DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS`` claiming they match would go
+    silently stale.
+    """
+    assert DEFAULT_MAX_CANDIDATE_OUTPUT_CHARS == _LARGE_OUTPUT_THRESHOLD_BYTES
 
 
 @pytest.mark.asyncio
