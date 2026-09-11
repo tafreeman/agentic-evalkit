@@ -66,9 +66,9 @@ agentic-evalkit doctor --offline
 ```
 
 `doctor` checks the Python version, cache read/write access, Hugging Face
-health, optional capabilities, and judge calibration. `--offline` skips
-network checks. The command exits `3` if any check has error status, so it can
-serve as a setup gate in automation.
+health, and optional-capability availability (currently `swebench`).
+`--offline` skips network checks. The command exits `3` if any check has
+error status, so it can serve as a setup gate in automation.
 
 ## Work with datasets
 

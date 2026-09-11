@@ -3,7 +3,7 @@
 This guide walks through evaluating a real tool-using agent that is
 deployed as an HTTP service — the most common shape for a production
 agent endpoint. The complete, runnable example lives under
-[`examples/http_agent/`](https://github.com/agentic-evalkit/agentic-evalkit/tree/main/examples/http_agent)
+[`examples/http_agent/`](https://github.com/tafreeman/agentic-evalkit/tree/main/examples/http_agent)
 in this repository; this guide explains the pieces and why each one is
 there.
 

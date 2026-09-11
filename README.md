@@ -97,16 +97,27 @@ on).
 
 ## Optional extras
 
-The `swebench` extra (`pip install agentic-evalkit[swebench]`, pulling in
-`swebench>=4.1,<5` and `docker>=7.1,<8`) is the only extra `agentic-evalkit`
-declares. It backs `SweBenchDockerHarnessExecutor`, the container-based
-SWE-bench Verified harness executor landed in
-[ADR-0014](docs/adr/0014-swebench-docker-harness-executor.md): with the
-extra installed and a reachable Docker daemon, `swebench-harness@1` grades a
-real resolved/unresolved verdict instead of reporting `unavailable`. The
-base install still ships without Docker or any model-provider SDK — see
+`agentic-evalkit` declares four optional extras; the base install still
+ships without Docker or any model-provider SDK — see
 [ADR-0009](docs/adr/0009-optional-dependencies-and-plugins.md) for the
 extras policy.
+
+- **`swebench`** (`pip install agentic-evalkit[swebench]`, pulling in
+  `swebench>=4.1,<5` and `docker>=7.1,<8`) backs
+  `SweBenchDockerHarnessExecutor`, the container-based SWE-bench Verified
+  harness executor landed in
+  [ADR-0014](docs/adr/0014-swebench-docker-harness-executor.md): with the
+  extra installed and a reachable Docker daemon, `swebench-harness@1` grades
+  a real resolved/unresolved verdict instead of reporting `unavailable`.
+- **`claude`** (`pip install agentic-evalkit[claude]`, pulling in
+  `claude-agent-sdk`) backs `ClaudeAgentTarget`
+  ([ADR-0025](docs/adr/0025-claude-subscription-execution-target.md)), which
+  grades Claude itself through a Claude subscription sign-in rather than an
+  API key.
+- **`mlflow`** and **`langfuse`** (`pip install agentic-evalkit[mlflow]` or
+  `agentic-evalkit[langfuse]`) back the calibration-gating bridges in
+  [the MLflow & Langfuse guide](docs/guides/mlflow-langfuse-bridge.md)
+  ([ADR-0022](docs/adr/0022-host-platform-integration-boundary.md)).
 
 ## Documentation
 
@@ -114,11 +125,12 @@ extras policy.
 - [CLI reference](docs/guides/cli-reference.md) — commands, options, offline behavior, and exit codes
 - [Providers](docs/guides/providers.md) — local formats, Hugging Face auth, cache/offline
 - [Graders](docs/guides/graders.md) — objective-first order, hard gates, calibrated judges
-- [Targets](docs/guides/targets.md) — callable, subprocess, HTTP, and MCP-stdio execution targets
+- [Targets](docs/guides/targets.md) — callable, subprocess, HTTP, MCP-stdio, and Claude Agent SDK execution targets
 - [SWE-bench](docs/guides/swebench.md) — preview/prediction workflow and the harness boundary
 - [HTTP agent example](docs/guides/http-agent-example.md) — evaluating a real HTTP agent endpoint
+- [MLflow & Langfuse bridge](docs/guides/mlflow-langfuse-bridge.md) — gate judge authority in MLflow and Langfuse without leaving either platform
 - [Example report](scripts/reports/2026-07-26-agent-workflow-eval/README.md) — a real 48-case run's write-up, with the canonical JSON/HTML/Markdown reports it came from
 
 ## Repository boundary
 
-This project imports no host-repo internals — systems are reached only through the public `ExecutionTarget` protocol (callable, subprocess, HTTP, or MCP-stdio adapters); see [ADR-0001](docs/adr/0001-standalone-boundary.md) and [ADR-0006](docs/adr/0006-execution-target-boundary.md).
+This project imports no host-repo internals — systems are reached only through the public `ExecutionTarget` protocol (callable, subprocess, HTTP, MCP-stdio, or Claude Agent SDK adapters); see [ADR-0001](docs/adr/0001-standalone-boundary.md) and [ADR-0006](docs/adr/0006-execution-target-boundary.md).
