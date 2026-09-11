@@ -108,7 +108,7 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 
 <div class="feature-card" markdown>
 <h3 class="fc-title">Neutral execution targets</h3>
-<p class="fc-body">Callable, subprocess-JSONL, HTTP, and MCP-stdio adapters normalize every outcome to an <code>ExecutionStatus</code> before grading — no target-specific response shape ever reaches a grader.</p>
+<p class="fc-body">Callable, subprocess-JSONL, HTTP, MCP-stdio, and Claude Agent SDK adapters normalize every outcome to an <code>ExecutionStatus</code> before grading — no target-specific response shape ever reaches a grader.</p>
 [Targets guide](guides/targets.md){ .fc-link }
 </div>
 
@@ -148,11 +148,13 @@ Existing evaluation frameworks couple dataset access, grading, and reporting to 
 <h3 class="dc-title">Guides</h3>
 
 - [Quickstart](guides/quickstart.md) — install to first report, including the standalone `report` command for self-contained HTML
+- [CLI reference](guides/cli-reference.md) — commands, options, offline behavior, and exit codes
 - [Providers](guides/providers.md) — local formats, Hugging Face auth, the content-addressed cache, and `--offline` mode
 - [Graders](guides/graders.md) — the objective-first evidence order and calibrated-judge requirements
-- [Targets](guides/targets.md) — callable, subprocess-JSONL, HTTP, and MCP-stdio execution targets
+- [Targets](guides/targets.md) — callable, subprocess-JSONL, HTTP, MCP-stdio, and Claude Agent SDK execution targets
 - [SWE-bench](guides/swebench.md) — the preview/prediction-export workflow and harness boundary
 - [HTTP agent example](guides/http-agent-example.md) — evaluating a real tool-using agent over HTTP
+- [MLflow & Langfuse bridge](guides/mlflow-langfuse-bridge.md) — gate judge authority in MLflow and Langfuse without leaving either platform
 </div>
 
 <div class="doc-card" markdown>
