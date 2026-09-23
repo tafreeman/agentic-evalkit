@@ -29,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   swept nor exempt with a stated reason, and checks that its fixture plants a
   secret in every swept field.
 
+### Fixed
+
+- `--format json` output now stays plain JSON when `FORCE_COLOR` is set. The
+  CLI printed JSON through Rich, which syntax-highlights it whenever colour is
+  forced, and `FORCE_COLOR` forces colour for any value, including `0`. Many
+  CI systems set it, so machine-readable output began with ANSI escape codes
+  and broke JSON parsers. JSON is now written as plain text. Output without
+  forced colour is byte-identical to before. The test suite also drops
+  `FORCE_COLOR` before the CLI is imported, so tests asserting on plain-text
+  tables no longer fail spuriously under a colour-forcing environment.
+
 ## [0.4.0] - 2026-08-31
 
 ### Added

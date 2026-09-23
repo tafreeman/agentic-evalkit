@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -177,6 +178,32 @@ def test_curated_and_init_work_without_manual_import(tmp_path) -> None:  # type:
     validated = runner.invoke(app, ["validate", str(destination)])
     assert validated.exit_code == 0
     assert "valid" in validated.stdout.lower()
+
+
+def test_json_output_stays_parseable_when_colour_is_forced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--format json`` must stay machine-readable under ``FORCE_COLOR``.
+
+    Rich reads ``FORCE_COLOR`` once, when the module-level console is built,
+    and any value (including ``0``) makes it highlight JSON with ANSI codes.
+    CI systems commonly set it, which is how the 2026-09-22 audit's harness
+    saw 19 CLI tests fail. This installs a console that always emits colour,
+    as ``FORCE_COLOR`` would, and requires plain JSON regardless.
+    """
+    from rich.console import Console
+
+    cli_app_module = sys.modules["agentic_evalkit.cli.app"]
+    monkeypatch.setattr(
+        cli_app_module, "console", Console(force_terminal=True, color_system="truecolor")
+    )
+
+    result = runner.invoke(app, ["datasets", "curated", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert "\x1b[" not in result.stdout
+    names = {preset["name"] for preset in json.loads(result.stdout)}
+    assert "swe-bench-verified" in names
 
 
 # --- CLI coverage for Hugging Face-backed commands, via a fake network-free provider ---
