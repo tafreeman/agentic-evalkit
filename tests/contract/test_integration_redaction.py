@@ -29,10 +29,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import typing
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import BaseModel
 
 from agentic_evalkit.integrations import (
     EXTERNAL_SINKS,
@@ -40,6 +42,7 @@ from agentic_evalkit.integrations import (
     TEXT_REDACTED_SINKS,
 )
 from agentic_evalkit.models import (
+    ContaminationMetadata,
     DatasetRef,
     EvalRunManifest,
     EvalRunResult,
@@ -53,6 +56,9 @@ from agentic_evalkit.models import (
 )
 from agentic_evalkit.models.samples import GraderSpec
 from agentic_evalkit.reporters import DEFAULT_REDACTION_POLICY, apply_redaction
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _AT = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 _PLANTED_TOKEN = "hf_abcdefghijklmnopqrstuvwxyz012345"  # a fake token, planted to be redacted
@@ -126,9 +132,10 @@ def test_the_sink_registry_is_not_empty() -> None:
     assert EXTERNAL_SINKS
 
 
-#: Every field on the per-sample models that holds free-form payload -- text
-#: written by a caller, an adapter, or the system under test -- mapped to
-#: whether the redaction sweep covers it.
+#: Every field that holds free-form payload -- text written by a caller, an
+#: adapter, a dataset provider, or the system under test -- on any model
+#: reachable from ``EvalRunResult``, mapped to whether the redaction sweep
+#: covers it.
 #:
 #: This table is the second half of the tripwire, and it exists because
 #: counting calls to ``redact_for_export`` proves only that the sweep *ran*,
@@ -140,7 +147,19 @@ def test_the_sink_registry_is_not_empty() -> None:
 #: left alone and each needs a reason that survives being read aloud. The
 #: reflection test below fails when a model grows a free-form field that is
 #: in neither, which forces the decision to be made rather than defaulted.
+#:
+#: The table once listed only the four per-sample models, and the reflection
+#: test iterated the table, so the run-level manifest and resolved dataset
+#: were never inspected at all: their policy dictionaries and dataset card
+#: went into every report unswept while this test stayed green. The models
+#: are now discovered by walking ``EvalRunResult``, so a model can no longer
+#: be missed by not being listed.
 _SWEPT: dict[type, frozenset[str]] = {
+    EvalRunManifest: frozenset(
+        {"artifact_policy", "redaction_policy", "baseline_compatibility_rules"}
+    ),
+    DatasetRef: frozenset({"data_files"}),
+    ResolvedDataset: frozenset({"card_metadata", "schema_metadata", "selected_files"}),
     EvalSample: frozenset(
         {"input", "reference", "metadata", "expected_artifacts", "allowed_execution_policy"}
     ),
@@ -165,10 +184,37 @@ _EXEMPT: dict[type, frozenset[str]] = {
     #: filtering, never payload; rewriting one breaks selection while
     #: protecting nothing.
     EvalSample: frozenset({"tags"}),
-    GraderSpec: frozenset(),
-    NormalizedExecutionResult: frozenset(),
-    GradeResult: frozenset(),
+    #: ``canary_ids`` holds marker strings that are published on purpose so
+    #: a model regurgitating them can be caught; the exact value is the
+    #: evidence a leak check matches on.
+    ContaminationMetadata: frozenset({"canary_ids"}),
 }
+
+
+def _field_annotations(annotation: object) -> Iterator[object]:
+    """``annotation`` and every type nested inside it (Optional, tuple items, ...)."""
+    yield annotation
+    for argument in typing.get_args(annotation):
+        yield from _field_annotations(argument)
+
+
+def _models_reachable_from(root: type[BaseModel]) -> set[type[BaseModel]]:
+    """Every model class a ``root`` instance can contain, found by walking field types."""
+    reachable: set[type[BaseModel]] = set()
+    pending: list[type[BaseModel]] = [root]
+    while pending:
+        model = pending.pop()
+        if model in reachable:
+            continue
+        reachable.add(model)
+        for field in model.model_fields.values():
+            for annotation in _field_annotations(field.annotation):
+                if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                    pending.append(annotation)
+    return reachable
+
+
+_RUN_MODELS: frozenset[type[BaseModel]] = frozenset(_models_reachable_from(EvalRunResult))
 
 
 def _free_form_fields(model: type) -> set[str]:
@@ -187,7 +233,7 @@ def _free_form_fields(model: type) -> set[str]:
     return detected
 
 
-@pytest.mark.parametrize("model", sorted(_SWEPT, key=lambda m: m.__name__))
+@pytest.mark.parametrize("model", sorted(_RUN_MODELS, key=lambda m: m.__name__))
 def test_every_free_form_field_is_either_swept_or_deliberately_exempt(model: type) -> None:
     """Adding a free-form field to a wire model must not silently escape redaction.
 
@@ -195,8 +241,12 @@ def test_every_free_form_field_is_either_swept_or_deliberately_exempt(model: typ
     ``trace_refs``, ``artifact_refs`` and ``GraderSpec.parameters`` sitting
     outside the sweep while every other redaction test stayed green: each
     was declared on a model whose neighbouring fields were being scrubbed.
+    It runs over every model reachable from a run, not over the table, so a
+    model nobody thought to list is inspected too.
     """
-    uncategorized = _free_form_fields(model) - _SWEPT[model] - _EXEMPT[model]
+    swept = _SWEPT.get(model, frozenset())
+    exempt = _EXEMPT.get(model, frozenset())
+    uncategorized = _free_form_fields(model) - swept - exempt
     assert not uncategorized, (
         f"{model.__name__} has free-form field(s) {sorted(uncategorized)} that are neither "
         f"swept by apply_redaction nor listed as deliberately exempt. Decide which, and "
@@ -204,19 +254,78 @@ def test_every_free_form_field_is_either_swept_or_deliberately_exempt(model: typ
     )
 
 
+def test_the_model_walk_reaches_every_categorized_model() -> None:
+    """Guards the walk itself: one that stopped at the root would make the test above vacuous.
+
+    Every model the tables mention must be one the walk found, which proves it
+    descends through the manifest, the resolved dataset, and each sample's
+    grader spec, execution and grade. A table entry for a model a run cannot
+    contain would be dead weight, so that fails too.
+    """
+    categorized = set(_SWEPT) | set(_EXEMPT)
+    assert categorized <= _RUN_MODELS, sorted(m.__name__ for m in categorized - _RUN_MODELS)
+
+
+def _model_instances(value: object) -> Iterator[BaseModel]:
+    """Every model instance inside ``value``, depth first."""
+    if isinstance(value, BaseModel):
+        yield value
+        for name in type(value).model_fields:
+            yield from _model_instances(getattr(value, name))
+    elif isinstance(value, (tuple, list)):
+        for item in value:
+            yield from _model_instances(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _model_instances(item)
+
+
+def test_the_fixture_plants_a_secret_in_every_swept_field() -> None:
+    """A swept field the fixture leaves empty is a field the behavioural test never checks.
+
+    ``test_no_swept_field_carries_a_secret_into_the_redacted_body`` is only as
+    wide as the fixture it redacts, so this pins the fixture to the table:
+    every swept field, on every model that has one, carries the token.
+    """
+    planted: dict[type, set[str]] = {}
+    for instance in _model_instances(_run_with_secrets_in_every_swept_field()):
+        for name in _SWEPT.get(type(instance), frozenset()):
+            if _PLANTED_TOKEN in str(getattr(instance, name)):
+                planted.setdefault(type(instance), set()).add(name)
+    missing = {
+        model.__name__: sorted(fields - planted.get(model, set()))
+        for model, fields in _SWEPT.items()
+        if fields - planted.get(model, set())
+    }
+    assert not missing, f"swept fields the fixture never plants a secret in: {missing}"
+
+
 def _run_with_secrets_in_every_swept_field() -> EvalRunResult:
     """A run carrying the planted token in every field the sweep claims to cover."""
     sample_id = "s0"
+    signed_file = f"https://files.example.com/train.parquet?token={_PLANTED_TOKEN}"
     return EvalRunResult(
         run_id="run-002",
         manifest=EvalRunManifest(
             run_name="redaction-coverage",
-            dataset_ref=DatasetRef(provider="huggingface", dataset_id="openai/gsm8k"),
+            dataset_ref=DatasetRef(
+                provider="huggingface", dataset_id="openai/gsm8k", data_files=(signed_file,)
+            ),
             adapter="gsm8k@1",
             grader="normalized-exact@1",
             target_name="echo-target",
+            artifact_policy={"store": f"s3://bucket/run?sig={_PLANTED_TOKEN}"},
+            # A caller scrubbing one known leaked key lists the literal key.
+            redaction_policy={"secret_patterns": [_PLANTED_TOKEN]},
+            baseline_compatibility_rules={"tracking_token": _PLANTED_TOKEN},
         ),
-        resolved_dataset=ResolvedDataset(dataset_id="openai/gsm8k", revision="abc123"),
+        resolved_dataset=ResolvedDataset(
+            dataset_id="openai/gsm8k",
+            revision="abc123",
+            selected_files=(signed_file,),
+            schema_metadata={"note": _PLANTED_TOKEN},
+            card_metadata={"description": f"access with {_PLANTED_TOKEN}"},
+        ),
         samples=(
             SampleResult(
                 sample=EvalSample(

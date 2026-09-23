@@ -32,7 +32,14 @@ if TYPE_CHECKING:
 
     from pydantic import JsonValue
 
-    from agentic_evalkit.models import EvalRunResult, EvalSample, GradeResult, SampleResult
+    from agentic_evalkit.models import (
+        EvalRunManifest,
+        EvalRunResult,
+        EvalSample,
+        GradeResult,
+        ResolvedDataset,
+        SampleResult,
+    )
     from agentic_evalkit.models.execution import NormalizedExecutionResult
 
 _REDACTED = "[REDACTED]"
@@ -260,6 +267,97 @@ def _redact_eval_sample(sample: EvalSample, *, patterns: tuple[re.Pattern[str], 
     return sample.model_copy(update=updates)
 
 
+#: The caller-declared policy dictionaries a manifest carries "as a record of
+#: what was requested". None of them is a provenance field
+#: (``EvalRunManifest.provenance_field_names``), so scrubbing one can never
+#: change whether two runs count as comparable.
+_MANIFEST_POLICY_FIELDS: tuple[str, ...] = (
+    "artifact_policy",
+    "redaction_policy",
+    "baseline_compatibility_rules",
+)
+
+
+def _redact_manifest(
+    manifest: EvalRunManifest, *, patterns: tuple[re.Pattern[str], ...]
+) -> EvalRunManifest:
+    """Scrub what the caller declared about the run, not only what ran inside it.
+
+    For a long time the sweep stopped at ``run.samples``, and the manifest
+    rode into every report and export untouched. Its three policy
+    dictionaries are free-form ``dict[str, JsonValue]`` written by whoever
+    configured the run, so they hold what configuration usually holds: an
+    object-store URL with its signature in ``artifact_policy``, a
+    tracking-server token in ``baseline_compatibility_rules``. The least
+    obvious case is ``redaction_policy`` itself: a caller who knows one
+    specific key leaked lists that literal key as a pattern to scrub, and
+    without this the manifest copied it verbatim into every report.
+
+    ``dataset_ref.data_files`` is swept for the reason ``artifact_refs`` is:
+    typed as free strings, and a data file given by URL can be a signed one.
+    The ``contamination`` block is left alone. Its only free-form field,
+    ``canary_ids``, holds marker strings that are published on purpose, and
+    the exact value is the evidence a leak check matches on.
+    """
+    if not patterns:
+        return manifest
+    updates: dict[str, object] = {}
+    for field_name in _MANIFEST_POLICY_FIELDS:
+        value = getattr(manifest, field_name)
+        if not value:
+            continue
+        redacted_value = _redact_json_value(value, patterns)
+        if redacted_value != value:
+            updates[field_name] = redacted_value
+    data_files = manifest.dataset_ref.data_files
+    if data_files:
+        redacted_files = tuple(_redact_string(path, patterns) for path in data_files)
+        if redacted_files != data_files:
+            updates["dataset_ref"] = manifest.dataset_ref.model_copy(
+                update={"data_files": redacted_files}
+            )
+    if not updates:
+        return manifest
+    return manifest.model_copy(update=updates)
+
+
+def _redact_resolved_dataset(
+    dataset: ResolvedDataset, *, patterns: tuple[re.Pattern[str], ...]
+) -> ResolvedDataset:
+    """Scrub the provider-reported description of the dataset a run used.
+
+    ``card_metadata`` is the dataset card captured as-is from the provider
+    (for Hugging Face, the card's own front matter), which is third-party
+    text this harness never checked. ``schema_metadata`` is the provider's
+    column description, and ``selected_files`` lists files that can be
+    signed URLs. All three are swept.
+
+    Nothing that identifies the dataset is touched: ``dataset_id``,
+    ``revision``, ``config`` and ``split`` are what ``compare_runs`` checks,
+    and the digest maps (``provider_response_digests``, ``checksums``) are
+    hashes this harness computed, which carry no caller text and must stay
+    byte-exact to prove anything. ``contamination`` is left alone for the
+    reason given on :func:`_redact_manifest`.
+    """
+    if not patterns:
+        return dataset
+    updates: dict[str, object] = {}
+    for field_name in ("card_metadata", "schema_metadata"):
+        value = getattr(dataset, field_name)
+        if not value:
+            continue
+        redacted_value = _redact_json_value(value, patterns)
+        if redacted_value != value:
+            updates[field_name] = redacted_value
+    if dataset.selected_files:
+        redacted_files = tuple(_redact_string(path, patterns) for path in dataset.selected_files)
+        if redacted_files != dataset.selected_files:
+            updates["selected_files"] = redacted_files
+    if not updates:
+        return dataset
+    return dataset.model_copy(update=updates)
+
+
 def _is_artifact_digest(value: JsonValue | None) -> bool:
     """Is ``value`` a reference ``ArtifactStore`` minted, rather than target text?
 
@@ -472,6 +570,11 @@ def apply_redaction(run: EvalRunResult, policy: RedactionPolicy) -> EvalRunResul
     system's own words, which only get pattern-based scrubbing since
     there's no fixed list of keys to drop from free-form text.
 
+    The run-level records get pattern-based scrubbing too: the manifest's
+    caller-declared policy dictionaries and the provider-reported dataset
+    card (see ``_redact_manifest`` and ``_redact_resolved_dataset``). The
+    fields that decide whether two runs are comparable are never rewritten.
+
     ``run`` itself is left completely untouched (per ADR-0002, which
     requires every model in this codebase to be treated as read-only once
     created, never modified in place). This function always returns a
@@ -486,7 +589,13 @@ def apply_redaction(run: EvalRunResult, policy: RedactionPolicy) -> EvalRunResul
         _redact_sample(sample, evidence_keys=evidence_keys, patterns=patterns)
         for sample in run.samples
     )
-    return run.model_copy(update={"samples": redacted_samples})
+    return run.model_copy(
+        update={
+            "manifest": _redact_manifest(run.manifest, patterns=patterns),
+            "resolved_dataset": _redact_resolved_dataset(run.resolved_dataset, patterns=patterns),
+            "samples": redacted_samples,
+        }
+    )
 
 
 __all__ = [

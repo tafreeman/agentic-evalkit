@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- `apply_redaction` now sweeps the run-level records as well as the samples.
+  Until now it rebuilt only `run.samples`, so every report and every MLflow
+  or Langfuse export carried the manifest and the resolved dataset
+  unredacted. That covers the manifest's caller-declared `artifact_policy`,
+  `redaction_policy` and `baseline_compatibility_rules`, the request's
+  `dataset_ref.data_files`, and the provider's `card_metadata`,
+  `schema_metadata` and `selected_files`. `redaction_policy` was the sharpest
+  case: a caller scrubbing one known leaked key lists that literal key as a
+  pattern, and the manifest then copied it into the report meant to protect
+  it. Released versions through 0.4.0 are affected. Fields that decide
+  whether two runs are comparable (dataset identity, provenance
+  fingerprints) and the digest maps are never rewritten, even by a pattern
+  that matches them.
+- The integration-redaction tripwire could not have caught this: its
+  free-form-field check iterated a hand-kept table of four per-sample models,
+  so the manifest and dataset were never inspected. It now walks every model
+  reachable from `EvalRunResult`, fails on a free-form field that is neither
+  swept nor exempt with a stated reason, and checks that its fixture plants a
+  secret in every swept field.
 
 ## [0.4.0] - 2026-08-31
 
