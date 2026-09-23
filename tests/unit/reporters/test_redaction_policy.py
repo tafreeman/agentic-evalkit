@@ -618,3 +618,110 @@ def test_the_sweep_covers_every_free_form_field_a_run_carries() -> None:
     # model is a tuple by contract (ADR-0002), and the generic JSON sweep
     # turns any sequence into a list, so this field needs its own pass.
     assert isinstance(redacted.execution.tool_calls, tuple)
+
+
+def _run_with_run_level_records(
+    manifest: EvalRunManifest, resolved_dataset: ResolvedDataset
+) -> EvalRunResult:
+    return EvalRunResult(
+        run_id="run-001",
+        manifest=manifest,
+        resolved_dataset=resolved_dataset,
+        started_at=datetime(2026, 9, 23, tzinfo=UTC),
+    )
+
+
+def test_the_sweep_covers_the_manifest_and_the_resolved_dataset() -> None:
+    """The run-level records reach every report and export too.
+
+    Until 2026-09-23 ``apply_redaction`` rebuilt only ``samples``, so the
+    manifest's caller-declared policy dictionaries and the provider's dataset
+    card went out unswept. ``redaction_policy`` is the sharpest case: a
+    caller scrubbing one known leaked key lists the literal key as a pattern,
+    and the manifest then copied it into every report it was meant to protect.
+    """
+    token = "hf_" + "q" * 30
+    signed = f"https://files.example.com/train.parquet?token={token}"
+    run = _run_with_run_level_records(
+        EvalRunManifest(
+            run_name="n",
+            dataset_ref=DatasetRef(provider="p", dataset_id="d", data_files=(signed,)),
+            adapter="a",
+            grader="g",
+            target_name="t",
+            artifact_policy={"store": f"s3://bucket/run?sig={token}"},
+            redaction_policy={"secret_patterns": [token]},
+            baseline_compatibility_rules={"notes": [f"tracking {token}"]},
+        ),
+        ResolvedDataset(
+            dataset_id="d",
+            revision="v1",
+            selected_files=(signed,),
+            schema_metadata={"features": {"text": f"string {token}"}},
+            card_metadata={"description": f"request access with {token}"},
+        ),
+    )
+
+    redacted = apply_redaction(run, DEFAULT_REDACTION_POLICY)
+
+    leaked = [
+        name
+        for name, value in (
+            ("manifest.artifact_policy", redacted.manifest.artifact_policy),
+            ("manifest.redaction_policy", redacted.manifest.redaction_policy),
+            (
+                "manifest.baseline_compatibility_rules",
+                redacted.manifest.baseline_compatibility_rules,
+            ),
+            ("manifest.dataset_ref.data_files", redacted.manifest.dataset_ref.data_files),
+            ("resolved_dataset.selected_files", redacted.resolved_dataset.selected_files),
+            ("resolved_dataset.schema_metadata", redacted.resolved_dataset.schema_metadata),
+            ("resolved_dataset.card_metadata", redacted.resolved_dataset.card_metadata),
+        )
+        if token in repr(value)
+    ]
+    assert leaked == [], f"secret survived redaction in: {leaked}"
+    assert redacted.resolved_dataset.card_metadata == {
+        "description": "request access with [REDACTED]"
+    }
+    # Tuple-typed fields stay tuples (ADR-0002), as tool_calls must above.
+    assert isinstance(redacted.manifest.dataset_ref.data_files, tuple)
+    assert isinstance(redacted.resolved_dataset.selected_files, tuple)
+    assert run.manifest.redaction_policy == {"secret_patterns": [token]}  # input untouched
+
+
+def test_the_run_level_sweep_never_rewrites_identity_provenance_or_digests() -> None:
+    """Redaction must not change what a run *is*, even under a pattern that matches hex.
+
+    ``compare_runs`` refuses to compare runs whose dataset identity or
+    provenance fields differ, and the digest maps are the proof of exactly
+    what the provider returned. A caller's "long hex blob looks like a key"
+    rule matches every one of those values, which is why the run-level sweep
+    names the fields it scrubs instead of sweeping the whole record.
+    """
+    commit = "0123456789abcdef" * 2 + "01234567"
+    digest = "sha256:" + "ab12" * 16
+    manifest = EvalRunManifest(
+        run_name="n",
+        dataset_ref=DatasetRef(provider="p", dataset_id="d", revision=commit),
+        adapter="a",
+        grader="g",
+        target_name="t",
+        target_fingerprint=digest,
+        environment_fingerprint=digest,
+        code_fingerprint=digest,
+    )
+    dataset = ResolvedDataset(
+        dataset_id="d",
+        revision=commit,
+        provider_response_digests={"info": digest},
+        cache_manifest_digest=digest,
+        checksums={"train.parquet": digest},
+    )
+    run = _run_with_run_level_records(manifest, dataset)
+
+    hostile = RedactionPolicy(secret_patterns=(r"[A-Fa-f0-9]{32,}",))
+    redacted = apply_redaction(run, hostile)
+
+    assert redacted.manifest == manifest
+    assert redacted.resolved_dataset == dataset
