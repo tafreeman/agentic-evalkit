@@ -254,9 +254,17 @@ def print_output(payload: object, *, format_: str) -> None:
     ``rich.table.Table``. There's no single generic table shape this
     function could render on every command's behalf, since the columns a
     table needs are different for each command.
+
+    The JSON is written as plain text and never through Rich. Rich
+    syntax-highlights JSON whenever it decides colour is wanted, and
+    ``FORCE_COLOR`` forces that for any value, including ``0``. Many CI
+    systems set it, so "machine-readable" output began with ANSI escape
+    codes and broke every JSON parser downstream. The text is exactly what
+    ``print_json`` rendered without colour: two-space indent, sorted keys,
+    non-ASCII kept as-is.
     """
     if format_ == "json":
-        console.print_json(json.dumps(payload, sort_keys=True, default=str))
+        typer.echo(json.dumps(payload, sort_keys=True, default=str, indent=2, ensure_ascii=False))
 
 
 app = typer.Typer(no_args_is_help=True, help="Evaluate agentic systems with reproducible evidence.")
