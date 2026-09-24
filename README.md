@@ -18,7 +18,7 @@ Those tools handle the *workflow* side of evals — running lots of prompts,
 wiring checks into CI, tracking experiments over time. Use one of them for
 that. This package solves a narrower, stricter problem: trusting the
 result you get, and these are the controls `agentic-evalkit` itself
-enforces to do it, shipping as of the current release (0.4.0 on PyPI):
+enforces to do it, shipping as of the current release (0.4.1 on PyPI):
 
 - An AI judge has to prove it agrees with real human-labeled answers before it's allowed to approve anything
 - Two runs are only compared once we can prove they ran under matching conditions
