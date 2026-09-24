@@ -55,7 +55,7 @@ of primary-documentation review; the other five columns retain their
 finding on the stated date, not a source audit of that project.
 
 All five controls in the **Here** column ship in the version of
-`agentic-evalkit` currently on PyPI (0.4.0). They did not all land at once —
+`agentic-evalkit` currently on PyPI (0.4.1). They did not all land at once —
 see [CHANGELOG.md](https://github.com/tafreeman/agentic-evalkit/blob/main/CHANGELOG.md) for the full history — for example, the
 base calibrated-judge gate shipped in 0.1.0, contamination canaries
 ([ADR-0013](adr/0013-contamination-metadata-and-canaries.md)) landed in
