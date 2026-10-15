@@ -51,8 +51,6 @@ the full contract this module implements.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -63,6 +61,8 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast, runtime_checkable
 import httpx
 from huggingface_hub import HfApi
 
+from agentic_evalkit._hashing import sha256_digest
+from agentic_evalkit.datasets._serialization import canonical_row_digest
 from agentic_evalkit.datasets.base import ProviderHealth
 from agentic_evalkit.errors import (
     AgenticEvalkitError,
@@ -140,12 +140,11 @@ def _canonical_digest(row: dict[str, ModelJsonValue]) -> str:
     Hugging Face or read from a local file -- the digest depends only on
     the row's content, never on which provider produced it.
     """
-    canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return canonical_row_digest(row)
 
 
 def _response_digest(payload: bytes) -> str:
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
+    return sha256_digest(payload)
 
 
 @runtime_checkable

@@ -39,14 +39,13 @@ entry instead of trusting bad data as if it were valid.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from agentic_evalkit._hashing import sha256_digest
 from agentic_evalkit.datasets._cache_io import read_entry_bytes
+from agentic_evalkit.datasets._cache_storage import KeyedLockPool, staged_bytes
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
 from agentic_evalkit.models import ResolvedDataset
 from agentic_evalkit.models.base import FrozenModel
@@ -57,21 +56,8 @@ if TYPE_CHECKING:
 _RESOLVED_FILENAME = "resolved.json"
 _DIGEST_PREFIX = "sha256:"
 
-# One write-lock per cache entry, keyed by the entry's digest (hash). This
-# mirrors the same locking pattern used in ``agentic_evalkit.datasets.cache``
-# exactly, but this copy is kept private to this module so that locking in
-# the two caches never interacts.
-_registry_lock = threading.Lock()
-_key_locks: dict[str, threading.Lock] = {}
-
-
-def _lock_for_digest(digest: str) -> threading.Lock:
-    with _registry_lock:
-        lock = _key_locks.get(digest)
-        if lock is None:
-            lock = threading.Lock()
-            _key_locks[digest] = lock
-        return lock
+# Shared by instances of this cache, separate from the other cache type.
+_lock_pool = KeyedLockPool()
 
 
 class ResolutionKey(FrozenModel):
@@ -130,7 +116,7 @@ class ResolutionKey(FrozenModel):
         incidental spacing.
         """
         canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-        return _DIGEST_PREFIX + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return sha256_digest(canonical.encode("utf-8"))
 
 
 def _canonical_json(payload: object) -> str:
@@ -138,7 +124,7 @@ def _canonical_json(payload: object) -> str:
 
 
 def _checksum(canonical_payload: str) -> str:
-    return _DIGEST_PREFIX + hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+    return sha256_digest(canonical_payload.encode("utf-8"))
 
 
 class ResolutionCache:
@@ -197,13 +183,10 @@ class ResolutionCache:
         record_bytes = json.dumps(record, sort_keys=True, indent=2).encode("utf-8")
         entry_path = self._entry_path(key)
 
-        with _lock_for_digest(digest):
-            tmp_name = f".{_RESOLVED_FILENAME}.{os.getpid()}.{threading.get_ident()}.tmp"
-            tmp_path = entry_dir / tmp_name
-            with open(tmp_path, "wb") as handle:
-                handle.write(record_bytes)
-                handle.flush()
-                os.fsync(handle.fileno())
+        with (
+            _lock_pool.lock_for(digest),
+            staged_bytes(entry_path, record_bytes) as tmp_path,
+        ):
             tmp_path.replace(entry_path)
 
     def read(self, key: ResolutionKey) -> ResolvedDataset:

@@ -20,7 +20,6 @@ code.
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -28,6 +27,8 @@ from typing import TYPE_CHECKING, Final
 
 import yaml
 
+from agentic_evalkit._hashing import sha256_digest
+from agentic_evalkit.datasets._serialization import canonical_row_digest
 from agentic_evalkit.datasets.base import ProviderHealth
 from agentic_evalkit.errors import DatasetIntegrityError, DatasetSchemaMismatch
 from agentic_evalkit.models import (
@@ -51,8 +52,7 @@ def _canonical_digest(row: dict[str, JsonValue]) -> str:
     standardized ("canonical") JSON form -- keys sorted alphabetically, no
     extra whitespace -- so that two rows with identical data always hash to
     the same value."""
-    canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return canonical_row_digest(row)
 
 
 def _validate_row(value: object, *, path: Path, index: int) -> dict[str, JsonValue]:
@@ -223,7 +223,7 @@ class LocalDatasetProvider:
     async def resolve(self, ref: DatasetRef) -> ResolvedDataset:
         path = self._resolve_and_validate_path(ref.dataset_id)
         raw = path.read_bytes()
-        revision = "sha256:" + hashlib.sha256(raw).hexdigest()
+        revision = sha256_digest(raw)
         rows = _decode_rows(raw, path=path)
         return ResolvedDataset(
             dataset_id=str(path),

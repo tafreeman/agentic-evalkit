@@ -1,0 +1,20 @@
+{
+  "byte_count": 12,
+  "checksum": "sha256:fb5be7e417f82478594d8f9d4f1c0308e0a6e4667d2519522d9b1f2a1937cdc3",
+  "created_at": "2026-09-10T00:00:00+00:00",
+  "digest": "sha256:2cd8f766565d15caa3b81c5cffec90d795a52ec181d08c4fb3aa0717cacf226f",
+  "key": {
+    "config": null,
+    "data_files_digest": null,
+    "dataset_id": "caf\u00e9",
+    "filter_digest": null,
+    "limit": 2,
+    "offset": 0,
+    "projection_digest": null,
+    "provider": "local",
+    "record_type": "page",
+    "revision": "rev-1",
+    "schema_version": "1",
+    "split": null
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "key": {
+    "schema_version": "1",
+    "provider": "local",
+    "dataset_id": "caf\u00e9",
+    "revision": "rev-1",
+    "config": null,
+    "split": null,
+    "offset": 0,
+    "limit": 2,
+    "projection_digest": null,
+    "filter_digest": null,
+    "data_files_digest": null,
+    "record_type": "page"
+  },
+  "resolution_key": {
+    "schema_version": "1",
+    "provider": "local",
+    "dataset_id": "caf\u00e9",
+    "config": null,
+    "split": null,
+    "revision": null
+  },
+  "resolved": {
+    "schema_version": "1",
+    "dataset_id": "caf\u00e9",
+    "revision": "rev-1",
+    "config": null,
+    "split": null,
+    "selected_files": [],
+    "schema_metadata": {},
+    "row_count": null,
+    "license": null,
+    "citation": null,
+    "gated": false,
+    "card_metadata": {},
+    "retrieved_at": "2026-09-10T00:00:00Z",
+    "provider_response_digests": {},
+    "cache_manifest_digest": null,
+    "checksums": {},
+    "contamination": null
+  },
+  "rows": [
+    {
+      "row": {},
+      "bytes": "{}",
+      "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "row": {
+        "z": "\u00e9\ud83d\ude00",
+        "a": {
+          "b": [
+            null,
+            true,
+            false,
+            1,
+            1.0,
+            -0.0,
+            1e-07
+          ]
+        }
+      },
+      "bytes": "{\"a\":{\"b\":[null,true,false,1,1.0,-0.0,1e-07]},\"z\":\"\\u00e9\\ud83d\\ude00\"}",
+      "digest": "sha256:406ac365026b0c04ef87c5ad174751c333fb680c54959cfeec23013e26b84059"
+    },
+    {
+      "row": {
+        "n": 9007199254740993
+      },
+      "bytes": "{\"n\":9007199254740993}",
+      "digest": "sha256:4ac8309cc76123ef6c5325ef925fc873e9b5856ec4f844ef1462f9303960378a"
+    },
+    {
+      "row": {
+        "x": Infinity,
+        "y": -Infinity,
+        "z": NaN
+      },
+      "bytes": "{\"x\":Infinity,\"y\":-Infinity,\"z\":NaN}",
+      "digest": "sha256:10f5c82b19a12d343dbe1b8747e7280b7d05c3623dad2c3a25782daa01227b44"
+    }
+  ]
+}

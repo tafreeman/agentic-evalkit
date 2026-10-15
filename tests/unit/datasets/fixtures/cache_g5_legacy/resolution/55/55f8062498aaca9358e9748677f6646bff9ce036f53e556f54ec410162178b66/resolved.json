@@ -1,0 +1,32 @@
+{
+  "checksum": "sha256:8ee01a733fa2998379b49bde9142b882f584d20240d01e7a7ef011506bbac333",
+  "created_at": "2026-09-10T00:00:00+00:00",
+  "digest": "sha256:55f8062498aaca9358e9748677f6646bff9ce036f53e556f54ec410162178b66",
+  "key": {
+    "config": null,
+    "dataset_id": "caf\u00e9",
+    "provider": "local",
+    "revision": null,
+    "schema_version": "1",
+    "split": null
+  },
+  "resolved_dataset": {
+    "cache_manifest_digest": null,
+    "card_metadata": {},
+    "checksums": {},
+    "citation": null,
+    "config": null,
+    "contamination": null,
+    "dataset_id": "caf\u00e9",
+    "gated": false,
+    "license": null,
+    "provider_response_digests": {},
+    "retrieved_at": "2026-09-10T00:00:00Z",
+    "revision": "rev-1",
+    "row_count": null,
+    "schema_metadata": {},
+    "schema_version": "1",
+    "selected_files": [],
+    "split": null
+  }
+}
