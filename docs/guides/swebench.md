@@ -1,5 +1,15 @@
 # SWE-bench
 
+!!! warning "Capability claims require a separate validity review"
+
+    Keep this preset for regression checks and harness integration. OpenAI's
+    [February 2026 audit](https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/)
+    found contamination and defective tasks, and its
+    [July 2026 audit](https://openai.com/index/separating-signal-from-noise-coding-evaluations/)
+    retracted the earlier recommendation to switch to SWE-Bench Pro. An official
+    harness result does not resolve those dataset-validity issues. See the dated
+    [benchmark validity policy](benchmark-validity.md) before selecting tasks.
+
 `princeton-nlp/SWE-bench_Verified` (config `default`, split `test`) is the
 curated `swe-bench-verified` preset: real-world GitHub issue resolution
 tasks. This release ships everything needed to discover, preview, project,

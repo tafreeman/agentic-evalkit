@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Durable evaluation interfaces (ADR-0026): manifests can declare a typed
+  nested field map or one explicit local component factory. Factory source,
+  selected function, and literal config are fingerprinted into run provenance.
+  `run --checkpoint-dir` records completed attempts for deterministic resume
+  and refuses changed run semantics.
+
+### Fixed
+
+- Factory execution uses its fingerprinted source bytes rather than cached
+  bytecode. Experiments reject inputs changed during execution. Timed-out
+  subprocesses terminate their child processes too.
+
+- Local datasets are rechecked against their resolved SHA-256 before loading.
+  A required composite component that is unavailable, errors, or abstains can
+  no longer be averaged into a passing result; non-finite component weights
+  are rejected.
+
 ## [0.4.1] - 2026-09-23
 
 ### Security

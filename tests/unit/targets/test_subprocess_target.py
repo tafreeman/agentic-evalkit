@@ -12,8 +12,10 @@ module's tests in the unit-test directory that mirrors its own path.
 """
 
 import asyncio
+import json
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,32 @@ from agentic_evalkit.models import EvalSample, ExecutionStatus, NormalizedExecut
 from agentic_evalkit.targets import SubprocessTarget
 
 _FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_stops_child_work_too(tmp_path: Path) -> None:
+    ready, leaked = tmp_path / "ready", tmp_path / "leaked"
+    child = (
+        "import pathlib,time; "
+        f"pathlib.Path({str(ready)!r}).touch(); time.sleep(3); "
+        f"pathlib.Path({str(leaked)!r}).touch()"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable,'-c',{child!r}]); time.sleep(30)"
+    )
+    target = SubprocessTarget(command=(sys.executable, "-c", parent), env=_subprocess_env())
+    execution = asyncio.create_task(target.execute(_sample(), attempt=1, timeout_seconds=30))
+    try:
+        async with asyncio.timeout(15):
+            while not ready.exists():  # noqa: ASYNC110 - readiness comes from another process
+                await asyncio.sleep(0.02)
+    finally:
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(execution, timeout=10)
+    await asyncio.sleep(3)
+    assert not leaked.exists(), "target timeout left its child running"
 
 
 def _sample(sample_id: str = "s1") -> EvalSample:
@@ -80,6 +108,113 @@ def _target(
     )
 
 
+def _parse_response_payload(payload: dict[str, object]) -> NormalizedExecutionResult:
+    """Exercise response validation without needing another fixture process."""
+    target = SubprocessTarget(command=("telemetry-test-target",))
+    return target._parse_response(
+        _sample(),
+        attempt=1,
+        started_at=datetime.now(UTC),
+        raw_line=json.dumps(payload).encode("utf-8") + b"\n",
+        stderr_bytes=b"",
+    )
+
+
+def _response_payload(*, telemetry: object | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {"sample_id": "s1", "output": {"answer": "pong"}}
+    if telemetry is not None:
+        payload["telemetry"] = telemetry
+    return payload
+
+
+def test_normalizes_valid_response_telemetry() -> None:
+    result = _parse_response_payload(
+        _response_payload(
+            telemetry={
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "cost_usd": 0.0015,
+                "latency_ms": 123,
+                "model_name": "test-model",
+                "trace_refs": ["trace-1", "https://example.test/trace-2"],
+                "tool_calls": [{"name": "search", "arguments": {"query": "ping"}}],
+                "environment_metadata": {
+                    "executionkit": {"retry_count": 1, "fallback_used": False}
+                },
+            }
+        )
+    )
+    assert result.status is ExecutionStatus.COMPLETED
+    assert result.input_tokens == 12
+    assert result.output_tokens == 4
+    assert result.cost_usd == 0.0015
+    assert result.latency_ms == 123.0
+    assert result.model_name == "test-model"
+    assert result.trace_refs == ("trace-1", "https://example.test/trace-2")
+    assert result.tool_calls == ({"name": "search", "arguments": {"query": "ping"}},)
+    assert result.environment_metadata == {
+        "executionkit": {"retry_count": 1, "fallback_used": False}
+    }
+
+
+def test_missing_response_telemetry_remains_unknown() -> None:
+    result = _parse_response_payload(_response_payload())
+    assert result.status is ExecutionStatus.COMPLETED
+    assert result.input_tokens is None
+    assert result.output_tokens is None
+    assert result.cost_usd is None
+    assert result.latency_ms is None
+    assert result.model_name is None
+
+
+def test_existing_response_fields_remain_compatible_without_telemetry() -> None:
+    payload = _response_payload()
+    payload["metadata"] = {"legacy": True}
+    result = _parse_response_payload(payload)
+    assert result.status is ExecutionStatus.COMPLETED
+    assert result.output == {"answer": "pong"}
+
+
+@pytest.mark.parametrize(
+    ("telemetry", "expected_message"),
+    [
+        ({"extra": 1}, "unknown field"),
+        ("not-an-object", "must be a JSON object"),
+        ({"model_name": ""}, "nonempty string"),
+        ({"trace_refs": ["trace-1", ""]}, "list of nonempty strings"),
+        ({"tool_calls": [{"duration_ms": float("nan")}]}, "JSON-safe list of objects"),
+        (
+            {"environment_metadata": {"executionkit": {"cost": float("nan")}}},
+            "JSON-safe object",
+        ),
+    ],
+)
+def test_rejects_bad_response_telemetry(telemetry: object, expected_message: str) -> None:
+    result = _parse_response_payload(_response_payload(telemetry=telemetry))
+    assert result.status is ExecutionStatus.ERROR
+    assert result.error is not None
+    assert result.error["code"] == "invalid_telemetry"
+    assert expected_message in str(result.error["message"])
+
+
+@pytest.mark.parametrize(
+    ("telemetry", "expected_message"),
+    [
+        ({"latency_ms": float("nan")}, "finite nonnegative number"),
+        ({"cost_usd": -0.01}, "finite nonnegative number"),
+        ({"input_tokens": True}, "nonnegative integer"),
+    ],
+)
+def test_rejects_nonfinite_negative_and_boolean_response_telemetry(
+    telemetry: object, expected_message: str
+) -> None:
+    result = _parse_response_payload(_response_payload(telemetry=telemetry))
+    assert result.status is ExecutionStatus.ERROR
+    assert result.error is not None
+    assert result.error["code"] == "invalid_telemetry"
+    assert expected_message in str(result.error["message"])
+
+
 @pytest.mark.asyncio
 async def test_sends_one_request_and_normalizes_echoed_output() -> None:
     target = _target("echo_target.py")
@@ -87,6 +222,26 @@ async def test_sends_one_request_and_normalizes_echoed_output() -> None:
     assert result.status is ExecutionStatus.COMPLETED
     assert result.output == {"question": "ping"}
     assert result.sample_id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_does_not_change_a_completed_response_into_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _target("echo_target.py")
+    terminate = target._terminate
+    calls = 0
+
+    async def slow_cleanup(process: asyncio.subprocess.Process) -> None:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(5.1)
+        await terminate(process)
+
+    monkeypatch.setattr(target, "_terminate", slow_cleanup)
+    result = await target.execute(_sample(), attempt=1, timeout_seconds=5.0)
+    assert result.status is ExecutionStatus.COMPLETED
+    assert calls == 1
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,21 @@
+name: durable-subprocess-smoke-ab
+purpose: regression
+benchmark:
+  name: transparent-deterministic-smoke
+  assessment: regression_only
+  reviewed_on: 2026-09-07
+  sources:
+    - fixtures/cases.jsonl
+  limitations:
+    - Fixture answers are encoded in the targets; this measures no agent capability.
+  validation_evidence:
+    - README.md
+provenance_files:
+  - README.md
+  - fixtures/direct_target.py
+  - fixtures/review_target.py
+arms:
+  - name: direct
+    manifest: direct-subprocess.yaml
+  - name: review-loop
+    manifest: review-subprocess.yaml

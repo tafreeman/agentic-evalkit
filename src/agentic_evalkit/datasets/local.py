@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Final
 import yaml
 
 from agentic_evalkit.datasets.base import ProviderHealth
-from agentic_evalkit.errors import DatasetSchemaMismatch
+from agentic_evalkit.errors import DatasetIntegrityError, DatasetSchemaMismatch
 from agentic_evalkit.models import (
     DatasetRef,
     ResolvedDataset,
@@ -271,6 +271,12 @@ class LocalDatasetProvider:
             )
         path = Path(dataset.selected_files[0])
         raw = path.read_bytes()
+        actual_revision = "sha256:" + hashlib.sha256(raw).hexdigest()
+        if actual_revision != dataset.revision:
+            raise DatasetIntegrityError(
+                message="local dataset changed after resolution; resolve it again before running",
+                context={"expected": dataset.revision, "actual": actual_revision},
+            )
         return _decode_rows(raw, path=path)
 
 

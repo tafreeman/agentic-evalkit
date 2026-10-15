@@ -77,6 +77,7 @@ from agentic_evalkit.reporters.base import (
 
 if TYPE_CHECKING:
     from agentic_evalkit.artifacts import ArtifactStore
+    from agentic_evalkit.checkpoints import RunCheckpoint
     from agentic_evalkit.graders.base import Grader
     from agentic_evalkit.targets.base import ExecutionTarget
 
@@ -218,6 +219,8 @@ class EvalRunner:
         self,
         manifest: EvalRunManifest,
         event_sink: EventSink | None = None,
+        *,
+        checkpoint: RunCheckpoint | None = None,
     ) -> EvalRunResult:
         """Run everything ``manifest`` describes and return the full, provenance-carrying result.
 
@@ -257,8 +260,8 @@ class EvalRunner:
         sink: EventSink = event_sink if event_sink is not None else _noop_sink
         self._validate_manifest(manifest)
 
-        run_id = self._id_factory()
-        started_at = self._clock()
+        run_id = checkpoint.run_id if checkpoint is not None else self._id_factory()
+        started_at = checkpoint.started_at if checkpoint is not None else self._clock()
         sink(
             RunStarted(
                 run_id=run_id,
@@ -280,7 +283,13 @@ class EvalRunner:
             )
 
             samples = await self._prepare_samples(manifest, resolved_dataset)
-            sample_results = await self._execute_all(run_id, manifest, samples, sink)
+            if len({sample.sample_id for sample in samples}) != len(samples):
+                raise ManifestValidationError(
+                    message="dataset adapter produced duplicate sample ids"
+                )
+            if checkpoint is not None:
+                checkpoint.begin(manifest, resolved_dataset, samples)
+            sample_results = await self._execute_all(run_id, manifest, samples, sink, checkpoint)
 
             summary = _summarize(sample_results)
             finished_at = self._clock()
@@ -385,6 +394,7 @@ class EvalRunner:
         manifest: EvalRunManifest,
         samples: tuple[EvalSample, ...],
         sink: EventSink,
+        checkpoint: RunCheckpoint | None = None,
     ) -> list[SampleResult]:
         """Run every sample/attempt with a cap on how many run at once, in a predictable order.
 
@@ -414,10 +424,16 @@ class EvalRunner:
             (sample, attempt) for sample in samples for attempt in range(1, manifest.attempts + 1)
         ]
         results: list[SampleResult | None] = [None] * len(attempt_plan)
+        completed = checkpoint.completed() if checkpoint is not None else {}
 
         async def _run_one(index: int, sample: EvalSample, attempt: int) -> None:
             async with semaphore:
-                results[index] = await self._execute_and_grade(
+                if (sample.sample_id, attempt) in completed:
+                    results[index] = completed[sample.sample_id, attempt]
+                    return
+                if checkpoint is not None:
+                    checkpoint.start(sample.sample_id, attempt)
+                result = await self._execute_and_grade(
                     run_id=run_id,
                     sample=sample,
                     attempt=attempt,
@@ -427,6 +443,9 @@ class EvalRunner:
                     timeout_seconds=manifest.timeout_seconds,
                     sink=sink,
                 )
+                results[index] = result
+                if checkpoint is not None:
+                    checkpoint.save(result)
 
         async with asyncio.TaskGroup() as group:
             for index, (sample, attempt) in enumerate(attempt_plan):

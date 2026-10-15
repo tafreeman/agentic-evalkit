@@ -1,0 +1,2 @@
+{"case":{"id":"arith-1","request":{"messages":[{"role":"user","content":"1 + 1"}]}},"oracle":{"answer":"2"},"routing":{"topology":"single"}}
+{"case":{"id":"arith-2","request":{"messages":[{"role":"user","content":"2 + 2"}]}},"oracle":{"answer":"4"},"routing":{"topology":"single"}}
