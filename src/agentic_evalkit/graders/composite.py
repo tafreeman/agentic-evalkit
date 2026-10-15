@@ -19,6 +19,7 @@ component, never as a silent zero score that could be mistaken for a real
 failing grade.
 """
 
+import math
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -90,8 +91,8 @@ class WeightedGrader:
     """Wraps a component ``Grader`` with its weight and its ``hard_gate`` flag."""
 
     def __init__(self, grader: Grader, *, weight: float, hard_gate: bool) -> None:
-        if weight < 0:
-            raise ValueError(f"weight must be non-negative, got {weight}")
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"weight must be finite and non-negative, got {weight}")
         self.grader = grader
         self.weight = weight
         self.hard_gate = hard_gate
@@ -156,6 +157,27 @@ class CompositeGrader:
                 status=GradeStatus.FAIL,
                 score=weighted_score,
                 hard_gate=True,
+                evidence=evidence,
+                created_at=now,
+            )
+
+        missing_required = [
+            child.status
+            for component, child in zip(self._graders, child_results, strict=True)
+            if component.hard_gate and child.status in _NON_DEFINITIVE_STATUSES
+        ]
+        if missing_required:
+            return GradeResult(
+                sample_id=sample.sample_id,
+                grader=self._name,
+                grader_type="composite",
+                status=(
+                    GradeStatus.ERROR
+                    if GradeStatus.ERROR in missing_required
+                    else GradeStatus.UNAVAILABLE
+                ),
+                score=None,
+                hard_gate=False,
                 evidence=evidence,
                 created_at=now,
             )

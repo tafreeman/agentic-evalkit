@@ -35,6 +35,11 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
+import os
+import signal
+import subprocess
+import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, cast
 
@@ -46,6 +51,18 @@ if TYPE_CHECKING:
 _PROTOCOL_VERSION: Final[str] = "1"
 _DEFAULT_MAX_OUTPUT_BYTES: Final[int] = 1024 * 1024
 _DEFAULT_MAX_STDERR_BYTES: Final[int] = 64 * 1024
+_TELEMETRY_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cost_usd",
+        "latency_ms",
+        "model_name",
+        "trace_refs",
+        "tool_calls",
+        "environment_metadata",
+    }
+)
 
 
 def _fingerprint(command: tuple[str, ...]) -> str:
@@ -124,6 +141,92 @@ async def _drain_stderr(reader: asyncio.StreamReader, *, max_bytes: int) -> byte
     return bytes(collected)
 
 
+def _parse_telemetry(telemetry: object, *, present: bool) -> tuple[dict[str, object], str | None]:
+    """Validate the optional, small telemetry object in a JSONL response.
+
+    Telemetry is deliberately kept separate from free-form output: these
+    fields become comparable run metrics, so accepting misspelled names or
+    coercing values would make reports silently misleading.  An omitted
+    object remains omitted from ``NormalizedExecutionResult`` rather than
+    being represented by invented zero values.
+    """
+    if not present:
+        return {}, None
+    if not isinstance(telemetry, dict):
+        return {}, "response telemetry must be a JSON object"
+
+    unknown_fields = set(telemetry) - _TELEMETRY_FIELDS
+    if unknown_fields:
+        fields = ", ".join(sorted(str(field) for field in unknown_fields))
+        return {}, f"response telemetry contains unknown field(s): {fields}"
+
+    normalized: dict[str, object] = {}
+    for field in ("input_tokens", "output_tokens"):
+        if field in telemetry:
+            value = telemetry[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return {}, f"response telemetry {field} must be a nonnegative integer"
+            normalized[field] = value
+
+    for field in ("cost_usd", "latency_ms"):
+        if field in telemetry:
+            value = telemetry[field]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                return {}, f"response telemetry {field} must be a finite nonnegative number"
+            normalized[field] = float(value)
+
+    if "model_name" in telemetry:
+        value = telemetry["model_name"]
+        if not isinstance(value, str) or not value:
+            return {}, "response telemetry model_name must be a nonempty string"
+        normalized["model_name"] = value
+
+    if "trace_refs" in telemetry:
+        value = telemetry["trace_refs"]
+        if not isinstance(value, list) or any(not isinstance(ref, str) or not ref for ref in value):
+            return {}, "response telemetry trace_refs must be a list of nonempty strings"
+        normalized["trace_refs"] = tuple(value)
+
+    if "tool_calls" in telemetry:
+        value = telemetry["tool_calls"]
+        if not isinstance(value, list) or any(
+            not isinstance(tool_call, dict) or not _is_finite_json_value(tool_call)
+            for tool_call in value
+        ):
+            return {}, "response telemetry tool_calls must be a JSON-safe list of objects"
+        normalized["tool_calls"] = tuple(
+            cast("dict[str, JsonValue]", tool_call) for tool_call in value
+        )
+
+    if "environment_metadata" in telemetry:
+        value = telemetry["environment_metadata"]
+        if not isinstance(value, dict) or not _is_finite_json_value(value):
+            return {}, "response telemetry environment_metadata must be a JSON-safe object"
+        normalized["environment_metadata"] = cast("dict[str, JsonValue]", value)
+
+    return normalized, None
+
+
+def _is_finite_json_value(value: object) -> bool:
+    """Reject non-JSON containers and non-finite numbers in nested telemetry."""
+    if value is None or isinstance(value, (bool, str, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_finite_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _is_finite_json_value(item) for key, item in value.items()
+        )
+    return False
+
+
 class SubprocessTarget:
     """Runs a subprocess as the system under test, exchanging JSON lines over stdin/stdout."""
 
@@ -148,8 +251,9 @@ class SubprocessTarget:
     ) -> NormalizedExecutionResult:
         started_at = datetime.now(UTC)
         try:
-            async with asyncio.timeout(timeout_seconds):
-                return await self._run_exchange(sample, attempt=attempt, started_at=started_at)
+            return await self._run_exchange(
+                sample, attempt=attempt, started_at=started_at, timeout_seconds=timeout_seconds
+            )
         except TimeoutError:
             return self._error_result(
                 sample,
@@ -161,76 +265,88 @@ class SubprocessTarget:
             )
 
     async def _run_exchange(
-        self, sample: EvalSample, *, attempt: int, started_at: datetime
+        self,
+        sample: EvalSample,
+        *,
+        attempt: int,
+        started_at: datetime,
+        timeout_seconds: float | None,
     ) -> NormalizedExecutionResult:
-        process = await asyncio.create_subprocess_exec(
-            *self.command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=self._env,
-            # asyncio only supports one shared buffer `limit` for every
-            # stream on this subprocess, so it must be set to at least
-            # the larger of our two configured byte bounds. Whichever
-            # bound is smaller is then enforced by hand afterward, in
-            # _read_bounded_line/_drain_stderr below.
-            limit=max(self._max_output_bytes, self._max_stderr_bytes) + 1,
-        )
-        # Python's `create_subprocess_exec` guarantees that `process.stdin`,
-        # `.stdout`, and `.stderr` are never ``None`` as long as ``PIPE`` was
-        # passed for all three, as it was above. The `cast` calls below just
-        # tell the type checker to trust that guarantee -- they perform no
-        # check at runtime. `cast` is used here instead of `assert` because
-        # `assert` statements are silently removed when Python runs in
-        # optimized mode (`python -O`), so an `assert` would not reliably
-        # guard anything either.
-        stdin = cast("asyncio.StreamWriter", process.stdin)
-        stdout = cast("asyncio.StreamReader", process.stdout)
-        stderr = cast("asyncio.StreamReader", process.stderr)
-
+        process: asyncio.subprocess.Process | None = None
+        stderr_task: asyncio.Task[bytes] | None = None
         try:
-            request = {
-                "schema_version": _PROTOCOL_VERSION,
-                "sample_id": sample.sample_id,
-                "input": sample.input,
-                "attempt": attempt,
-            }
-            line = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
-            stdin.write(line)
-            await stdin.drain()
-            stdin.close()
+            async with asyncio.timeout(timeout_seconds):
+                process = await asyncio.create_subprocess_exec(
+                    *self.command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=self._env,
+                    start_new_session=sys.platform != "win32",
+                    # asyncio only supports one shared buffer `limit` for every
+                    # stream on this subprocess, so it must be set to at least
+                    # the larger of our two configured byte bounds. Whichever
+                    # bound is smaller is then enforced by hand afterward, in
+                    # _read_bounded_line/_drain_stderr below.
+                    limit=max(self._max_output_bytes, self._max_stderr_bytes) + 1,
+                )
+                # Python's `create_subprocess_exec` guarantees that `process.stdin`,
+                # `.stdout`, and `.stderr` are never ``None`` as long as ``PIPE`` was
+                # passed for all three, as it was above. The `cast` calls below just
+                # tell the type checker to trust that guarantee -- they perform no
+                # check at runtime. `cast` is used here instead of `assert` because
+                # `assert` statements are silently removed when Python runs in
+                # optimized mode (`python -O`), so an `assert` would not reliably
+                # guard anything either.
+                stdin = cast("asyncio.StreamWriter", process.stdin)
+                stdout = cast("asyncio.StreamReader", process.stdout)
+                stderr = cast("asyncio.StreamReader", process.stderr)
 
-            stderr_task = asyncio.create_task(
-                _drain_stderr(stderr, max_bytes=self._max_stderr_bytes)
-            )
-            try:
-                raw_line = await _read_bounded_line(stdout, max_bytes=self._max_output_bytes)
-            except _ByteBoundExceededError as exc:
+                request = {
+                    "schema_version": _PROTOCOL_VERSION,
+                    "sample_id": sample.sample_id,
+                    "input": sample.input,
+                    "attempt": attempt,
+                }
+                line = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+                stdin.write(line)
+                await stdin.drain()
+                stdin.close()
+
+                stderr_task = asyncio.create_task(
+                    _drain_stderr(stderr, max_bytes=self._max_stderr_bytes)
+                )
+                try:
+                    raw_line = await _read_bounded_line(stdout, max_bytes=self._max_output_bytes)
+                except _ByteBoundExceededError as exc:
+                    stderr_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await stderr_task
+                    return self._error_result(
+                        sample,
+                        attempt=attempt,
+                        status=ExecutionStatus.ERROR,
+                        started_at=started_at,
+                        error_type="OutputTooLarge",
+                        message=str(exc),
+                    )
+
+                stderr_bytes = await stderr_task
+
+                return self._parse_response(
+                    sample,
+                    attempt=attempt,
+                    started_at=started_at,
+                    raw_line=raw_line,
+                    stderr_bytes=stderr_bytes,
+                )
+        finally:
+            if stderr_task is not None:
                 stderr_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stderr_task
+            if process is not None:
                 await self._terminate(process)
-                return self._error_result(
-                    sample,
-                    attempt=attempt,
-                    status=ExecutionStatus.ERROR,
-                    started_at=started_at,
-                    error_type="OutputTooLarge",
-                    message=str(exc),
-                )
-
-            stderr_bytes = await stderr_task
-            await self._terminate(process)
-
-            return self._parse_response(
-                sample,
-                attempt=attempt,
-                started_at=started_at,
-                raw_line=raw_line,
-                stderr_bytes=stderr_bytes,
-            )
-        finally:
-            await self._terminate(process)
 
     def _parse_response(
         self,
@@ -307,14 +423,32 @@ class SubprocessTarget:
                 stderr_bytes=stderr_bytes,
             )
 
-        return NormalizedExecutionResult(
-            sample_id=sample.sample_id,
-            attempt=attempt,
-            output=output,
-            status=ExecutionStatus.COMPLETED,
-            target_fingerprint=self._fingerprint,
-            started_at=started_at,
-            finished_at=datetime.now(UTC),
+        telemetry, telemetry_error = _parse_telemetry(
+            payload.get("telemetry"), present="telemetry" in payload
+        )
+        if telemetry_error is not None:
+            return self._error_result(
+                sample,
+                attempt=attempt,
+                status=ExecutionStatus.ERROR,
+                started_at=started_at,
+                error_type="TelemetryValidationError",
+                error_code="invalid_telemetry",
+                message=telemetry_error,
+                stderr_bytes=stderr_bytes,
+            )
+
+        return NormalizedExecutionResult.model_validate(
+            {
+                "sample_id": sample.sample_id,
+                "attempt": attempt,
+                "output": output,
+                **telemetry,
+                "status": ExecutionStatus.COMPLETED,
+                "target_fingerprint": self._fingerprint,
+                "started_at": started_at,
+                "finished_at": datetime.now(UTC),
+            }
         )
 
     def _error_result(
@@ -326,13 +460,15 @@ class SubprocessTarget:
         started_at: datetime,
         error_type: str,
         message: str,
+        error_code: str | None = None,
         stderr_bytes: bytes | None = None,
     ) -> NormalizedExecutionResult:
         # Same stable taxonomy codes the runner's isolation path records, so
         # ``error["code"]`` has one schema regardless of the producing layer.
         error: dict[str, JsonValue] = {
             "type": error_type,
-            "code": ("target_timeout" if status is ExecutionStatus.TIMEOUT else "target_failure"),
+            "code": error_code
+            or ("target_timeout" if status is ExecutionStatus.TIMEOUT else "target_failure"),
             "message": message,
         }
         if stderr_bytes:
@@ -376,7 +512,20 @@ class SubprocessTarget:
         to die.
         """
         if process.returncode is None:
-            process.kill()
+            if sys.platform == "win32":
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        capture_output=True,
+                        check=False,
+                        timeout=5,
+                    )
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
             try:
                 # This timeout is set well below any realistic caller
                 # timeout, because kill() ends the process at the OS

@@ -113,7 +113,7 @@ def parse_dataset_locator(locator: str) -> DatasetRef:
     return DatasetRef(provider=provider, dataset_id=dataset_id, config=config, split=split)
 
 
-def build_catalog(*, offline: bool) -> DatasetCatalog:
+def build_catalog(*, offline: bool, allowed_local_roots: tuple[Path, ...] = ()) -> DatasetCatalog:
     """Build a real ``DatasetCatalog``, connected to the local and Hugging Face dataset providers.
 
     Uses :func:`default_cache_dir` (the same default the library uses on its
@@ -158,7 +158,11 @@ def build_catalog(*, offline: bool) -> DatasetCatalog:
     # HuggingFaceDatasetProvider.create() uses internally for this exact
     # same mismatch.
     hf_provider = HuggingFaceDatasetProvider(client=client, hub=cast("Any", HfApi()))
-    local_provider = LocalDatasetProvider(allowed_roots=(Path.cwd(),))
+    # A normal CLI invocation may read only below its working directory.
+    # Saved experiments additionally pass the directory containing their
+    # reviewed configuration as an explicit trust root, so relative local
+    # dataset references remain usable without allowing arbitrary paths.
+    local_provider = LocalDatasetProvider(allowed_roots=(Path.cwd(), *allowed_local_roots))
     # Both providers satisfy the DatasetProvider Protocol structurally at
     # runtime (confirmed via isinstance() against the @runtime_checkable
     # protocol, in Task 5/6's own test suites). But even with the type

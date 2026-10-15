@@ -1,0 +1,2 @@
+{"case":{"id":"handoff-1","request":{"messages":[{"role":"planner","content":"delegate: 3 + 4"},{"role":"worker","content":"3 + 4"}]}},"oracle":{"answer":"7"},"routing":{"topology":"planner-worker"}}
+{"case":{"id":"handoff-2","request":{"messages":[{"role":"planner","content":"delegate: 5 + 6"},{"role":"worker","content":"5 + 6"}]}},"oracle":{"answer":"11"},"routing":{"topology":"planner-worker"}}

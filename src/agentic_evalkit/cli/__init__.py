@@ -7,6 +7,7 @@ from agentic_evalkit.cli import (  # noqa: F401
     calibrate,
     datasets,
     doctor,
+    experiments,
     reports,
     runs,
 )

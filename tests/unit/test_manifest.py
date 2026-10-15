@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.manifest import (
     CliTarget,
+    ComponentFactoryConfig,
     HttpTargetConfig,
     ManifestDocument,
     dump_manifest,
@@ -168,6 +169,41 @@ def test_dump_manifest_round_trips_through_load_manifest(tmp_path: Path) -> None
 
     assert round_tripped.manifest == document.manifest
     assert round_tripped.target == document.target
+
+
+def test_component_configuration_round_trips_and_resolves_its_source_path(tmp_path: Path) -> None:
+    manifest_path = _write(
+        tmp_path,
+        """
+run_name: configured-components
+dataset:
+  provider: local
+  dataset_id: cases.jsonl
+adapter: local-factory@1
+grader: local-factory@1
+target:
+  kind: callable
+  import_string: agentic_evalkit.examples.zero_target:zero_target
+components:
+  path: components.py
+  function: make
+  config:
+    threshold: 0.75
+""".strip()
+        + "\n",
+    )
+
+    document = load_manifest(manifest_path)
+
+    assert document.components == ComponentFactoryConfig(
+        path=str((tmp_path / "components.py").resolve()),
+        function="make",
+        config={"threshold": 0.75},
+    )
+    dumped_path = tmp_path / "dumped.yaml"
+    dumped_path.write_text(dump_manifest(document), encoding="utf-8")
+    reloaded = load_manifest(dumped_path)
+    assert reloaded.components == document.components
 
 
 def test_dump_manifest_round_trips_target_fingerprint(tmp_path: Path) -> None:

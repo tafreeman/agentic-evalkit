@@ -36,6 +36,7 @@ import yaml
 from pydantic import Field, TypeAdapter, ValidationError
 from pydantic import JsonValue as ModelJsonValue
 
+from agentic_evalkit.benchmarks.field_map import FieldMapConfig
 from agentic_evalkit.errors import JsonValue as ErrorContextValue
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.models import (
@@ -63,6 +64,7 @@ ErrorContext = dict[str, ErrorContextValue]
 __all__ = [
     "CallableTargetConfig",
     "CliTarget",
+    "ComponentFactoryConfig",
     "HttpTargetConfig",
     "ManifestDocument",
     "SubprocessTargetConfig",
@@ -98,6 +100,14 @@ class HttpTargetConfig(FrozenModel):
     kind: Literal["http"] = "http"
     url: str
     credential_hook: str | None = None
+
+
+class ComponentFactoryConfig(FrozenModel):
+    """One explicitly selected local Python factory, never plugin discovery."""
+
+    path: str = Field(min_length=1)
+    function: str = Field(default="build_components", min_length=1)
+    config: dict[str, ModelJsonValue] = Field(default_factory=dict)
 
 
 #: The type of every kind of target configuration the CLI knows how to
@@ -152,6 +162,8 @@ class _ManifestFile(FrozenModel):
     target_fingerprint: str | None = None
     baseline_compatibility_rules: dict[str, ModelJsonValue] = Field(default_factory=dict)
     contamination: ContaminationMetadata | None = None
+    field_map: FieldMapConfig | None = None
+    components: ComponentFactoryConfig | None = None
 
 
 #: The fixed placeholder name used as ``EvalRunManifest.target_name`` for
@@ -176,6 +188,8 @@ class ManifestDocument(FrozenModel):
     """
 
     manifest: EvalRunManifest
+    field_map: FieldMapConfig | None = None
+    components: ComponentFactoryConfig | None = None
     target: CallableTargetConfig | SubprocessTargetConfig | HttpTargetConfig = Field(
         discriminator="kind"
     )
@@ -295,7 +309,23 @@ def load_manifest(path: str | Path) -> ManifestDocument:
             context={"path": str(resolved_path), "errors": _field_errors(error)},
         ) from error
 
-    return ManifestDocument(manifest=manifest, target=parsed.target)
+    if parsed.adapter == "field-map@1" and parsed.field_map is None:
+        raise ManifestValidationError(message="field-map@1 requires a field_map block")
+    if parsed.field_map is not None and parsed.adapter != "field-map@1":
+        raise ManifestValidationError(message="field_map is only valid with adapter field-map@1")
+    if parsed.field_map is not None and parsed.components is not None:
+        raise ManifestValidationError(message="choose either field_map or components")
+    components = parsed.components
+    if components is not None:
+        components = components.model_copy(
+            update={"path": str((resolved_path.resolve().parent / components.path).resolve())}
+        )
+    return ManifestDocument(
+        manifest=manifest,
+        target=parsed.target,
+        field_map=parsed.field_map,
+        components=components,
+    )
 
 
 def dump_manifest(document: ManifestDocument) -> str:
@@ -340,5 +370,9 @@ def dump_manifest(document: ManifestDocument) -> str:
         payload["baseline_compatibility_rules"] = manifest.baseline_compatibility_rules
     if manifest.contamination is not None:
         payload["contamination"] = manifest.contamination.model_dump(mode="json", exclude_none=True)
+    if document.field_map is not None:
+        payload["field_map"] = document.field_map.model_dump(mode="json", exclude_none=True)
+    if document.components is not None:
+        payload["components"] = document.components.model_dump(mode="json", exclude_none=True)
 
     return yaml.safe_dump(payload, sort_keys=True, default_flow_style=False)

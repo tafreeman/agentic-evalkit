@@ -1,0 +1,18 @@
+name: durable-subprocess-handoff-smoke
+purpose: regression
+benchmark:
+  name: transparent-deterministic-handoff-smoke
+  assessment: regression_only
+  reviewed_on: 2026-09-07
+  sources:
+    - fixtures/multiagent-cases.jsonl
+  limitations:
+    - The target is one deterministic process and does not demonstrate multi-agent quality.
+  validation_evidence:
+    - README.md
+provenance_files:
+  - README.md
+  - fixtures/handoff_target.py
+arms:
+  - name: handoff-contract
+    manifest: multiagent-subprocess.yaml

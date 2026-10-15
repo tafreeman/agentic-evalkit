@@ -108,9 +108,10 @@ _GSM8K_PRESET: Final[DatasetPreset] = DatasetPreset(
 _SWE_BENCH_VERIFIED_PRESET: Final[DatasetPreset] = DatasetPreset(
     name="swe-bench-verified",
     description=(
-        "Real-world GitHub issue resolution tasks. Discoverable, previewable, and "
-        "projectable out of the box; authoritative resolved/unresolved grading "
-        "requires the optional swebench harness extra."
+        "Historical regression tasks from real GitHub issue resolution. Discoverable, "
+        "previewable, and projectable out of the box; authoritative resolved/unresolved "
+        "grading requires the optional swebench harness extra. Not standalone frontier "
+        "capability evidence."
     ),
     ref=DatasetRef(
         provider="huggingface",

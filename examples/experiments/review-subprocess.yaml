@@ -1,0 +1,19 @@
+run_name: durable-smoke-review
+dataset:
+  provider: local
+  dataset_id: fixtures/cases.jsonl
+adapter: field-map@1
+grader: normalized-exact@1
+field_map:
+  sample_id: [case, id]
+  input:
+    question: [case, request, messages, 0, content]
+  reference: [oracle, answer]
+target:
+  kind: subprocess
+  argv: [python, examples/experiments/fixtures/review_target.py]
+selection:
+  limit: 2
+attempts: 1
+timeout_seconds: 10
+concurrency: 1

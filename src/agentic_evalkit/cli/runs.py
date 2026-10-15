@@ -55,6 +55,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
 from agentic_evalkit.artifacts import ArtifactStore
+from agentic_evalkit.benchmarks.field_map import FieldMapAdapter
 from agentic_evalkit.benchmarks.grounding import GroundedCitationAdapter
 from agentic_evalkit.benchmarks.gsm8k import Gsm8kAdapter
 from agentic_evalkit.benchmarks.swebench import SweBenchVerifiedAdapter
@@ -62,8 +63,10 @@ from agentic_evalkit.benchmarks.swebench_docker import (
     SweBenchDockerHarnessExecutor,
     swebench_prediction,
 )
+from agentic_evalkit.checkpoints import RunCheckpoint, digest
 from agentic_evalkit.cli.app import ExitCode, app, console, run_cli_command, safe_text
 from agentic_evalkit.cli.datasets import build_catalog
+from agentic_evalkit.components import load_component_bundle
 from agentic_evalkit.datasets.presets import BUILTIN_PRESETS, DatasetPreset
 from agentic_evalkit.errors import ManifestValidationError
 from agentic_evalkit.events import ExecutionCompleted, RunEvent, SampleCompleted, SampleStarted
@@ -107,6 +110,8 @@ from agentic_evalkit.targets.subprocess import SubprocessTarget
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from pydantic import JsonValue as ModelJsonValue
 
     from agentic_evalkit.benchmarks.base import BenchmarkAdapter
     from agentic_evalkit.datasets.catalog import DatasetCatalog
@@ -417,6 +422,39 @@ def _require_known_component(name: str, table: dict[str, object], *, kind: str) 
         )
 
 
+def components_for_document(
+    document: ManifestDocument,
+) -> tuple[EvalRunManifest, dict[str, BenchmarkAdapter], dict[str, Grader]]:
+    """Resolve declarative or explicitly selected domain components."""
+    manifest = document.manifest
+    adapters = dict(_KNOWN_ADAPTERS)
+    graders = dict(_KNOWN_GRADERS)
+    if document.field_map is not None:
+        identity = digest(document.field_map.model_dump(mode="json"))
+        name = f"field-map@1:{identity}"
+        adapters[name] = FieldMapAdapter(document.field_map, grader=manifest.grader)
+        manifest = manifest.model_copy(update={"adapter": name})
+    if document.components is not None:
+        loaded = load_component_bundle(document.components)
+        adapter_name = f"component-adapter@1:{loaded.identity.fingerprint}"
+        grader_name = f"component-grader@1:{loaded.identity.fingerprint}"
+        adapters[adapter_name] = loaded.bundle.adapter
+        graders[grader_name] = loaded.bundle.grader
+        compatibility: dict[str, ModelJsonValue] = dict(manifest.baseline_compatibility_rules)
+        component_factory: dict[str, ModelJsonValue] = dict(loaded.identity.as_manifest_value())
+        compatibility["component_factory"] = component_factory
+        manifest = manifest.model_copy(
+            update={
+                "adapter": adapter_name,
+                "grader": grader_name,
+                "baseline_compatibility_rules": compatibility,
+            }
+        )
+    _require_known_component(manifest.adapter, adapters, kind="adapter")  # type: ignore[arg-type]
+    _require_known_component(manifest.grader, graders, kind="grader")  # type: ignore[arg-type]
+    return manifest, adapters, graders
+
+
 def _with_provenance_fingerprints(
     manifest: EvalRunManifest,
     target_config: CallableTargetConfig | SubprocessTargetConfig | HttpTargetConfig,
@@ -516,6 +554,12 @@ def _raise_yes_required() -> None:
     )
 
 
+def _checkpoint_required() -> None:
+    raise ManifestValidationError(
+        message="--resume and --retry-interrupted require --checkpoint-dir"
+    )
+
+
 @app.command()
 def run(
     manifest_path: Annotated[Path, typer.Argument(help="Path to a manifest YAML file.")],
@@ -532,10 +576,31 @@ def run(
         bool, typer.Option("--offline", help="Only use exact cached dataset pages.")
     ] = False,
     debug: Annotated[bool, typer.Option("--debug", help="Show full tracebacks on error.")] = False,
+    checkpoint_dir: Annotated[
+        Path | None,
+        typer.Option("--checkpoint-dir", help="Persist completed attempts for restart."),
+    ] = None,
+    resume: Annotated[
+        bool,
+        typer.Option(
+            "--resume", help="Resume this checkpoint without replaying completed attempts."
+        ),
+    ] = False,
+    retry_interrupted: Annotated[
+        bool,
+        typer.Option(
+            "--retry-interrupted",
+            help="Explicitly retry interrupted attempts after checking target isolation.",
+        ),
+    ] = False,
 ) -> None:
     """Run a manifest end to end and write a canonical JSON report."""
     document = run_cli_command(lambda: load_manifest(manifest_path), debug=debug)
-    manifest = document.manifest
+    if (resume or retry_interrupted) and checkpoint_dir is None:
+        run_cli_command(lambda: _checkpoint_required(), debug=debug)
+    manifest, adapters, graders = run_cli_command(
+        lambda: components_for_document(document), debug=debug
+    )
     if limit is not None:
         manifest = manifest.model_copy(
             update={"selection": manifest.selection.model_copy(update={"limit": limit})}
@@ -556,8 +621,8 @@ def run(
             raise typer.Exit(code=int(ExitCode.CANCELLED))
 
     def _validate_components() -> None:
-        _require_known_component(manifest.adapter, _KNOWN_ADAPTERS, kind="adapter")  # type: ignore[arg-type]
-        _require_known_component(manifest.grader, _KNOWN_GRADERS, kind="grader")  # type: ignore[arg-type]
+        _require_known_component(manifest.adapter, adapters, kind="adapter")  # type: ignore[arg-type]
+        _require_known_component(manifest.grader, graders, kind="grader")  # type: ignore[arg-type]
 
     run_cli_command(_validate_components, debug=debug)
     target = run_cli_command(lambda: _build_target(document.target), debug=debug)
@@ -600,13 +665,18 @@ def run(
         )
         runner = EvalRunner(
             catalog=catalog,
-            adapters=_KNOWN_ADAPTERS,
+            adapters=adapters,
             targets={"cli-target": target},
-            graders=_KNOWN_GRADERS,
+            graders=graders,
             artifact_store=artifact_store,
         )
         with progress:
-            return asyncio.run(runner.run(manifest, event_sink=_sink))
+            if checkpoint_dir is None:
+                return asyncio.run(runner.run(manifest, event_sink=_sink))
+            with RunCheckpoint(
+                checkpoint_dir, resume=resume, retry_interrupted=retry_interrupted
+            ) as checkpoint:
+                return asyncio.run(runner.run(manifest, event_sink=_sink, checkpoint=checkpoint))
 
     result = run_cli_command(_action, debug=debug)
     result = _with_contamination(result, manifest)

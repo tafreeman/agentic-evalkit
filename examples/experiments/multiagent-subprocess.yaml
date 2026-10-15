@@ -1,0 +1,20 @@
+run_name: durable-smoke-handoff-contract
+dataset:
+  provider: local
+  dataset_id: fixtures/multiagent-cases.jsonl
+adapter: field-map@1
+grader: normalized-exact@1
+field_map:
+  sample_id: [case, id]
+  input:
+    worker_request: [case, request, messages, 1, content]
+    topology: [routing, topology]
+  reference: [oracle, answer]
+target:
+  kind: subprocess
+  argv: [python, examples/experiments/fixtures/handoff_target.py]
+selection:
+  limit: 2
+attempts: 1
+timeout_seconds: 10
+concurrency: 1
