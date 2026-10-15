@@ -6,12 +6,15 @@ edit_uri: edit/main/docs/
 
 docs_dir: docs
 
-# Exclude in-progress planning scaffolding from the published site (gitignore
-# syntax) so `mkdocs build --strict` succeeds and no draft/internal content
-# is published alongside the accepted design, plan, ADRs, and guides.
+# Publish the accepted design and initial-release plan. The remaining planning
+# and specification files are working or historical records: retain them in
+# the repository, but do not present them as current product documentation.
+# These are gitignore-style patterns relative to docs/.
 exclude_docs: |
-  plans/*plan-modifications*
-  plans/README.md
+  plans/*
+  !plans/2026-07-02-agentic-evalkit-initial-release.md
+  specs/*
+  !specs/2026-07-02-agentic-evalkit-design.md
   release/
   codebase/
   project-scan-report.json
