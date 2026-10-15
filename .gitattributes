@@ -1,0 +1,2 @@
+# Byte-exact cache snapshots: never convert line endings on checkout.
+tests/unit/datasets/fixtures/** -text

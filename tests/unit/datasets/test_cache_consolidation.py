@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -49,11 +50,14 @@ def test_byte_hash_known_answer() -> None:
 
 
 async def test_local_revision_hashes_raw_bytes(tmp_path: Path) -> None:
-    source = tmp_path / "row.json"
-    source.write_bytes(b"{}")
+    # The revision is the digest of the file's raw bytes, not of the parsed rows, so
+    # non-canonical spacing must change it. Computed with hashlib, not the helper under test.
+    raw = b'[ {"id": 1} ]\n'
+    source = tmp_path / "rows.json"
+    source.write_bytes(raw)
     provider = local.LocalDatasetProvider(allowed_roots=(tmp_path,))
     resolved = await provider.resolve(DatasetRef(provider="local", dataset_id=str(source)))
-    assert resolved.revision == _EXPECTED["rows"][0]["digest"]
+    assert resolved.revision == "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def test_old_entries_read_and_rewrite_identically(tmp_path: Path, monkeypatch) -> None:
