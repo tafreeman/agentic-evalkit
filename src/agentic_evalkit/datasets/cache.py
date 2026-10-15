@@ -40,14 +40,13 @@ decision.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
+from agentic_evalkit._hashing import sha256_digest
 from agentic_evalkit.datasets._cache_io import read_entry_bytes
+from agentic_evalkit.datasets._cache_storage import KeyedLockPool, staged_bytes
 from agentic_evalkit.errors import DatasetIntegrityError, OfflineCacheMiss
 from agentic_evalkit.models.base import FrozenModel
 
@@ -58,24 +57,8 @@ _PAYLOAD_FILENAME = "payload.bin"
 _MANIFEST_FILENAME = "manifest.json"
 _DIGEST_PREFIX = "sha256:"
 
-# One write-lock per cache key (indexed by the key's digest/fingerprint). A
-# single, separate lock guards the *creation* of these per-key locks: if two
-# threads both try to write a *new* key (one with no lock yet) at the same
-# moment, this outer lock stops them from each creating their own separate
-# lock object, which would mean the two threads wouldn't actually be
-# synchronized with each other. Once a per-key lock exists, it's the one
-# that makes writers to that specific key wait their turn.
-_registry_lock = threading.Lock()
-_key_locks: dict[str, threading.Lock] = {}
-
-
-def _lock_for_digest(digest: str) -> threading.Lock:
-    with _registry_lock:
-        lock = _key_locks.get(digest)
-        if lock is None:
-            lock = threading.Lock()
-            _key_locks[digest] = lock
-        return lock
+# Shared by instances of this cache, separate from the other cache type.
+_lock_pool = KeyedLockPool()
 
 
 class CacheKey(FrozenModel):
@@ -113,11 +96,11 @@ class CacheKey(FrozenModel):
         incidental spacing.
         """
         canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-        return _DIGEST_PREFIX + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return sha256_digest(canonical.encode("utf-8"))
 
 
 def _checksum(payload: bytes) -> str:
-    return _DIGEST_PREFIX + hashlib.sha256(payload).hexdigest()
+    return sha256_digest(payload)
 
 
 class DatasetCache:
@@ -157,13 +140,13 @@ class DatasetCache:
         Writes the payload and its manifest to temporary files in the
         entry's directory first, flushes each one and calls ``fsync``
         (which forces the operating system to actually write the data to
-        disk rather than just holding it in memory), then publishes both
-        files at once using ``Path.replace()`` -- all while holding a lock
+        disk rather than just holding it in memory), then publishes the
+        payload followed by the manifest using ``Path.replace()`` under a lock
         specific to this key's digest (fingerprint). If multiple threads
         try to write to the *same* key at once, this lock makes them go one
-        at a time, so the entry directory always holds either the complete
-        old entry or the complete new one, never a mix of the two; writers
-        to *different* keys, meanwhile, never block each other.
+        at a time within this process. Readers may observe an interrupted
+        pair and reject it through checksum/byte-count validation; writers
+        to *different* keys never block each other.
         """
         entry_dir = self._entry_dir(key)
         entry_dir.mkdir(parents=True, exist_ok=True)
@@ -181,28 +164,15 @@ class DatasetCache:
         payload_path = entry_dir / _PAYLOAD_FILENAME
         manifest_path = entry_dir / _MANIFEST_FILENAME
 
-        with _lock_for_digest(digest):
-            tmp_payload = self._write_temp(entry_dir, "payload", payload)
-            tmp_manifest = self._write_temp(entry_dir, "manifest", manifest_bytes)
-            # Publish the payload file before the manifest file, on purpose:
-            # this way, if a reader shows up in the middle of this
-            # operation, there are only two possible outcomes, and both are
-            # safe. Either it sees the new manifest but an old/missing
-            # payload -- which fails the checksum or byte-count check below,
-            # so the bad read is caught -- or it sees no manifest yet at
-            # all, which it correctly reports as "not cached yet" rather
-            # than "corrupted".
+        with (
+            _lock_pool.lock_for(digest),
+            staged_bytes(payload_path, payload) as tmp_payload,
+            staged_bytes(manifest_path, manifest_bytes) as tmp_manifest,
+        ):
+            # Both files are fully staged before publishing payload, then manifest.
+            # An interrupted pair is rejected by checksum/byte-count checks on read.
             tmp_payload.replace(payload_path)
             tmp_manifest.replace(manifest_path)
-
-    @staticmethod
-    def _write_temp(directory: Path, label: str, data: bytes) -> Path:
-        tmp_path = directory / f".{label}.{os.getpid()}.{threading.get_ident()}.tmp"
-        with open(tmp_path, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        return tmp_path
 
     def read(self, key: CacheKey) -> bytes:
         """Return the payload bytes saved under ``key``, after verifying
