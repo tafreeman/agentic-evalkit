@@ -77,3 +77,41 @@ jobs:
           python -m venv /tmp/agentic-evalkit-smoke
           /tmp/agentic-evalkit-smoke/bin/pip install dist/*.whl
           /tmp/agentic-evalkit-smoke/bin/agentic-evalkit --help
+
+  audit:
+    name: audit (pip-audit on locked dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          python-version: "3.11"
+
+      # requirements-audit.txt is generated here and never committed: this
+      # export of uv.lock is the only copy pip-audit reads, so a tracked one
+      # would be a second rendering of the lock that nothing keeps in sync.
+      - name: Export locked dependencies
+        run: uv export --locked --all-groups --no-emit-project --format requirements.txt -o requirements-audit.txt
+
+      - name: pip-audit
+        run: uvx pip-audit==2.10.1 -r requirements-audit.txt --disable-pip
+
+  secrets:
+    name: secrets (gitleaks)
+    runs-on: ubuntu-latest
+    # Only this job needs to read the PR's commit list, and only on
+    # pull_request events; everything else keeps the default grant.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
+        env:
+          # Required for pull_request scans since gitleaks-action v2.3.0.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
