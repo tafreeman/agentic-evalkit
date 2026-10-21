@@ -45,6 +45,6 @@
 - Low: style and wording that ruff and the doc tests already cover.
 
 ## Out of scope for AI review
-- Generated reports, run outputs and `_bmad*` output; they are not committed.
+- Gitignored local output (`_bmad*`, ad-hoc reports and run outputs). Tracked evidence such as `scripts/reports/**` stays in scope: flag corrupted pinned artifacts or newly added generated runs.
 - `uv.lock` contents; dependency bumps are Dependabot's.
 - Prose quality of `docs/` and ADR wording, except ADR structure and the standing decisions above.
