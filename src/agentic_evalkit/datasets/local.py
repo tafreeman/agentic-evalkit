@@ -20,7 +20,6 @@ code.
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import json
 from pathlib import Path
