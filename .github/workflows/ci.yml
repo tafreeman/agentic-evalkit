@@ -131,10 +131,11 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}" gitleaks
 
       - name: Scan full history
-        run: ${RUNNER_TEMP}/gitleaks git . --redact --no-banner --verbose
+        run: ${RUNNER_TEMP}/gitleaks git . --redact --no-banner --verbose --log-opts="--full-history --all -m"
 
-      # `git log -p` shows no patch for a merge commit, so a secret added only
-      # while resolving a merge conflict is invisible to the history scan.
-      # Scan the checked-out tree too, which is the merge result on a PR.
+      # The history scan passes `-m` (with gitleaks' own default flags) because
+      # `git log -p` prints no patch for a merge commit, which would hide a secret
+      # added while resolving a conflict and removed later. Scan the checked-out
+      # tree too, which is the merge result on a PR.
       - name: Scan checked-out files
         run: ${RUNNER_TEMP}/gitleaks dir . --redact --no-banner --verbose
