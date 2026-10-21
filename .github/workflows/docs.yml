@@ -15,8 +15,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # Pages allows one concurrent deployment. Never cancel one in progress: an
 # interrupted deploy can leave the published site in a partial state, and the
@@ -30,9 +28,16 @@ jobs:
     # `workflow_run` fires on failed runs too, so the conclusion has to be checked
     # explicitly — without this the job would publish the docs of a commit whose
     # tests just failed.
+    #
+    # Only deploy commits that CI ran for a push to this repository. The
+    # `branches: [main]` filter above matches the triggering run's head branch,
+    # which a fork PR controls (a fork's own `main` matches), so without this a
+    # fork PR's code would be checked out at `head_sha`, built, and deployed.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +63,11 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Pages write and the OIDC token are granted only to the job that runs no
+    # repository code.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
