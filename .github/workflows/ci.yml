@@ -79,24 +79,32 @@ jobs:
           /tmp/agentic-evalkit-smoke/bin/agentic-evalkit --help
 
   audit:
-    name: audit (pip-audit on locked dependencies)
-    runs-on: ubuntu-latest
+    name: audit (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    # pip-audit evaluates each requirement's environment marker against the
+    # interpreter it runs on and skips non-matching entries, so one run misses
+    # platform- and version-specific packages. Audit the supported matrix.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       # requirements-audit.txt is generated here and never committed: this
       # export of uv.lock is the only copy pip-audit reads, so a tracked one
       # would be a second rendering of the lock that nothing keeps in sync.
       - name: Export locked dependencies
-        run: uv export --locked --all-groups --no-emit-project --format requirements.txt -o requirements-audit.txt
+        run: uv export --locked --all-groups --all-extras --no-emit-project --format requirements.txt -o requirements-audit.txt
 
       - name: pip-audit
-        run: uvx pip-audit==2.10.1 -r requirements-audit.txt --disable-pip
+        run: uvx --python ${{ matrix.python-version }} pip-audit==2.10.1 -r requirements-audit.txt --disable-pip
 
   secrets:
     name: secrets (gitleaks)
