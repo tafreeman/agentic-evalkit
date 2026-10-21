@@ -109,17 +109,25 @@ jobs:
   secrets:
     name: secrets (gitleaks)
     runs-on: ubuntu-latest
-    # Only this job needs to read the PR's commit list, and only on
-    # pull_request events; everything else keeps the default grant.
-    permissions:
-      contents: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
+      # The binary is run directly, not through gitleaks-action: the action
+      # hard-codes `--no-merges --first-parent` and reads only the first page
+      # (30) of a PR's commits, so it can miss secrets on a merged-in branch
+      # or past commit 30. `gitleaks git` with no --log-opts scans every
+      # reachable commit. Same version as the pre-commit hook; the tarball is
+      # checked against the SHA-256 published in the release's checksums file.
+      - name: Install gitleaks
         env:
-          # Required for pull_request scans since gitleaks-action v2.3.0.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -sSfL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf gitleaks.tar.gz gitleaks
+
+      - name: Scan full history
+        run: ./gitleaks git . --redact --no-banner --verbose
