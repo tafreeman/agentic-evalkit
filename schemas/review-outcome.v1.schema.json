@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tafreeman/agentic-evalkit/schemas/review-outcome.v1.schema.json",
+  "title": "AI review outcome record v1 (one JSONL line per finding per state change)",
+  "description": "Written by post.py (outcome=posted) and by a scheduled ledger job on main that reads PR state through the API (all other outcomes). Append-only; the latest record per (repo, pr, finding_id) is the current state. Stored on an orphan branch `review-ledger` as ledger/YYYY-MM.jsonl so evalkit can read it without PR code ever holding contents:write.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "record_id", "recorded_at", "repo", "pr", "head_sha",
+    "finding_id", "tier", "file", "line", "category", "severity",
+    "evidence_label", "outcome", "outcome_source", "fingerprint"
+  ],
+  "properties": {
+    "schema_version": { "const": "review-outcome/v1" },
+    "record_id": { "type": "string", "description": "uuid4" },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "repo": { "type": "string", "examples": ["tafreeman/agentic-runtime-platform"] },
+    "pr": { "type": "integer", "minimum": 1 },
+    "head_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "finding_id": { "type": "string", "description": "sha256 over (repo, file, category, normalized title, enclosing symbol); stable across re-runs, used for dedup." },
+    "comment_id": { "type": ["integer", "null"], "description": "GitHub review comment id; null when the finding was only in the summary or SARIF." },
+    "tier": { "enum": ["standard", "high_risk"] },
+    "file": { "type": "string" },
+    "line": { "type": "integer", "minimum": 1 },
+    "line_end": { "type": "integer", "minimum": 1 },
+    "category": {
+      "enum": ["correctness", "error_semantics", "data_isolation", "security", "concurrency",
+               "resource_management", "api_contract", "numeric_precision", "test_integrity", "performance"]
+    },
+    "severity": { "enum": ["critical", "high", "medium", "low"] },
+    "evidence_label": { "enum": ["TEST-VERIFIED", "SOURCE-VERIFIED", "UNVERIFIED"] },
+    "source": { "enum": ["llm", "codeql_triage", "opengrep_triage"], "default": "llm" },
+    "outcome": {
+      "enum": ["posted", "resolved_with_change", "resolved_no_change", "rejected", "ignored", "reverted_later", "superseded"],
+      "description": "resolved_with_change: a later commit on the PR touched [line-3, line_end+3] of the file before merge. rejected: owner reacted -1 or replied `/ai-reject <reason>`. ignored: PR merged or closed with neither. reverted_later: merged, then a revert or fix commit within 30 days touches the same lines (candidate missed-bug signal for the classifier and the risk model). superseded: a re-run produced the same finding_id on a newer head."
+    },
+    "outcome_source": { "enum": ["post", "thread_resolved", "reaction", "reply_command", "lines_changed", "revert_detected", "pr_closed"] },
+    "reject_reason": { "type": ["string", "null"], "enum": [null, "false_positive", "not_worth_fixing", "out_of_scope", "duplicate", "wrong_severity", "other"] },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "prompt_version", "harness_version", "router_version"],
+      "description": "Same provenance discipline as evals/swe_ab/analyze.py (target_fingerprint, code_fingerprint): never pool records across different values without saying so.",
+      "properties": {
+        "model": { "type": "string", "examples": ["claude-opus-5-5"] },
+        "provider": { "enum": ["anthropic", "bedrock", "vertex", "foundry"] },
+        "effort": { "enum": ["low", "medium", "high", "xhigh", "max"] },
+        "prompt_version": { "type": "string", "description": "sha256 of review-system-prompt.md + REVIEW.md as sent" },
+        "harness_version": { "type": "string", "description": "git sha of tools/pr_review at base" },
+        "router_version": { "type": "string", "description": "sha256 of review-router.yml at base" }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "usd": { "type": "number", "minimum": 0 },
+        "input_tokens": { "type": "integer" },
+        "cache_read_tokens": { "type": "integer" },
+        "cache_write_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "latency_ms_to_first_comment": { "type": "integer" }
+      }
+    }
+  }
+}
