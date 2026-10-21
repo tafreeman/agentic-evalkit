@@ -19,10 +19,10 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.3.2
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -45,10 +45,10 @@ jobs:
     name: docs (mkdocs --strict build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.3.2
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
         with:
           python-version: "3.11"
 
@@ -62,10 +62,10 @@ jobs:
     name: packaging (ubuntu, wheel install smoke test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.3.2
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
         with:
           python-version: "3.13"
 
@@ -77,3 +77,65 @@ jobs:
           python -m venv /tmp/agentic-evalkit-smoke
           /tmp/agentic-evalkit-smoke/bin/pip install dist/*.whl
           /tmp/agentic-evalkit-smoke/bin/agentic-evalkit --help
+
+  audit:
+    name: audit (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    # pip-audit evaluates each requirement's environment marker against the
+    # interpreter it runs on and skips non-matching entries, so one run misses
+    # platform- and version-specific packages. Audit the supported matrix.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # requirements-audit.txt is generated here and never committed: this
+      # export of uv.lock is the only copy pip-audit reads, so a tracked one
+      # would be a second rendering of the lock that nothing keeps in sync.
+      - name: Export locked dependencies
+        run: uv export --locked --all-groups --all-extras --no-emit-project --format requirements.txt -o requirements-audit.txt
+
+      - name: pip-audit
+        run: uvx --python ${{ matrix.python-version }} pip-audit==2.10.1 -r requirements-audit.txt --disable-pip
+
+  secrets:
+    name: secrets (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # The binary is run directly, not through gitleaks-action: the action
+      # hard-codes `--no-merges --first-parent` and reads only the first page
+      # (30) of a PR's commits, so it can miss secrets on a merged-in branch
+      # or past commit 30. `gitleaks git` with no --log-opts scans every
+      # reachable commit. Same version as the pre-commit hook; the tarball is
+      # checked against the SHA-256 published in the release's checksums file.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          # Outside the workspace, so the file scan below never reads the binary.
+          curl -sSfL -o "${RUNNER_TEMP}/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${RUNNER_TEMP}/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}" gitleaks
+
+      - name: Scan full history
+        run: ${RUNNER_TEMP}/gitleaks git . --redact --no-banner --verbose --log-opts="--full-history --all -m"
+
+      # The history scan passes `-m` (with gitleaks' own default flags) because
+      # `git log -p` prints no patch for a merge commit, which would hide a secret
+      # added while resolving a conflict and removed later. Scan the checked-out
+      # tree too, which is the merge result on a PR.
+      - name: Scan checked-out files
+        run: ${RUNNER_TEMP}/gitleaks dir . --redact --no-banner --verbose

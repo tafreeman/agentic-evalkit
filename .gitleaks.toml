@@ -1,0 +1,15 @@
+# Extends the default ruleset; the only addition is an allowlist of two
+# synthetic strings that redaction tests plant on purpose to prove they never
+# reach disk. They are matched as exact values, not by path, so a real secret
+# anywhere (including tests/) still fails. The patterns are anchored so a
+# longer credential that merely contains one of these values is still reported.
+# Add an entry only after checking the finding by hand, with a comment saying why.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic tokens planted by redaction tests"
+regexes = [
+  '''^hf_AbCdEfGh0123456789$''',    # tests/integration/test_runner.py: _PLANTED_TOKEN
+  '''^sk-live_abcDEF0123456789$''', # tests/integration/test_cli.py: evidence string
+]
