@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from agentic_evalkit.datasets.local import LocalDatasetProvider
-from agentic_evalkit.errors import DatasetSchemaMismatch
+from agentic_evalkit.errors import DatasetIntegrityError, DatasetSchemaMismatch
 from agentic_evalkit.models import DatasetRef, ResolvedDataset
 
 
@@ -317,6 +317,20 @@ async def test_resolved_dataset_with_no_selected_file_is_rejected(tmp_path: Path
     orphan = ResolvedDataset(dataset_id=str(tmp_path / "items.jsonl"), revision="sha256:0")
     with pytest.raises(DatasetSchemaMismatch, match="no selected file"):
         await provider.preview(orphan, offset=0, limit=10)
+
+
+@pytest.mark.asyncio
+async def test_file_changed_after_resolve_raises_integrity_error(tmp_path: Path) -> None:
+    """The read path re-hashes the file and compares it with the revision
+    pinned at resolve time, so a dataset edited between resolve and run fails
+    loudly instead of silently evaluating different rows."""
+    source = tmp_path / "items.jsonl"
+    source.write_text('{"id":"a"}\n', encoding="utf-8")
+    provider = LocalDatasetProvider(allowed_roots=(tmp_path,))
+    resolved = await provider.resolve(DatasetRef(provider="local", dataset_id=str(source)))
+    source.write_text('{"id":"tampered"}\n', encoding="utf-8")
+    with pytest.raises(DatasetIntegrityError, match="changed after resolution"):
+        await provider.preview(resolved, offset=0, limit=10)
 
 
 @pytest.mark.asyncio

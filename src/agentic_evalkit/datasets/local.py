@@ -271,7 +271,7 @@ class LocalDatasetProvider:
             )
         path = Path(dataset.selected_files[0])
         raw = path.read_bytes()
-        actual_revision = "sha256:" + hashlib.sha256(raw).hexdigest()
+        actual_revision = sha256_digest(raw)
         if actual_revision != dataset.revision:
             raise DatasetIntegrityError(
                 message="local dataset changed after resolution; resolve it again before running",
