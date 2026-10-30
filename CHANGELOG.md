@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run --checkpoint-dir` records completed attempts for deterministic resume
   and refuses changed run semantics.
 
+### Changed
+
+- Added `hypothesis` to the dev group and property tests for `wilson_interval`,
+  `clustered_interval` and `compare_runs` symmetry (test-only).
+
 ### Fixed
 
 - Factory execution uses its fingerprinted source bytes rather than cached
