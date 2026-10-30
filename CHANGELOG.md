@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `compare_runs` no longer treats repeated attempts of one sample as
+  independent: with `attempts > 1` it resamples whole `sample_id`s and
+  recomputes the pooled mean per draw (cluster bootstrap on the same estimand
+  as `estimate`, ADR-0016 addendum). A single sample falls back to the
+  attempt-level bootstrap. Single-attempt results are unchanged.
+
 - Factory execution uses its fingerprinted source bytes rather than cached
   bytecode. Experiments reject inputs changed during execution. Timed-out
   subprocesses terminate their child processes too.

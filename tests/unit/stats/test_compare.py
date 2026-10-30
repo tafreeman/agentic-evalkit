@@ -628,3 +628,98 @@ def test_compare_runs_requires_keyword_arguments_for_bootstrap_and_seed() -> Non
     signature = inspect.signature(compare_runs)
     assert signature.parameters["bootstrap_samples"].kind == inspect.Parameter.KEYWORD_ONLY
     assert signature.parameters["seed"].kind == inspect.Parameter.KEYWORD_ONLY
+
+
+# --- Cluster bootstrap for repeated attempts (ADR-0016 addendum) -------------
+
+
+def _correlated_runs(attempts: int, n: int = 12) -> tuple[EvalRunResult, EvalRunResult]:
+    """Left passes every attempt; right's attempts all agree within a sample.
+
+    Right passes sample ``i`` on every attempt when ``i`` is even and fails
+    every attempt otherwise, so the attempts of one sample are perfectly
+    correlated.
+    """
+    left = tuple(
+        _sample_result(f"s{i:02d}", attempt=a, passed=True)
+        for i in range(n)
+        for a in range(1, attempts + 1)
+    )
+    right = tuple(
+        _sample_result(f"s{i:02d}", attempt=a, passed=(i % 2 == 0))
+        for i in range(n)
+        for a in range(1, attempts + 1)
+    )
+    return (
+        _run(run_id="left", attempts=attempts, samples=left),
+        _run(run_id="right", attempts=attempts, samples=right),
+    )
+
+
+def test_perfectly_correlated_attempts_do_not_narrow_the_interval() -> None:
+    one_left, one_right = _correlated_runs(attempts=1)
+    three_left, three_right = _correlated_runs(attempts=3)
+    single = compare_runs(one_left, one_right, bootstrap_samples=2000, seed=5)
+    triple = compare_runs(three_left, three_right, bootstrap_samples=2000, seed=5)
+    assert triple.paired_count == 3 * single.paired_count
+    assert triple.estimate == single.estimate
+    single_width = single.upper_percentile - single.lower_percentile
+    triple_width = triple.upper_percentile - triple.lower_percentile
+    assert triple_width >= single_width
+
+
+def test_cluster_bootstrap_matches_single_attempt_when_clusters_are_identical() -> None:
+    # Cluster means of perfectly correlated attempts equal the attempts=1
+    # deltas, so the seeded draws -- and therefore the interval -- are identical.
+    one_left, one_right = _correlated_runs(attempts=1)
+    three_left, three_right = _correlated_runs(attempts=3)
+    single = compare_runs(one_left, one_right, bootstrap_samples=500, seed=9)
+    triple = compare_runs(three_left, three_right, bootstrap_samples=500, seed=9)
+    assert (triple.lower_percentile, triple.upper_percentile) == (
+        single.lower_percentile,
+        single.upper_percentile,
+    )
+
+
+def test_uneven_clusters_interval_targets_the_pooled_estimate() -> None:
+    # One sample with many paired attempts that all favour left, plus many
+    # single-attempt samples that favour right. ``estimate`` is the pooled
+    # attempt-level mean; resampling equally weighted cluster means would
+    # put the whole interval below zero (excluding the estimate). Resampling
+    # whole clusters and recomputing the pooled mean keeps them aligned.
+    heavy = 40
+    left = tuple(
+        _sample_result("s000", attempt=a, passed=True) for a in range(1, heavy + 1)
+    ) + tuple(_sample_result(f"s{i:03d}", attempt=1, passed=False) for i in range(1, 40))
+    right = tuple(
+        _sample_result("s000", attempt=a, passed=False) for a in range(1, heavy + 1)
+    ) + tuple(_sample_result(f"s{i:03d}", attempt=1, passed=True) for i in range(1, 40))
+    result = compare_runs(
+        _run(run_id="left", attempts=heavy, samples=left),
+        _run(run_id="right", attempts=heavy, samples=right),
+        bootstrap_samples=2000,
+        seed=5,
+    )
+    assert result.paired_count == heavy + 39
+    assert result.sample_count == 40
+    assert result.lower_percentile <= result.estimate <= result.upper_percentile
+
+
+def test_single_sample_with_mixed_attempts_has_a_nonzero_interval() -> None:
+    # One sample, mixed attempt outcomes: there is no between-sample variation
+    # to resample, so the attempt-level bootstrap is used instead of a
+    # zero-width interval around a single cluster mean.
+    outcomes = (True, False, True, True)
+    left = tuple(_sample_result("only", attempt=a, passed=True) for a in range(1, 5))
+    right = tuple(
+        _sample_result("only", attempt=a, passed=p) for a, p in enumerate(outcomes, start=1)
+    )
+    result = compare_runs(
+        _run(run_id="left", attempts=4, samples=left),
+        _run(run_id="right", attempts=4, samples=right),
+        bootstrap_samples=500,
+        seed=3,
+    )
+    assert result.sample_count == 1
+    assert result.upper_percentile > result.lower_percentile
+    assert result.lower_percentile <= result.estimate <= result.upper_percentile

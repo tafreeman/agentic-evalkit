@@ -40,7 +40,15 @@ results by matching ``(sample_id, attempt)`` -- i.e. it lines up each run's
 result for "question 5, attempt 2" with the other run's result for that
 same question and attempt, and compares only those matched pairs. If one
 side is missing an attempt the other has, that pair is simply left out of
-the comparison rather than counted as a failure. If there turn out to be
+the comparison rather than counted as a failure. When a question has several
+paired attempts (``attempts > 1``) those attempts are correlated, so the
+bootstrap resamples whole ``sample_id``s and recomputes the pooled mean
+(drawn deltas over drawn attempts) for each draw -- a cluster bootstrap on
+the same estimand as ``estimate`` (ADR-0016 addendum). With one attempt per
+question it resamples the individual deltas exactly as before. With only one
+question (several attempts) there is no between-question variation to
+resample, so it falls back to the attempt-level bootstrap, which understates
+the uncertainty; treat that interval as optimistic. If there turn out to be
 *zero* matching pairs at all, there's nothing to compute a difference
 from, so ``compare_runs`` raises
 :class:`~agentic_evalkit.errors.IncompatibleRuns` rather than reporting a
@@ -70,7 +78,7 @@ from agentic_evalkit.models.base import FrozenModel
 from agentic_evalkit.models.grades import GradeStatus
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from agentic_evalkit.models.datasets import ResolvedDataset
     from agentic_evalkit.models.runs import EvalRunManifest, EvalRunResult, SampleResult
@@ -438,7 +446,20 @@ def compare_runs(
     estimate = sum(deltas) / paired_count
     sample_count = len({sample_id for sample_id, _attempt in paired_keys})
 
-    lower, upper = _bootstrap_percentiles(deltas, bootstrap_samples=bootstrap_samples, seed=seed)
+    clusters = _clusters(paired_keys, deltas)
+    if len(clusters) == len(deltas) or len(clusters) < 2:
+        # One paired observation per sample: resample the deltas directly, so
+        # single-attempt results stay byte-identical. One sample with several
+        # attempts: there is no between-sample variation to resample, so fall
+        # back to the attempt-level bootstrap (anti-conservative; see the
+        # module docstring) rather than report a zero-width interval.
+        lower, upper = _bootstrap_percentiles(
+            deltas, bootstrap_samples=bootstrap_samples, seed=seed
+        )
+    else:
+        lower, upper = _cluster_bootstrap_percentiles(
+            clusters, bootstrap_samples=bootstrap_samples, seed=seed
+        )
 
     return ComparisonResult(
         estimate=estimate,
@@ -448,6 +469,53 @@ def compare_runs(
         sample_count=sample_count,
         seed=seed,
         waived_provenance_fields=tuple(waived),
+    )
+
+
+def _clusters(paired_keys: list[tuple[str, int]], deltas: list[int]) -> list[tuple[int, int]]:
+    """Group paired deltas by ``sample_id`` as ``(sum, count)`` pairs.
+
+    ``paired_keys`` is sorted, so cluster order is deterministic and the seeded
+    draw sequence is reproducible.
+    """
+    totals: dict[str, list[int]] = {}
+    for (sample_id, _attempt), delta in zip(paired_keys, deltas, strict=True):
+        entry = totals.setdefault(sample_id, [0, 0])
+        entry[0] += delta
+        entry[1] += 1
+    return [(total, count) for total, count in totals.values()]
+
+
+def _cluster_bootstrap_percentiles(
+    clusters: Sequence[tuple[int, int]], *, bootstrap_samples: int, seed: int
+) -> tuple[float, float]:
+    """2.5th/97.5th percentiles of the pooled mean, resampling whole samples.
+
+    When a sample has several paired attempts those attempts are correlated,
+    so resampling them independently understates the uncertainty
+    (pseudo-replication). This draws whole clusters (``sample_id``s) with
+    replacement and, for each draw, recomputes the same quantity
+    ``compare_runs`` reports as ``estimate``: the total of the drawn deltas
+    divided by the number of drawn attempts. Weighting by attempt count keeps
+    the interval and the estimate on one estimand even when samples have
+    different numbers of paired attempts (ADR-0016 addendum). With equal
+    cluster sizes this equals the mean of the drawn cluster means.
+    """
+    rng = random.Random(seed)  # noqa: S311 -- seeded so this gives the same result every run, not random
+    k = len(clusters)
+    resample_means: list[float] = []
+    for _ in range(bootstrap_samples):
+        total = 0
+        count = 0
+        for _ in range(k):
+            cluster_total, cluster_count = clusters[rng.randrange(k)]
+            total += cluster_total
+            count += cluster_count
+        resample_means.append(total / count)
+    resample_means.sort()
+    return (
+        _percentile(resample_means, _LOWER_PERCENTILE),
+        _percentile(resample_means, _UPPER_PERCENTILE),
     )
 
 
