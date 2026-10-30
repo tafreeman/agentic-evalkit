@@ -131,3 +131,30 @@ grouping), the interval method (e.g. to a cluster bootstrap), or the
 `attempts > 1` threshold that gates clustering is a material change and must
 supersede this ADR with new validation, per the same rule ADR-0008 established
 for itself.
+
+## Addendum: paired run comparison (`compare_runs`)
+
+The same pseudo-replication applied to `stats/compare.py::compare_runs`, which
+bootstrapped the per-`(sample_id, attempt)` deltas as independent draws. With
+`attempts > 1` the attempts of one sample are correlated, so that interval was
+anti-conservative.
+
+- **When every paired `sample_id` has a single paired observation, nothing
+  changes.** The bootstrap resamples the same delta list with the same seeded
+  `random.Random`, so every `attempts == 1` result is byte-identical.
+- **When any `sample_id` has more than one paired attempt, the bootstrap is a
+  cluster bootstrap.** Deltas are averaged within each `sample_id` and the
+  resampling draws those cluster means (equivalently, it resamples sample ids).
+  `estimate`, `paired_count` and `sample_count` keep their exact pooled meaning;
+  only the percentile interval's derivation changes. Perfectly correlated
+  attempts therefore give an interval no narrower than the equivalent
+  single-attempt run.
+- **`stats/study_compare.py` needs no change.** It already pairs on
+  `sample_id` and collapses attempts into one per-instance outcome (and
+  per-instance resource sums) before bootstrapping, so its resampling unit is
+  already the cluster.
+
+Validation: `tests/unit/stats/test_compare.py` pins the width inequality for
+`attempts = 3` versus `attempts = 1` on perfectly correlated attempts, and that
+the cluster means reduce to the single-attempt draws; the existing seeded
+single-attempt tests are unmodified.

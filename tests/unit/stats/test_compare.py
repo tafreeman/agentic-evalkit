@@ -628,3 +628,54 @@ def test_compare_runs_requires_keyword_arguments_for_bootstrap_and_seed() -> Non
     signature = inspect.signature(compare_runs)
     assert signature.parameters["bootstrap_samples"].kind == inspect.Parameter.KEYWORD_ONLY
     assert signature.parameters["seed"].kind == inspect.Parameter.KEYWORD_ONLY
+
+
+# --- Cluster bootstrap for repeated attempts (ADR-0016 addendum) -------------
+
+
+def _correlated_runs(attempts: int, n: int = 12) -> tuple[EvalRunResult, EvalRunResult]:
+    """Left passes every attempt; right's attempts all agree within a sample.
+
+    Right passes sample ``i`` on every attempt when ``i`` is even and fails
+    every attempt otherwise, so the attempts of one sample are perfectly
+    correlated.
+    """
+    left = tuple(
+        _sample_result(f"s{i:02d}", attempt=a, passed=True)
+        for i in range(n)
+        for a in range(1, attempts + 1)
+    )
+    right = tuple(
+        _sample_result(f"s{i:02d}", attempt=a, passed=(i % 2 == 0))
+        for i in range(n)
+        for a in range(1, attempts + 1)
+    )
+    return (
+        _run(run_id="left", attempts=attempts, samples=left),
+        _run(run_id="right", attempts=attempts, samples=right),
+    )
+
+
+def test_perfectly_correlated_attempts_do_not_narrow_the_interval() -> None:
+    one_left, one_right = _correlated_runs(attempts=1)
+    three_left, three_right = _correlated_runs(attempts=3)
+    single = compare_runs(one_left, one_right, bootstrap_samples=2000, seed=5)
+    triple = compare_runs(three_left, three_right, bootstrap_samples=2000, seed=5)
+    assert triple.paired_count == 3 * single.paired_count
+    assert triple.estimate == single.estimate
+    single_width = single.upper_percentile - single.lower_percentile
+    triple_width = triple.upper_percentile - triple.lower_percentile
+    assert triple_width >= single_width
+
+
+def test_cluster_bootstrap_matches_single_attempt_when_clusters_are_identical() -> None:
+    # Cluster means of perfectly correlated attempts equal the attempts=1
+    # deltas, so the seeded draws -- and therefore the interval -- are identical.
+    one_left, one_right = _correlated_runs(attempts=1)
+    three_left, three_right = _correlated_runs(attempts=3)
+    single = compare_runs(one_left, one_right, bootstrap_samples=500, seed=9)
+    triple = compare_runs(three_left, three_right, bootstrap_samples=500, seed=9)
+    assert (triple.lower_percentile, triple.upper_percentile) == (
+        single.lower_percentile,
+        single.upper_percentile,
+    )
