@@ -1,0 +1,55 @@
+name: Audit
+
+# pip-audit's verdict changes when an advisory is published against an existing
+# dependency, not when a PR's diff changes, so as a gate on every PR it
+# redlined unrelated PRs the day an advisory dropped. It now runs on PRs that
+# change the dependency set, on every push to main, and weekly. It is not a
+# required check, so a workflow-level `paths:` filter is safe here (it would
+# not be in ci.yml, whose matrix jobs are required).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "uv.lock"
+      - "pyproject.toml"
+      - ".github/workflows/audit.yml"
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: audit (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    # pip-audit evaluates each requirement's environment marker against the
+    # interpreter it runs on and skips non-matching entries, so one run misses
+    # platform- and version-specific packages. Audit the supported matrix.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # requirements-audit.txt is generated here and never committed: this
+      # export of uv.lock is the only copy pip-audit reads, so a tracked one
+      # would be a second rendering of the lock that nothing keeps in sync.
+      - name: Export locked dependencies
+        run: uv export --locked --all-groups --all-extras --no-emit-project --format requirements.txt -o requirements-audit.txt
+
+      - name: pip-audit
+        run: uvx --python ${{ matrix.python-version }} pip-audit==2.10.1 -r requirements-audit.txt --disable-pip
