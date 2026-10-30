@@ -679,3 +679,47 @@ def test_cluster_bootstrap_matches_single_attempt_when_clusters_are_identical() 
         single.lower_percentile,
         single.upper_percentile,
     )
+
+
+def test_uneven_clusters_interval_targets_the_pooled_estimate() -> None:
+    # One sample with many paired attempts that all favour left, plus many
+    # single-attempt samples that favour right. ``estimate`` is the pooled
+    # attempt-level mean; resampling equally weighted cluster means would
+    # put the whole interval below zero (excluding the estimate). Resampling
+    # whole clusters and recomputing the pooled mean keeps them aligned.
+    heavy = 40
+    left = tuple(
+        _sample_result("s000", attempt=a, passed=True) for a in range(1, heavy + 1)
+    ) + tuple(_sample_result(f"s{i:03d}", attempt=1, passed=False) for i in range(1, 40))
+    right = tuple(
+        _sample_result("s000", attempt=a, passed=False) for a in range(1, heavy + 1)
+    ) + tuple(_sample_result(f"s{i:03d}", attempt=1, passed=True) for i in range(1, 40))
+    result = compare_runs(
+        _run(run_id="left", attempts=heavy, samples=left),
+        _run(run_id="right", attempts=heavy, samples=right),
+        bootstrap_samples=2000,
+        seed=5,
+    )
+    assert result.paired_count == heavy + 39
+    assert result.sample_count == 40
+    assert result.lower_percentile <= result.estimate <= result.upper_percentile
+
+
+def test_single_sample_with_mixed_attempts_has_a_nonzero_interval() -> None:
+    # One sample, mixed attempt outcomes: there is no between-sample variation
+    # to resample, so the attempt-level bootstrap is used instead of a
+    # zero-width interval around a single cluster mean.
+    outcomes = (True, False, True, True)
+    left = tuple(_sample_result("only", attempt=a, passed=True) for a in range(1, 5))
+    right = tuple(
+        _sample_result("only", attempt=a, passed=p) for a, p in enumerate(outcomes, start=1)
+    )
+    result = compare_runs(
+        _run(run_id="left", attempts=4, samples=left),
+        _run(run_id="right", attempts=4, samples=right),
+        bootstrap_samples=500,
+        seed=3,
+    )
+    assert result.sample_count == 1
+    assert result.upper_percentile > result.lower_percentile
+    assert result.lower_percentile <= result.estimate <= result.upper_percentile
