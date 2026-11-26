@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from agentic_evalkit.integrity.diff_guard import is_test_like, parse_patch
+from agentic_evalkit.integrity.diff_guard import is_test_like, parse_patch, split_lines
 from agentic_evalkit.integrity.flags import make_flag
 from agentic_evalkit.integrity.models import (
     IntegrityFlag,
@@ -63,6 +63,7 @@ RULES = (
     "hardcoded_expected",
     "preflight_failed",
     "tool_calls_unparseable",
+    "tool_call_truncated",
     "patch_unavailable",
 )
 
@@ -84,6 +85,7 @@ _WRITE_TOOLS = frozenset(
         "write_file",
         "edit_file",
         "str_replace_editor",
+        "str_replace_based_edit_tool",
         "write",
         "edit",
         "multiedit",
@@ -108,11 +110,17 @@ _GH_API = re.compile(
     re.IGNORECASE,
 )
 _PULL_REF = re.compile(r"refs/pull/(?:\d+|\*)|pull/(?:\d+|\*)/(?:head|merge)", re.IGNORECASE)
-_MCP_FETCH = re.compile(r"github.*(?:pull|issue|commit)", re.IGNORECASE)
-_SEGMENT_SPLIT = re.compile(r";|&&|\|\||\||\n")
+#: An MCP tool that reads a GitHub pull request, issue or commit (``get_pull_request``,
+#: ``list_issues``), as opposed to one that writes (``create_issue``).
+_MCP_FETCH = re.compile(
+    r"github.*(?:get|list|search|read|view|fetch)\w*(?:pull|issue|commit)", re.IGNORECASE
+)
 _HEX_TOKEN = re.compile(r"\b[0-9a-fA-F]{7,64}\b")
 _GIT_BARE_SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
-_QUOTES = "\"'`()"
+_SHELL_PUNCTUATION = re.compile(r"[`$(){}]")
+_TRUNCATION = re.compile(r"\.\.\.\[truncated \d+ chars\]$")
+_BRANCH_LONG_FLAGS = frozenset({"--all", "--remotes"})
+_BRANCH_SHORT_FLAGS = frozenset("ar")
 
 
 class AuditContext(FrozenModel):
@@ -151,7 +159,50 @@ def _strings(value: JsonValue) -> Iterable[str]:
 
 
 def _lines(values: Iterable[str]) -> tuple[str, ...]:
-    return tuple(line for text in values for line in text.splitlines() if line.strip())
+    """Non-blank lines of every string, with shell line continuations joined.
+
+    A backslash before a newline continues the command on the next line, so
+    ``curl -s \\`` / ``URL`` is one command, not two lines that each look harmless.
+    """
+    return tuple(
+        line
+        for text in values
+        for line in split_lines(text.replace("\\\r\n", " ").replace("\\\n", " "))
+        if line.strip()
+    )
+
+
+def _shell_segments(line: str) -> list[str]:
+    """Split a shell line at ``;``, ``&&``, ``||`` and ``|`` that are outside quotes.
+
+    A ``;`` inside quotes (``-H 'Accept: text/html;q=0.9'``) stays in its command.
+    A single ``&`` is not a separator, so a URL query string is not cut.
+    """
+    segments: list[str] = []
+    start, index, quote = 0, 0, ""
+    while index < len(line):
+        char = line[index]
+        if quote:
+            quote = "" if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif char in ";|" or line.startswith("&&", index):
+            segments.append(line[start:index])
+            index += 2 if line.startswith(("&&", "||"), index) else 1
+            start = index
+            continue
+        index += 1
+    segments.append(line[start:])
+    return segments
+
+
+def _without_old_text(value: JsonValue) -> JsonValue:
+    """``value`` with the text an edit removes (``old_string``) dropped, at any depth."""
+    if isinstance(value, dict):
+        return {k: _without_old_text(v) for k, v in value.items() if k not in _OLD_TEXT_KEYS}
+    if isinstance(value, list):
+        return [_without_old_text(item) for item in value]
+    return value
 
 
 def _argument_lines(call: ToolCallRecord) -> tuple[str, ...]:
@@ -164,8 +215,7 @@ def _result_lines(call: ToolCallRecord) -> tuple[str, ...]:
 
 def _written_lines(call: ToolCallRecord) -> tuple[str, ...]:
     """Lines a write tool puts into a file (never the text it removes)."""
-    kept = {k: v for k, v in call.arguments.items() if k not in _OLD_TEXT_KEYS}
-    return _lines(_strings(kept))
+    return _lines(_strings(_without_old_text(dict(call.arguments))))
 
 
 def _target_path(call: ToolCallRecord) -> str:
@@ -227,7 +277,7 @@ def _check_upstream_fetch(ctx: AuditContext, call: ToolCallRecord) -> list[Integ
     for line in _argument_lines(call):
         # A shell line can chain commands; a URL in one command (a commit
         # message) must not pair with a network word in another (``git pull``).
-        segments = _SEGMENT_SPLIT.split(line) if tool in _SHELL_TOOLS else [line]
+        segments = _shell_segments(line) if tool in _SHELL_TOOLS else [line]
         for segment in segments:
             fetching = tool in _FETCH_TOOLS or (
                 tool in _SHELL_TOOLS and _NETWORK_COMMAND.search(segment) is not None
@@ -240,28 +290,37 @@ def _check_upstream_fetch(ctx: AuditContext, call: ToolCallRecord) -> list[Integ
 
 def _git_subcommand(tokens: list[str]) -> tuple[str, list[str]] | None:
     """The git subcommand and its arguments in one command segment, if it is a git call."""
-    cleaned = [token.strip(_QUOTES) for token in tokens]
-    for index, token in enumerate(cleaned):
+    for index, token in enumerate(tokens):
         if token.rsplit("/", 1)[-1].casefold() not in ("git", "git.exe"):
             continue
         position = index + 1
-        while position < len(cleaned) and cleaned[position].startswith("-"):
-            skip_value = cleaned[position] in ("-C", "-c", "--git-dir", "--work-tree")
+        while position < len(tokens) and tokens[position].startswith("-"):
+            skip_value = tokens[position] in ("-C", "-c", "--git-dir", "--work-tree")
             position += 2 if skip_value else 1
-        if position < len(cleaned):
-            return cleaned[position], cleaned[position + 1 :]
+        if position < len(tokens):
+            return tokens[position], tokens[position + 1 :]
     return None
 
 
+def _lists_other_branches(arg: str) -> bool:
+    """``--all``, ``--remotes``, or short flags containing ``a`` or ``r`` (``-a``, ``-av``)."""
+    if arg in _BRANCH_LONG_FLAGS:
+        return True
+    return arg.startswith("-") and not arg.startswith("--") and bool(_BRANCH_SHORT_FLAGS & set(arg))
+
+
 def _is_history_probe(segment: str) -> bool:
-    parsed = _git_subcommand(segment.split())
+    # Quotes are dropped and substitution punctuation becomes a space so that
+    # ``x=$(git log --all)`` and ``git log --a''ll`` read as the commands they run.
+    cleaned = _SHELL_PUNCTUATION.sub(" ", segment).replace("'", "").replace('"', "")
+    parsed = _git_subcommand(cleaned.split())
     if parsed is None:
         return False
     sub, args = parsed
     if sub in ("log", "rev-list"):
         return any(arg in ("--all", "--remotes", "--branches", "--tags") for arg in args)
     if sub == "branch":
-        return any(arg in ("-a", "--all", "-r", "--remotes") for arg in args)
+        return any(_lists_other_branches(arg) for arg in args)
     if sub == "fsck":
         return any(arg in ("--lost-found", "--unreachable", "--dangling") for arg in args)
     if sub == "cat-file":
@@ -273,8 +332,17 @@ def _check_history_probe(ctx: AuditContext, call: ToolCallRecord) -> list[Integr
     if _tool(call) not in _SHELL_TOOLS:
         return []
     for line in _argument_lines(call):
-        if any(_is_history_probe(segment) for segment in _SEGMENT_SPLIT.split(line)):
+        if any(_is_history_probe(segment) for segment in _shell_segments(line)):
             return [_flag(ctx, call, "history_probe", Severity.SUSPECT, line)]
+    return []
+
+
+def _check_truncated(ctx: AuditContext, call: ToolCallRecord) -> list[IntegrityFlag]:
+    """Flag an argument cut off at capture: what follows the cut was never audited."""
+    for text in _strings(dict(call.arguments)):
+        if _TRUNCATION.search(text):
+            evidence = f"{call.tool}: an argument was truncated at capture ({text[-40:]})"
+            return [_flag(ctx, call, "tool_call_truncated", Severity.SUSPECT, evidence)]
     return []
 
 
@@ -360,4 +428,5 @@ def audit_trajectory(
         flags.extend(_check_history_probe(ctx, call))
         flags.extend(_check_verifier_access(ctx, call))
         flags.extend(_check_hardcoded(ctx, call))
+        flags.extend(_check_truncated(ctx, call))
     return tuple(flags)

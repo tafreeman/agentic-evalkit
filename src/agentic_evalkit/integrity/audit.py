@@ -23,7 +23,7 @@ from pydantic import ValidationError
 
 from agentic_evalkit import __version__
 from agentic_evalkit.errors import ManifestValidationError
-from agentic_evalkit.integrity.diff_guard import guard_patch
+from agentic_evalkit.integrity.diff_guard import guard_patch, split_lines
 from agentic_evalkit.integrity.flags import make_flag, redact
 from agentic_evalkit.integrity.models import (
     CheckStatus,
@@ -229,7 +229,7 @@ def read_tool_calls(path: Path) -> tuple[ToolCallRecord, ...]:
     """
     records: list[ToolCallRecord] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = split_lines(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as error:
         raise ManifestValidationError(message=f"cannot read tool calls: {path.name}") from error
     for number, line in enumerate(lines, start=1):
