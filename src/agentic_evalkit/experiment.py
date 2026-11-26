@@ -50,12 +50,24 @@ class ExperimentArm(FrozenModel):
         return self
 
 
+class IntegrityConfig(FrozenModel):
+    """Run the integrity audit on every completed native arm after the arms finish.
+
+    ``context`` is an optional ``integrity_context.json`` (per-instance solution
+    SHAs, protected paths and restored paths), relative to the experiment file.
+    It is hashed into the run's input identity, so changing it means a new run.
+    """
+
+    context: str | None = None
+
+
 class ExperimentConfig(FrozenModel):
     name: str = Field(min_length=1)
     purpose: Literal["regression", "capability"] = "regression"
     benchmark: BenchmarkPolicy
     arms: tuple[ExperimentArm, ...] = Field(min_length=1)
     provenance_files: tuple[str, ...] = ()
+    integrity: IntegrityConfig | None = None
 
     @model_validator(mode="after")
     def _validate_experiment(self) -> ExperimentConfig:
@@ -110,7 +122,10 @@ def load_experiment(path: Path) -> ExperimentConfig:
         raise ManifestValidationError(
             message="benchmark validity review is older than 90 days; review before running"
         )
-    for item in (*config.provenance_files, *config.benchmark.validation_evidence):
+    declared = (*config.provenance_files, *config.benchmark.validation_evidence)
+    if config.integrity is not None and config.integrity.context is not None:
+        declared = (*declared, config.integrity.context)
+    for item in declared:
         if not (path.resolve().parent / item).is_file():
             raise ManifestValidationError(message=f"missing provenance or validation file: {item}")
     return config

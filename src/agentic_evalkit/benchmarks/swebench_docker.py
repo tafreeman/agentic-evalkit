@@ -91,6 +91,10 @@ PreflightProbe = Callable[[], "str | None"]
 #: returns its report, shaped like the official ``get_eval_report`` output
 #: for a single instance.
 Evaluator = Callable[[HarnessRequest], Mapping[str, JsonValue]]
+#: Reports the integrity pre-flight facts for one request (git-history, mount and
+#: egress checks, and what the instance's ``eval.sh`` resets). Its mapping is
+#: stamped into ``HarnessResult.evidence["integrity_preflight"]`` (ADR-0027).
+IntegrityProbe = Callable[[HarnessRequest], Mapping[str, JsonValue]]
 
 
 class SweBenchDockerHarnessExecutor:
@@ -109,6 +113,7 @@ class SweBenchDockerHarnessExecutor:
         evaluator: A function that runs the official harness for one
             request and returns its per-instance report. Defaults to the
             real subprocess call. Tests substitute a fake version of this.
+        integrity_probe: Optional pre-flight reporter; see :data:`IntegrityProbe`.
     """
 
     def __init__(
@@ -118,11 +123,13 @@ class SweBenchDockerHarnessExecutor:
         dataset_name: str = _DEFAULT_DATASET_NAME,
         preflight: PreflightProbe | None = None,
         evaluator: Evaluator | None = None,
+        integrity_probe: IntegrityProbe | None = None,
     ) -> None:
         self._install_hint = install_hint
         self._dataset_name = dataset_name
         self._preflight = preflight or _default_preflight
         self._evaluator = evaluator or self._run_official_harness
+        self._integrity_probe = integrity_probe
 
     async def execute(self, request: HarnessRequest) -> HarnessResult:
         # The default preflight check pings the Docker daemon, which is a
@@ -152,7 +159,19 @@ class SweBenchDockerHarnessExecutor:
                 message=f"harness execution failed for {request.sample_id!r}: {error}",
                 error={"type": type(error).__name__, "detail": str(error)},
             )
-        return _result_from_report(report, request)
+        result = _result_from_report(report, request)
+        if self._integrity_probe is None:
+            return result
+        # A probe that breaks must not change the verdict: the harness result
+        # stands, and the failure is recorded so the report shows pre-flight
+        # was not checked rather than silently clean.
+        try:
+            facts: Mapping[str, JsonValue] = await asyncio.to_thread(self._integrity_probe, request)
+        except Exception as error:
+            facts = {"error": type(error).__name__}
+        return result.model_copy(
+            update={"evidence": {**result.evidence, "integrity_preflight": dict(facts)}}
+        )
 
     def _run_official_harness(  # pragma: no cover - live Docker path, opt-in workflow only
         self, request: HarnessRequest

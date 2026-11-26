@@ -186,3 +186,40 @@ def test_docker_safe_run_id_strips_characters_docker_rejects() -> None:
 
 def test_docker_safe_run_id_preserves_a_clean_instance_id() -> None:
     assert docker_safe_run_id("astropy__astropy-1") == "agentic-evalkit-astropy__astropy-1"
+
+
+# --- integrity probe (ADR-0027) ---------------------------------------------
+
+_RESOLVED: dict[str, JsonValue] = {"instance_id": "org__repo-1", "resolved": True}
+
+
+@pytest.mark.asyncio
+async def test_integrity_probe_is_stamped_into_the_result_evidence() -> None:
+    executor = SweBenchDockerHarnessExecutor(
+        preflight=lambda: None,
+        evaluator=lambda request: _RESOLVED,
+        integrity_probe=lambda request: {"failed": ["egress"]},
+    )
+    result = await executor.execute(_harness_request())
+    assert result.resolved is True
+    assert result.evidence["integrity_preflight"] == {"failed": ["egress"]}
+
+
+@pytest.mark.asyncio
+async def test_a_failing_probe_never_changes_the_verdict() -> None:
+    def probe(request: HarnessRequest) -> dict[str, JsonValue]:
+        raise RuntimeError("secret detail must not be copied")
+
+    executor = SweBenchDockerHarnessExecutor(
+        preflight=lambda: None, evaluator=lambda request: _RESOLVED, integrity_probe=probe
+    )
+    result = await executor.execute(_harness_request())
+    assert result.status is HarnessStatus.COMPLETED
+    assert result.resolved is True
+    assert result.evidence["integrity_preflight"] == {"error": "RuntimeError"}
+
+
+@pytest.mark.asyncio
+async def test_no_probe_leaves_evidence_untouched() -> None:
+    executor = SweBenchDockerHarnessExecutor(preflight=lambda: None, evaluator=lambda r: _RESOLVED)
+    assert "integrity_preflight" not in (await executor.execute(_harness_request())).evidence

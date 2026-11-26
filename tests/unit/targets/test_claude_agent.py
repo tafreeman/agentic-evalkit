@@ -16,6 +16,9 @@ from claude_agent_sdk import (
     RateLimitEvent,
     ResultMessage,
     TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
 from claude_agent_sdk.types import RateLimitInfo
 
@@ -457,3 +460,78 @@ def test_injected_query_fn_works_without_the_extra(
     """A caller supplying their own query_fn does not need the SDK installed."""
     monkeypatch.setattr("agentic_evalkit.targets.claude_agent._SDK_AVAILABLE", False)
     assert ClaudeAgentTarget(name="claude", query_fn=replay()) is not None
+
+
+# ---------------------------------------------------------------------------
+# Tool-call capture for the integrity harness (ADR-0027)
+# ---------------------------------------------------------------------------
+
+
+def tool_use(call_id: str, name: str, **arguments: Any) -> AssistantMessage:
+    return AssistantMessage(
+        content=[ToolUseBlock(id=call_id, name=name, input=arguments)],
+        model="claude-opus-5",
+    )
+
+
+def tool_result(call_id: str, content: Any, *, is_error: bool = False) -> UserMessage:
+    return UserMessage(
+        content=[ToolResultBlock(tool_use_id=call_id, content=content, is_error=is_error)]
+    )
+
+
+async def test_tool_calls_are_captured_with_arguments_and_results() -> None:
+    tgt = target(
+        replay(
+            tool_use("t1", "Bash", command="git log --oneline -3"),
+            tool_result("t1", "abc fix def base"),
+            tool_use("t2", "Read", file_path="a.py"),
+            tool_result("t2", [{"type": "text", "text": "print(1)"}]),
+            assistant("done"),
+            result(),
+        )
+    )
+    outcome = await run(tgt)
+    assert [c["tool"] for c in outcome.tool_calls] == ["Bash", "Read"]
+    assert outcome.tool_calls[0] == {
+        "call_id": "t1",
+        "tool": "Bash",
+        "arguments": {"command": "git log --oneline -3"},
+        "result": "abc fix def base",
+    }
+    assert outcome.tool_calls[1]["result"] == [{"type": "text", "text": "print(1)"}]
+    assert outcome.output == {"output": "done"}
+
+
+async def test_a_tool_call_without_a_result_is_still_recorded() -> None:
+    outcome = await run(target(replay(tool_use("t1", "Bash", command="ls"), result())))
+    assert outcome.tool_calls == (
+        {"call_id": "t1", "tool": "Bash", "arguments": {"command": "ls"}},
+    )
+
+
+async def test_a_result_for_an_unknown_call_is_ignored() -> None:
+    outcome = await run(target(replay(tool_result("ghost", "x"), assistant("ok"), result())))
+    assert outcome.tool_calls == ()
+
+
+async def test_a_run_with_no_tools_has_no_tool_calls() -> None:
+    assert (await run(target(replay(assistant("4"), result())))).tool_calls == ()
+
+
+async def test_oversized_tool_results_and_arguments_are_capped() -> None:
+    big_result = "x" * 20_000
+    big_argument = "y" * 60_000
+    tgt = target(
+        replay(
+            tool_use("t1", "Write", file_path="a.py", content=big_argument),
+            tool_result("t1", big_result),
+            result(),
+        )
+    )
+    outcome = await run(tgt)
+    recorded = outcome.tool_calls[0]
+    assert len(recorded["result"]) < 9_000
+    assert recorded["result"].endswith("...[truncated 12000 chars]")
+    assert len(recorded["arguments"]["content"]) < 51_000
+    assert "truncated 10000 chars" in recorded["arguments"]["content"]

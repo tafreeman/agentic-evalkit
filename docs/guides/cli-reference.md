@@ -32,6 +32,7 @@ version.
 | `run` | Execute a manifest and write canonical JSON. |
 | `report` | Regenerate JSONL, Markdown, or HTML from canonical JSON. |
 | `compare` | Compare compatible runs with a paired bootstrap interval. |
+| `integrity` | Audit a finished run for known-fix lookups, test edits, and grader exploits. |
 
 ## Global conventions
 
@@ -284,6 +285,18 @@ to 1,000.
 The runs must agree on dataset identity and revision, adapter, grader, target,
 and sampling policy. An incompatibility lists every mismatch and exits `2`
 instead of producing a misleading comparison.
+
+## Audit a run for integrity
+
+```bash
+agentic-evalkit integrity runs/swe-001 [--context integrity_context.json]
+```
+
+`integrity` reads the run's canonical report, plus `tool_calls.jsonl` and
+`integrity_context.json` when present, and writes `integrity_report.json` with
+`raw_pass_rate`, `clean_pass_rate`, and the flags behind each instance. It never
+calls a target or changes the run's grades. A `--context` file that does not
+exist is an error. See [Integrity audit](integrity.md).
 
 ## Exit codes
 
