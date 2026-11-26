@@ -429,3 +429,82 @@ class TestRcpsCoverage:
             if self.TRUE_RISK[threshold] > alpha:
                 violation += probability
         assert 0.1 < violation <= float(delta)
+
+
+class TestStatisticsMustFollowFromTheRecordedRisk:
+    """A certificate's bound must be the one its own empirical risk implies."""
+
+    @staticmethod
+    def _rejects(base: ThresholdCertificate, **changes: object) -> None:
+        with pytest.raises(ValidationError):
+            ThresholdCertificate.model_validate({**base.model_dump(), **changes})
+
+    def test_crc_inflated_risk_must_equal_the_recomputed_value(self) -> None:
+        crc = calibrate_score_threshold(_clean(30), alpha=0.1)
+        everything_lost = {"numerator": 1, "denominator": 1}
+        # The reported example: all 30 items lost, yet a tiny inflated risk is claimed.
+        self._rejects(
+            crc,
+            empirical_risk=everything_lost,
+            inflated_empirical_risk={"numerator": 1, "denominator": 31},
+        )
+        # A value that is merely different, and still within the budget, is no better.
+        self._rejects(crc, inflated_empirical_risk={"numerator": 1, "denominator": 20})
+
+    def test_rcps_tail_must_equal_the_recomputed_binomial_tail(self) -> None:
+        rcps = calibrate_score_threshold(_clean(80), alpha=0.05, mode=RCPS, delta=0.05)
+        self._rejects(rcps, binomial_tail={"numerator": 1, "denominator": 10**9})
+        self._rejects(rcps, binomial_tail={"numerator": -1, "denominator": 2})
+        # Half an error over 80 items is not a count of errors.
+        self._rejects(rcps, empirical_risk={"numerator": 1, "denominator": 160})
+
+    def test_empirical_risk_cannot_exceed_what_the_accepted_items_could_lose(self) -> None:
+        crc = calibrate_score_threshold(_clean(30), alpha=0.1)
+        self._rejects(
+            crc,
+            accepted_count=1,
+            empirical_risk={"numerator": 1, "denominator": 2},
+            inflated_empirical_risk={"numerator": 16, "denominator": 31},
+        )
+
+    def test_rcps_validation_does_not_recompute_past_the_exact_arithmetic_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rcps = calibrate_score_threshold(_clean(80), alpha=0.05, mode=RCPS, delta=0.05)
+        monkeypatch.setattr(conformal_module, "MAX_EXACT_SAMPLES", 10)
+        self._rejects(rcps)
+
+    def test_honest_certificates_survive_revalidation(self) -> None:
+        for data, kwargs in (
+            (_clean(30), {"alpha": 0.1}),
+            (_obs(*((i / 100, float(i == 85)) for i in range(100))), {"alpha": 0.2}),
+            (
+                _obs(*((i / 100, float(i == 85)) for i in range(100))),
+                {
+                    "alpha": 0.05,
+                    "mode": RCPS,
+                    "delta": 0.05,
+                },
+            ),
+        ):
+            cert = calibrate_score_threshold(data, **kwargs)  # type: ignore[arg-type]
+            assert cert.authority is AuthorityLevel.GATING
+            assert ThresholdCertificate.model_validate(cert.model_dump()) == cert
+
+
+class TestLargeExactValuesRoundTripThroughJson:
+    def test_a_five_thousand_item_rcps_certificate_round_trips(self) -> None:
+        cert = calibrate_score_threshold(_clean(5000), alpha=0.05, mode=RCPS, delta=0.05)
+        assert cert.binomial_tail is not None
+        assert cert.binomial_tail.denominator > 2**64  # beyond what a JSON number can hold
+        restored = ThresholdCertificate.model_validate_json(cert.model_dump_json())
+        assert restored == cert
+
+    def test_big_and_negative_rationals_round_trip(self) -> None:
+        for value in (Fraction(-(7**5000), 5**5000), Fraction(5**6000, 7**6000), Fraction(-3, 7)):
+            wire = ExactRational.from_fraction(value).model_dump_json()
+            assert ExactRational.model_validate_json(wire).to_fraction() == value
+
+    def test_small_values_stay_plain_json_numbers(self) -> None:
+        wire = ExactRational.from_fraction(Fraction(3, 10)).model_dump_json()
+        assert wire == '{"schema_version":"1","numerator":3,"denominator":10}'

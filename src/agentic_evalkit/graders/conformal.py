@@ -43,7 +43,7 @@ from collections.abc import Sequence
 from enum import StrEnum
 from fractions import Fraction
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_serializer, field_validator, model_validator
 
 from agentic_evalkit.graders.calibration import AuthorityLevel
 from agentic_evalkit.models.base import FrozenModel
@@ -55,6 +55,29 @@ from agentic_evalkit.models.base import FrozenModel
 MAX_EXACT_SAMPLES = 200_000
 
 Rational = int | float | Fraction
+
+
+# JSON numbers beyond 64 bits do not survive a parse (and Python refuses to turn
+# an int past ~4300 digits into decimal text), so exact values that large travel
+# as hexadecimal strings. Hex is a power-of-two base, which Python converts
+# without that digit limit. Small values stay plain JSON numbers.
+_JSON_INT_LIMIT = 2**63
+
+
+def _encode_big_int(value: int) -> int | str:
+    if -_JSON_INT_LIMIT < value < _JSON_INT_LIMIT:
+        return value
+    return hex(value)
+
+
+def _decode_big_int(value: object) -> object:
+    if isinstance(value, str):
+        negative = value.startswith("-")
+        digits = value[1:] if negative else value
+        if digits.lower().startswith("0x"):
+            parsed = int(digits, 16)
+            return -parsed if negative else parsed
+    return value
 
 
 class ConformalMode(StrEnum):
@@ -74,6 +97,15 @@ class ExactRational(FrozenModel):
 
     numerator: int
     denominator: int = Field(ge=1)
+
+    @field_validator("numerator", "denominator", mode="before")
+    @classmethod
+    def _read_big_int(cls, value: object) -> object:
+        return _decode_big_int(value)
+
+    @field_serializer("numerator", "denominator", when_used="json")
+    def _write_big_int(self, value: int) -> int | str:
+        return _encode_big_int(value)
 
     @model_validator(mode="after")
     def _is_reduced(self) -> "ExactRational":
@@ -197,18 +229,40 @@ class ThresholdCertificate(FrozenModel):
             raise ValueError("accepted_count must be between 1 and n_samples")
         if self.empirical_risk is None or not 0 <= self.empirical_risk.to_fraction() <= 1:
             raise ValueError("a gating certificate must carry an empirical risk in [0, 1]")
+        # Every item loses at most 1, so the accepted items cannot lose more than they number.
+        loss_sum = self.empirical_risk.to_fraction() * self.n_samples
+        if loss_sum > self.accepted_count:
+            raise ValueError("empirical_risk is larger than the accepted items could lose")
         if self.mode is ConformalMode.CRC_EXPECTATION:
-            inflated = self.inflated_empirical_risk
-            if inflated is None or self.binomial_tail is not None:
-                raise ValueError("a crc_expectation certificate carries the inflated risk only")
-            if inflated.to_fraction() > self.alpha.to_fraction():
-                raise ValueError("inflated_empirical_risk exceeds alpha")
+            self._check_crc_statistic(loss_sum)
         else:
-            tail = self.binomial_tail
-            if tail is None or self.inflated_empirical_risk is not None or self.delta is None:
-                raise ValueError("an rcps_high_prob certificate carries the binomial tail only")
-            if tail.to_fraction() > self.delta.to_fraction():
-                raise ValueError("binomial_tail exceeds delta")
+            self._check_rcps_statistic(loss_sum)
+
+    def _check_crc_statistic(self, loss_sum: Fraction) -> None:
+        inflated = self.inflated_empirical_risk
+        if inflated is None or self.binomial_tail is not None:
+            raise ValueError("a crc_expectation certificate carries the inflated risk only")
+        if inflated.to_fraction() != (loss_sum + 1) / (self.n_samples + 1):
+            raise ValueError("inflated_empirical_risk does not follow from empirical_risk")
+        if inflated.to_fraction() > self.alpha.to_fraction():
+            raise ValueError("inflated_empirical_risk exceeds alpha")
+
+    def _check_rcps_statistic(self, loss_sum: Fraction) -> None:
+        tail = self.binomial_tail
+        if tail is None or self.inflated_empirical_risk is not None or self.delta is None:
+            raise ValueError("an rcps_high_prob certificate carries the binomial tail only")
+        if loss_sum.denominator != 1:
+            raise ValueError("an rcps_high_prob empirical risk must be a whole number of errors")
+        if self.n_samples > MAX_EXACT_SAMPLES:
+            raise ValueError(
+                f"{self.n_samples} calibration items is above the exact-arithmetic limit "
+                f"of {MAX_EXACT_SAMPLES} for rcps_high_prob"
+            )
+        expected = _BinomialTail(self.n_samples, self.alpha.to_fraction()).at_most(int(loss_sum))
+        if tail.to_fraction() != expected:
+            raise ValueError("binomial_tail does not follow from empirical_risk and alpha")
+        if tail.to_fraction() > self.delta.to_fraction():
+            raise ValueError("binomial_tail exceeds delta")
 
     def permits(self, score: float) -> bool:
         """Say whether ``score`` is on the accepted side of a certified threshold.
@@ -347,8 +401,7 @@ class _BinomialTail:
         self.numerator: int = self._term
         self._k = 0
 
-    def clears(self, k: int, delta: Fraction) -> bool:
-        """Say whether ``P(Bin(n, alpha) <= k) <= delta``; ``k`` must not decrease."""
+    def _advance(self, k: int) -> None:
         target = min(k, self._n)
         if target < self._k:
             raise ValueError("_BinomialTail must be queried with non-decreasing k")
@@ -356,7 +409,16 @@ class _BinomialTail:
             self._term = self._term * (self._n - self._k) * self._a // ((self._k + 1) * self._c)
             self.numerator += self._term
             self._k += 1
+
+    def clears(self, k: int, delta: Fraction) -> bool:
+        """Say whether ``P(Bin(n, alpha) <= k) <= delta``; ``k`` must not decrease."""
+        self._advance(k)
         return self.numerator * delta.denominator <= delta.numerator * self.denominator
+
+    def at_most(self, k: int) -> Fraction:
+        """Return ``P(Bin(n, alpha) <= k)`` exactly; ``k`` must not decrease."""
+        self._advance(k)
+        return Fraction(self.numerator, self.denominator)
 
 
 def calibrate_score_threshold(

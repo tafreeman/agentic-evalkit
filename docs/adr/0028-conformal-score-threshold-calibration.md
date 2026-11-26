@@ -56,8 +56,11 @@ grader's gate.
   `min_calibration_samples` returns the fewest items for which any certificate
   can exist. `ScoreObservation`, `ExactRational` and `ThresholdCertificate` are
   `FrozenModel`s (`frozen=True`, `extra="forbid"`, `schema_version="1"`), with
-  `StrEnum` modes. Nothing is re-exported from `agentic_evalkit.graders`; the
-  module is imported by name.
+  `StrEnum` modes. `ExactRational` writes integers beyond 64 bits as hexadecimal
+  strings in JSON, because a JSON number that large does not survive a parse and
+  Python will not render an integer past about 4300 digits as decimal text;
+  small values stay plain numbers. Nothing is re-exported from
+  `agentic_evalkit.graders`; the module is imported by name.
 - **Two modes, named for what they guarantee.** `CRC_EXPECTATION` keeps
   `(sum of accepted losses + 1) / (n + 1) <= alpha`. `RCPS_HIGH_PROB` requires
   binary losses and keeps `P(Binomial(n, alpha) <= observed errors) <= delta`
@@ -77,7 +80,9 @@ grader's gate.
   observed threshold can be certified (accepting nothing always meets a budget
   but is not a threshold). Only `GATING` carries a threshold, `permits` fails
   closed for everything else and for non-finite scores, and the certificate's
-  validator rejects field combinations no calibration could produce.
+  validator rejects field combinations no calibration could produce, including
+  a reported statistic that does not equal the one recomputed exactly from the
+  recorded empirical risk, sample count and budget.
 - **Sweep.** Items are swept from the strictest threshold outward and tied
   scores are accepted or rejected as one bucket. The result is the loosest
   threshold whose statistic still clears the bar. The empirical loss and the
