@@ -47,6 +47,7 @@ __all__ = [
     "parse_patch",
 ]
 
+_LINE_BREAK = re.compile(r"\r?\n")
 _HUNK = re.compile(r"^@@ -\d+(?:,(?P<old>\d+))? \+\d+(?:,(?P<new>\d+))? @@")
 
 #: Files that change how every test is collected or run, wherever they sit.
@@ -73,7 +74,8 @@ class FileChange:
     old_path: str | None = None
     new_path: str | None = None
     added: list[str] = field(default_factory=list)
-    saw_new_header: bool = False
+    in_body: bool = False
+    expect_new: bool = False
 
     @property
     def is_new(self) -> bool:
@@ -144,6 +146,46 @@ def _header_path(rest: str, prefix: str) -> str | None:
     return None if path == "/dev/null" else _strip_prefix(path, prefix)
 
 
+def _is_hunk_content(lines: list[str], index: int) -> bool:
+    """Whether ``lines[index]`` can be a line of a hunk body.
+
+    Body lines start with a space, ``+``, ``-`` or a backslash (or are empty: some
+    tools strip the trailing space of a blank context line). Anything else, such
+    as ``diff --git``, ends the hunk. A ``---``/``+++`` pair followed by a hunk
+    header is the start of the next file, not removed and added text.
+    """
+    line = lines[index]
+    if line and line[0] not in " +-\\":
+        return False
+    return not (
+        line.startswith("--- ")
+        and index + 2 < len(lines)
+        and lines[index + 1].startswith("+++ ")
+        and _HUNK.match(lines[index + 2]) is not None
+    )
+
+
+def split_lines(text: str) -> list[str]:
+    """Split on ``\n`` or ``\r\n`` only.
+
+    ``str.splitlines`` also splits on form feed, ``\r`` and U+2028, which a patch
+    can carry inside one added line and which git does not treat as line breaks,
+    so splitting on them would shift hunk counts.
+    """
+    return _LINE_BREAK.split(text)
+
+
+def _file_header_follows(lines: list[str], index: int, *, strict: bool) -> bool:
+    """Whether the ``---`` line at ``index`` opens a file: a ``+++`` line follows it.
+
+    ``strict`` also requires a hunk header after that, for diffs where no
+    ``diff --git`` line introduced the file.
+    """
+    if index + 1 >= len(lines) or not lines[index + 1].startswith("+++ "):
+        return False
+    return not strict or (index + 2 < len(lines) and _HUNK.match(lines[index + 2]) is not None)
+
+
 def parse_patch(patch: str) -> tuple[FileChange, ...]:
     """Split a unified or git diff into per-file changes.
 
@@ -155,8 +197,9 @@ def parse_patch(patch: str) -> tuple[FileChange, ...]:
     changes: list[FileChange] = []
     current: FileChange | None = None
     old_left = new_left = 0
-    for line in patch.splitlines():
-        if old_left > 0 or new_left > 0:
+    lines = split_lines(patch)
+    for index, line in enumerate(lines):
+        if (old_left > 0 or new_left > 0) and _is_hunk_content(lines, index):
             if line.startswith("\\"):
                 continue
             if line.startswith("+"):
@@ -168,29 +211,41 @@ def parse_patch(patch: str) -> tuple[FileChange, ...]:
             else:
                 old_left, new_left = max(0, old_left - 1), max(0, new_left - 1)
             continue
+        # Outside a hunk, or a hunk that declared more lines than it has: a line that
+        # cannot be hunk content ends it, so an inflated count cannot hide a later file.
+        old_left = new_left = 0
+        expecting_new = current is not None and current.expect_new
+        if current is not None:
+            current.expect_new = False
+        in_header = current is not None and not current.in_body
         if line.startswith("diff --git "):
             old, new = _split_header(line[len("diff --git ") :])
             current = FileChange(old_path=old, new_path=new)
             changes.append(current)
-        elif line.startswith("--- "):
-            if current is None or current.saw_new_header:
+        elif line.startswith("--- ") and _file_header_follows(lines, index, strict=not in_header):
+            # In a git diff the ``---`` line belongs to the ``diff --git`` section above it;
+            # a plain diff (or a ``---`` after a hunk) starts a file only if a ``+++`` line and
+            # a hunk header follow, so stray text cannot invent or rename a file.
+            if current is None or current.in_body:
                 current = FileChange()
                 changes.append(current)
             current.old_path = _header_path(line[4:], "a/")
-        elif line.startswith("+++ ") and current is not None:
+            current.in_body = True
+            current.expect_new = True
+        elif line.startswith("+++ ") and expecting_new and current is not None:
             current.new_path = _header_path(line[4:], "b/")
-            current.saw_new_header = True
-        elif current is not None and line.startswith("rename from "):
+        elif in_header and current is not None and line.startswith("rename from "):
             current.old_path = _unquote(line[len("rename from ") :])
-        elif current is not None and line.startswith("rename to "):
+        elif in_header and current is not None and line.startswith("rename to "):
             current.new_path = _unquote(line[len("rename to ") :])
-        elif current is not None and line.startswith("new file mode"):
+        elif in_header and current is not None and line.startswith("new file mode"):
             current.old_path = None
-        elif current is not None and line.startswith("deleted file mode"):
+        elif in_header and current is not None and line.startswith("deleted file mode"):
             current.new_path = None
         else:
             hunk = _HUNK.match(line)
-            if hunk:
+            if hunk and current is not None:
+                current.in_body = True
                 old_left = int(hunk.group("old") or 1)
                 new_left = int(hunk.group("new") or 1)
     return tuple(changes)

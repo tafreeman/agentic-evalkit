@@ -738,3 +738,51 @@ def test_a_conftest_patch_is_an_exploit_under_the_new_tiers() -> None:
     assert [f.rule for f in guard_patch(instance_id="i", patch=CONFTEST_PATCH)] == [
         "graded_file_edited"
     ]
+
+
+# --- a malformed patch must not hide a file (second review) -------------------
+
+
+def test_an_inflated_hunk_count_cannot_swallow_the_next_file() -> None:
+    patch = (
+        "diff --git a/src/m.py b/src/m.py\n--- a/src/m.py\n+++ b/src/m.py\n"
+        "@@ -1,1 +1,50 @@\n"
+        "-old\n+new\n"
+        "diff --git a/tests/validators/tests.py b/tests/validators/tests.py\n"
+        "--- a/tests/validators/tests.py\n+++ b/tests/validators/tests.py\n"
+        "@@ -1 +1 @@\n-assert False\n+assert True\n"
+    )
+    assert changed_paths(patch) == ("src/m.py", "tests/validators/tests.py")
+    flags = guard_patch(instance_id="i", patch=patch, graded_paths=["tests/validators/tests.py"])
+    assert [f.rule for f in flags] == ["graded_file_edited"]
+
+
+def test_an_inflated_count_in_a_plain_diff_cannot_swallow_the_next_header() -> None:
+    patch = (
+        "--- a/src/m.py\n+++ b/src/m.py\n@@ -1,1 +1,40 @@\n-old\n+new\n"
+        "--- a/tests/test_y.py\n+++ b/tests/test_y.py\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+    assert changed_paths(patch) == ("src/m.py", "tests/test_y.py")
+
+
+def test_blank_context_lines_and_no_newline_markers_stay_inside_the_hunk() -> None:
+    patch = (
+        "diff --git a/src/m.py b/src/m.py\n--- a/src/m.py\n+++ b/src/m.py\n"
+        "@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n\\ No newline at end of file\n"
+        "diff --git a/tests/test_z.py b/tests/test_z.py\n--- a/tests/test_z.py\n"
+        "+++ b/tests/test_z.py\n@@ -1 +1 @@\n-x\n+y\n"
+    )
+    assert changed_paths(patch) == ("src/m.py", "tests/test_z.py")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo $(git log --all)",
+        "GIT_DIR=x git log --all",
+        "command git log --all",
+        "(git log --all)",
+    ],
+)
+def test_history_probes_inside_substitutions_and_env_prefixes_are_found(command: str) -> None:
+    assert "history_probe" in _rules([shell(command)])
