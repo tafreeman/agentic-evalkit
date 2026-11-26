@@ -453,7 +453,7 @@ def test_a_hostile_repository_config_cannot_run_a_program(tmp_path: Path) -> Non
     "secret",
     [
         "ghp_" + "a1B2c3D4e5F6g7H8i9J0" * 2,
-        "AKIAABCDEFGHIJKLMNOP",
+        "AKIA" + "ABCDEFGHIJKLMNOP",
         "github_pat_" + "A" * 30,
         "sk-live_" + "Z" * 24,
     ],
