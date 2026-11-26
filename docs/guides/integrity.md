@@ -143,3 +143,14 @@ when integrity does not.
   `detection_metrics(report, cheating=...)` against a labelled control set before
   relying on a flag count.
 - v1 records and flags; it does not block a write while the agent runs.
+- Known gaps, by design of a rule-based v1: a SHA shorter than 7 characters is not matched;
+  a fetch of a later file from the upstream repository (a `raw.githubusercontent.com`
+  or `blob/main` URL, the compare view, the contents API) is not treated as a fetch of the
+  fix; a verifier path spelled relative to a `cd` is not resolved; and `--fail-on-flags` does
+  not exist yet, so `integrity` exits `0` even when it flags runs. Read `integrity_report.json`.
+- Tool results are capped at 8,000 characters and arguments at 50,000 when `ClaudeAgentTarget`
+  records them. A capped argument is flagged `tool_call_truncated`, because what follows the
+  cut was never audited.
+- `tool_calls.jsonl` and the calls on each execution are merged, so neither can hide the
+  other. The file's `run_id` is not compared with the report's, because the system that
+  writes the file keeps its own run identity.

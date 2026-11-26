@@ -28,6 +28,7 @@ flags back. Nothing here reads a repo or decides a ``GradeStatus``.
 from __future__ import annotations
 
 import fnmatch
+import posixpath
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -131,6 +132,9 @@ def _split_header(rest: str) -> tuple[str, str]:
         first, position = _read_quoted(rest, 0)
         second = rest[position:]
         return _strip_prefix(_unquote(first), "a/"), _strip_prefix(_unquote(second), "b/")
+    half, odd = divmod(len(rest) - 1, 2)  # "X X": a header made with --no-prefix
+    if odd == 0 and half > 0 and rest[half] == " " and rest[:half] == rest[half + 1 :]:
+        return rest[:half], rest[half + 1 :]
     same, remainder = divmod(len(rest) - 5, 2)  # "a/X b/X" with equal paths
     if remainder == 0 and same >= 0 and rest[2 + same : 3 + same] == " ":
         return rest[2 : 2 + same], rest[5 + same :]
@@ -260,10 +264,17 @@ def changed_paths(patch: str) -> tuple[str, ...]:
 
 
 def _norm(path: str) -> str:
-    normalized = path.replace("\\", "/")
-    while normalized.startswith("./"):
-        normalized = normalized[2:]
-    return normalized.lstrip("/")
+    """A repository-relative path with ``.``, ``..``, ``//`` and backslashes resolved.
+
+    ``src//b.py`` and ``src/b.py`` are one file to git, so they must be one here.
+    """
+    normalized = posixpath.normpath(path.replace("\\", "/")).lstrip("/")
+    return "" if normalized == "." else normalized
+
+
+def _is_restored(path: str, restored: set[str]) -> bool:
+    """Whether grading restores ``path``: listed itself, or inside a restored directory."""
+    return path in restored or any(path.startswith(entry + "/") for entry in restored if entry)
 
 
 def _basename(path: str) -> str:
@@ -344,7 +355,7 @@ def guard_patch(
         for path in change.paths():
             normalized = _norm(path)
             created = change.is_new and path == change.new_path
-            if normalized in restored:
+            if _is_restored(normalized, restored):
                 continue
             flag = _classify(instance_id, change, path, normalized, created, graded, prefixes)
             if flag is not None:
