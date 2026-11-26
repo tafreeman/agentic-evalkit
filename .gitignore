@@ -35,6 +35,9 @@ CLAUDE.md
 coverage  and quality reports/
 examples/http_agent/artifacts/
 examples/http_agent/*.json
+# Zipped copies of a generated report (the unpacked report under scripts/reports/ is
+# already tracked; its archive is a duplicate artifact, not repo content)
+scripts/reports/*.zip
 # Local eval-run artifacts at repo root (can contain prompts/tool args)
 agentic-evalkit-runs/
 # Secret-adjacent defensive patterns (none tracked today; belt-and-braces)
