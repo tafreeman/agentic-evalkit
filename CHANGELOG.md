@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `agentic_evalkit.graders.conformal` (ADR-0028): calibrates a score
+  threshold on held-out data with an exact finite-sample guarantee --
+  conformal risk control (expected loss) or a Clopper-Pearson-equivalent
+  high-probability bound for binary losses -- and returns a frozen
+  `ThresholdCertificate` that is `GATING`, `ADVISORY` (too little data) or
+  `UNAVAILABLE` (no observed threshold certifies). It is evidence for choosing a
+  threshold only; no grader imports it and it cannot open a hard gate.
 - Coding-eval integrity harness (ADR-0027): `agentic_evalkit.integrity` audits a
   finished run for known-fix lookups, unrestored test edits and grader exploits
   (pre-flight, diff guard, trajectory audit) and writes `integrity_report.json`
