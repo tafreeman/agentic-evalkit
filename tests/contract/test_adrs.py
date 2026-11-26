@@ -71,7 +71,11 @@ ADR_DIR = Path("docs/adr")
 #: reject one nobody had any way to prove; also records that a calibration
 #: too thin to gate is still written out rather than refused, and moves
 #: `judge_authority` into `graders` so a CLI command can reach it without
-#: crossing ADR-0022's outward-only boundary). Each prefix matches
+#: crossing ADR-0022's outward-only boundary), and 0027 (integrity
+#: harness boundary -- pure detectors that audit a finished run for
+#: known-fix lookups, test edits and grader exploits; a flagged run
+#: grades UNAVAILABLE, never FAIL, and is wired only through a hard
+#: gate). Each prefix matches
 #: exactly one file under docs/adr/.
 REQUIRED_ADR_PREFIXES = (
     "0001",
@@ -100,6 +104,7 @@ REQUIRED_ADR_PREFIXES = (
     "0024",
     "0025",
     "0026",
+    "0027",
 )
 
 #: The six section headings every ADR must contain beyond its "## Status"
@@ -260,6 +265,7 @@ NUMBER_WORDS = {
     "twenty-four": 24,
     "twenty-five": 25,
     "twenty-six": 26,
+    "twenty-seven": 27,
 }
 
 

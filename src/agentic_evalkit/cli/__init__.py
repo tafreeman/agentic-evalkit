@@ -8,6 +8,7 @@ from agentic_evalkit.cli import (  # noqa: F401
     datasets,
     doctor,
     experiments,
+    integrity,
     reports,
     runs,
 )

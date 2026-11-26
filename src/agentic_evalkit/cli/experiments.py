@@ -18,6 +18,7 @@ from agentic_evalkit.artifacts import ArtifactStore
 from agentic_evalkit.checkpoints import ProcessLock, RunCheckpoint, digest
 from agentic_evalkit.cli.app import ExitCode, app, console, run_cli_command, safe_text
 from agentic_evalkit.cli.datasets import build_catalog
+from agentic_evalkit.cli.integrity import REPORT_NAME, run_integrity_audit, summarize
 from agentic_evalkit.cli.reports import load_run_result
 from agentic_evalkit.cli.runs import (
     _RunnerCatalogAdapter,
@@ -70,6 +71,9 @@ def _input_identity(config: ExperimentConfig, path: Path) -> str:
     for item in (*config.provenance_files, *config.benchmark.validation_evidence):
         dependency = (base / item).resolve()
         files[str(dependency)] = file_digest(dependency)
+    if config.integrity is not None and config.integrity.context is not None:
+        context_path = (base / config.integrity.context).resolve()
+        files[str(context_path)] = file_digest(context_path)
     for arm in config.arms:
         if arm.manifest is not None:
             manifest_path = (base / arm.manifest).resolve()
@@ -198,6 +202,27 @@ def _verify_saved_report(directory: Path, arm: ArmState) -> Path:
     return path
 
 
+def _audit_arms(
+    config: ExperimentConfig, config_path: Path, directory: Path, state: ExperimentState
+) -> None:
+    """Write ``integrity_report.json`` for each completed native arm after the arms."""
+    integrity = config.integrity
+    if integrity is None:
+        return
+    context = (
+        (config_path.parent / integrity.context).resolve()
+        if integrity.context is not None
+        else None
+    )
+    for arm in state.arms:
+        if arm.status is not ArmStatus.COMPLETED or arm.report in (None, "helm-result.json"):
+            continue
+        report = _verify_saved_report(directory, arm)
+        arm_dir = directory / arm.name
+        audit = run_integrity_audit(report, arm_dir, context_path=context, default_context=False)
+        console.print(safe_text(f"{arm.name}: integrity {summarize(audit)}"), soft_wrap=True)
+
+
 async def _execute(
     config_path: Path, directory: Path, *, resume: bool, retry_interrupted: bool
 ) -> ExperimentState:
@@ -288,6 +313,8 @@ async def _execute(
                 raise
             state = _update_arm(state, current)
             _save_state(directory, state)
+        if config.integrity is not None:
+            _audit_arms(config, config_path, directory, state)
         return state
 
 
@@ -399,11 +426,33 @@ def compare_experiment(run_dir: Annotated[Path, typer.Argument()]) -> None:
                     message="use native HELM metrics; cross-backend comparison is not supported"
                 )
             results.append(load_run_result(path))
-        return compare_experiment_arms(
+        comparison = compare_experiment_arms(
             results[0], results[1], names=(state.arms[0].name, state.arms[1].name)
         )
+        integrity = _integrity_summaries(run_dir, state)
+        return {**comparison, "integrity": integrity} if integrity else comparison
 
     typer.echo(json.dumps(run_cli_command(action, debug=False), indent=2, allow_nan=False))
+
+
+def _integrity_summaries(run_dir: Path, state: ExperimentState) -> dict[str, object]:
+    """Raw vs clean pass rate per arm, for arms that have an ``integrity_report.json``."""
+    summaries: dict[str, object] = {}
+    for arm in state.arms:
+        path = run_dir / arm.name / REPORT_NAME
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ManifestValidationError(
+                message=f"unreadable {REPORT_NAME} for {arm.name}"
+            ) from error
+        summaries[arm.name] = {
+            key: data.get(key)
+            for key in ("total", "raw_passed", "clean_passed", "raw_pass_rate", "clean_pass_rate")
+        }
+    return summaries
 
 
 def _metric_rows(value: object, prefix: str = "") -> list[tuple[str, object]]:

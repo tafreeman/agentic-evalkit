@@ -79,6 +79,9 @@ try:
         RateLimitEvent,
         ResultMessage,
         TextBlock,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
         query,
     )
 
@@ -249,7 +252,7 @@ class ClaudeAgentTarget:
             )
 
         try:
-            text, result = await self._run(prompt, timeout_seconds=timeout_seconds)
+            text, result, tool_calls = await self._run(prompt, timeout_seconds=timeout_seconds)
         except TimeoutError:
             return self._error_result(
                 sample,
@@ -274,7 +277,12 @@ class ClaudeAgentTarget:
             )
 
         return self._completed_result(
-            sample, attempt=attempt, started_at=started_at, text=text, result=result
+            sample,
+            attempt=attempt,
+            started_at=started_at,
+            text=text,
+            result=result,
+            tool_calls=tool_calls,
         )
 
     # -- harness driving ---------------------------------------------------
@@ -303,8 +311,12 @@ class ClaudeAgentTarget:
 
     async def _run(
         self, prompt: str, *, timeout_seconds: float | None
-    ) -> tuple[str, "ResultMessage | None"]:
-        """Drive one harness run to completion, returning its text and result.
+    ) -> tuple[str, "ResultMessage | None", tuple[dict[str, "JsonValue"], ...]]:
+        """Drive one harness run to completion, returning its text, result and tool calls.
+
+        Tool calls are the integrity harness's input (ADR-0027): one record per
+        ``ToolUseBlock``, paired with its ``ToolResultBlock`` by call ID. Only
+        built-in tools the target was granted can appear here.
 
         No ``asyncio.timeout`` wrapper here: the runner already races every
         attempt against ``timeout_seconds`` and cancels it, and a second,
@@ -313,20 +325,33 @@ class ClaudeAgentTarget:
         """
         chunks: list[str] = []
         result: ResultMessage | None = None
+        calls: dict[str, dict[str, JsonValue]] = {}
 
         async for message in self._query(prompt=prompt, options=self._build_options()):
             if isinstance(message, RateLimitEvent):
                 _raise_for_rate_limit(message)
             elif isinstance(message, AssistantMessage):
                 _raise_for_assistant_error(message)
-                chunks.extend(
-                    block.text for block in message.content if isinstance(block, TextBlock)
-                )
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        chunks.append(block.text)
+                    elif isinstance(block, ToolUseBlock):
+                        calls[block.id] = {
+                            "call_id": block.id,
+                            "tool": block.name,
+                            "arguments": _cap(dict(block.input), _MAX_ARGUMENT_CHARS),
+                        }
+            elif isinstance(message, UserMessage) and isinstance(message.content, list):
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock) and block.tool_use_id in calls:
+                        calls[block.tool_use_id]["result"] = _cap(
+                            _jsonable(block.content), _MAX_RESULT_CHARS
+                        )
             elif isinstance(message, ResultMessage):
                 _raise_for_result(message)
                 result = message
 
-        return "".join(chunks), result
+        return "".join(chunks), result, tuple(calls.values())
 
     # -- result assembly ---------------------------------------------------
 
@@ -338,6 +363,7 @@ class ClaudeAgentTarget:
         started_at: datetime,
         text: str,
         result: "ResultMessage | None",
+        tool_calls: tuple[dict[str, "JsonValue"], ...] = (),
     ) -> NormalizedExecutionResult:
         finished_at = datetime.now(UTC)
         tokens_in, tokens_out = _usage_tokens(result)
@@ -364,6 +390,7 @@ class ClaudeAgentTarget:
             attempt=attempt,
             output={_OUTPUT_KEY: text},
             structured_output=structured,
+            tool_calls=tool_calls,
             trace_refs=trace_refs,
             latency_ms=(result.duration_ms if result is not None else None),
             input_tokens=tokens_in,
@@ -410,6 +437,37 @@ class ClaudeAgentTarget:
 # ---------------------------------------------------------------------------
 # Failure translation
 # ---------------------------------------------------------------------------
+
+
+#: Longest string kept in a recorded tool call. A result can be a whole file, and the
+#: canonical report keeps every call, so an uncapped record can dwarf the report.
+#: Arguments get more room because the detectors read the text an agent writes.
+_MAX_ARGUMENT_CHARS: Final[int] = 50_000
+_MAX_RESULT_CHARS: Final[int] = 8_000
+
+
+def _cap(value: "JsonValue", limit: int) -> "JsonValue":
+    """Truncate every string in ``value`` to ``limit`` characters, marking what was cut."""
+    if isinstance(value, str):
+        if len(value) <= limit:
+            return value
+        return f"{value[:limit]}...[truncated {len(value) - limit} chars]"
+    if isinstance(value, list):
+        return [_cap(item, limit) for item in value]
+    if isinstance(value, dict):
+        return {key: _cap(item, limit) for key, item in value.items()}
+    return value
+
+
+def _jsonable(value: object) -> "JsonValue":
+    """A tool result as plain JSON: strings and lists of text blocks pass through."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    return str(value)
 
 
 def _is_missing_cli(exc: BaseException) -> bool:

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Coding-eval integrity harness (ADR-0027): `agentic_evalkit.integrity` audits a
+  finished run for known-fix lookups, unrestored test edits and grader exploits
+  (pre-flight, diff guard, trajectory audit) and writes `integrity_report.json`
+  with `raw_pass_rate` and `clean_pass_rate`. `agentic-evalkit integrity <run_dir>`
+  runs it; an experiment may declare an `integrity:` block. A flagged run grades
+  `UNAVAILABLE` through `integrity_gated()`, never `FAIL` or `PASS`.
+  `ClaudeAgentTarget` now records its tool calls (strings capped so a file read
+  cannot bloat the report), and the tool-call record has a versioned schema at
+  `schemas/tool-call-record.v1.schema.json`. See the new Integrity audit guide.
 - Durable evaluation interfaces (ADR-0026): manifests can declare a typed
   nested field map or one explicit local component factory. Factory source,
   selected function, and literal config are fingerprinted into run provenance.
