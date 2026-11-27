@@ -36,7 +36,7 @@ __all__ = ["InputsFn", "IntegrityGrader", "swebench_inputs"]
 InputsFn = Callable[[EvalSample, NormalizedExecutionResult], InstanceInputs]
 
 #: Keys under which a target reports its final patch in ``NormalizedExecutionResult.output``.
-PATCH_KEYS = ("patch", "model_patch")
+PATCH_KEYS = ("model_patch", "patch")  # the executor grades model_patch first
 
 
 def _string_list(value: object) -> tuple[str, ...]:

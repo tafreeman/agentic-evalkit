@@ -231,7 +231,11 @@ class EvalScriptResets(FrozenModel):
 
 _CHECKOUT = re.compile(r"^\s*git\s+checkout\s+(?P<args>.+)$")
 _APPLY = re.compile(r"^\s*git\s+apply\b")
-_RUN_TESTS = re.compile(r"\b(?:pytest|py\.test|tox|unittest|runtests|nosetests)\b|^\s*python3?\s")
+#: Where the tests start running. A bare ``python`` line is not one: SWE-bench scripts run
+#: ``python -m pip install -e .`` before they reset the test files, and that is setup.
+_RUN_TESTS = re.compile(
+    r"\b(?:pytest|py\.test|tox|unittest|runtests|nosetests)\b|Start Test Output"
+)
 _HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?\s*$")
 
 
@@ -257,7 +261,7 @@ def parse_eval_script(script: str) -> EvalScriptResets:
     started = False
     applies = False
     in_heredoc: str | None = None
-    for raw in script.splitlines():
+    for raw in script.replace(chr(13), "").split(chr(10)):
         if in_heredoc is not None:
             in_heredoc = None if raw.strip() == in_heredoc else in_heredoc
             continue

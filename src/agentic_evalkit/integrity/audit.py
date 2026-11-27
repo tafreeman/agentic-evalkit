@@ -23,7 +23,7 @@ from pydantic import ValidationError
 
 from agentic_evalkit import __version__
 from agentic_evalkit.errors import ManifestValidationError
-from agentic_evalkit.integrity.diff_guard import guard_patch
+from agentic_evalkit.integrity.diff_guard import guard_patch, split_lines
 from agentic_evalkit.integrity.flags import make_flag, redact
 from agentic_evalkit.integrity.models import (
     CheckStatus,
@@ -229,7 +229,7 @@ def read_tool_calls(path: Path) -> tuple[ToolCallRecord, ...]:
     """
     records: list[ToolCallRecord] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = split_lines(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as error:
         raise ManifestValidationError(message=f"cannot read tool calls: {path.name}") from error
     for number, line in enumerate(lines, start=1):
@@ -391,16 +391,27 @@ def _resolve_execution(
 def _calls_for(
     item: SampleResult, by_sample: Mapping[str, Sequence[ToolCallRecord]], run_id: str
 ) -> tuple[tuple[ToolCallRecord, ...], str | None]:
-    recorded = by_sample.get(item.sample.sample_id)
-    if recorded is not None:
-        return tuple(recorded), None
+    """Tool calls from ``tool_calls.jsonl`` and from the execution itself, merged.
+
+    Neither source may shadow the other: a file with one benign record for a sample
+    must not hide the calls the target recorded on its own result. A call present in
+    both is counted once.
+    """
+    from_file = tuple(by_sample.get(item.sample.sample_id, ()))
+    problem: str | None = None
     try:
-        return (
-            coerce_calls(item.execution.tool_calls, run_id=run_id, sample_id=item.sample.sample_id),
-            None,
+        own = coerce_calls(
+            item.execution.tool_calls, run_id=run_id, sample_id=item.sample.sample_id
         )
     except ValidationError:
-        return (), f"{len(item.execution.tool_calls)} tool call(s) could not be parsed"
+        own = ()
+        problem = f"{len(item.execution.tool_calls)} tool call(s) could not be parsed"
+    seen = {_call_key(call) for call in from_file}
+    return (*from_file, *(call for call in own if _call_key(call) not in seen)), problem
+
+
+def _call_key(call: ToolCallRecord) -> tuple[str, str]:
+    return call.tool.casefold(), json.dumps(call.arguments, sort_keys=True, default=str)
 
 
 def _audit_sample(

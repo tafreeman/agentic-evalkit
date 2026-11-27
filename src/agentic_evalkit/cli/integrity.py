@@ -50,6 +50,9 @@ TOOL_CALLS_NAME = "tool_calls.jsonl"
 CONTEXT_NAME = "integrity_context.json"
 ARTIFACTS_DIR = "artifacts"
 _NOT_RUN_REPORTS = frozenset({REPORT_NAME, CONTEXT_NAME, "state.json", "helm-result.json"})
+#: Largest spilled output read back. ``ast.literal_eval`` needs memory many times the size of
+#: its input, so a hostile file is refused instead of parsed.
+_MAX_SPILLED_BYTES = 8 * 1024 * 1024
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -74,6 +77,9 @@ def _load_context(
     invalid = ManifestValidationError(message=f"invalid integrity context: {path.name}")
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
+        unknown = set(document) - {"instances", "preflight"}
+        if unknown:
+            raise invalid
         instances = document.get("instances") or {}
         checks = tuple(
             PreflightCheck.model_validate(item) for item in document.get("preflight") or []
@@ -108,6 +114,10 @@ def _artifact_loader(root: Path) -> OutputLoader | None:
         if not isinstance(digest, str) or not _DIGEST.match(digest):
             return None
         try:
+            if (
+                root / (digest.removeprefix("sha256:") + ".bin")
+            ).stat().st_size > _MAX_SPILLED_BYTES:
+                return None
             data = store.read(
                 ArtifactRef(digest=digest, media_type="application/json", byte_count=0)
             )
