@@ -15,7 +15,11 @@ import ast
 from pathlib import Path
 
 CONFORMAL_MODULE = "agentic_evalkit.graders.conformal"
-SOURCE_ROOT = Path("src/agentic_evalkit")
+SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "agentic_evalkit"
+
+
+def _names_conformal(module: str) -> bool:
+    return module == "conformal" or module.endswith(".conformal")
 
 
 def _imports_conformal(tree: ast.AST) -> bool:
@@ -24,14 +28,23 @@ def _imports_conformal(tree: ast.AST) -> bool:
             if any(alias.name == CONFORMAL_MODULE for alias in node.names):
                 return True
         elif isinstance(node, ast.ImportFrom):
-            if node.module == CONFORMAL_MODULE:
+            module = node.module or ""
+            if module == CONFORMAL_MODULE or (node.level > 0 and _names_conformal(module)):
                 return True
-            if node.module == "agentic_evalkit.graders" and any(
-                alias.name == "conformal" for alias in node.names
-            ):
+            # ``from agentic_evalkit.graders import conformal``, ``from . import
+            # conformal`` and ``from ..graders import judge, conformal``.
+            parent = module == "agentic_evalkit.graders" or (
+                node.level > 0 and (module == "" or module.split(".")[-1] == "graders")
+            )
+            if parent and any(alias.name == "conformal" for alias in node.names):
                 return True
-            if node.level > 0 and (node.module or "").split(".")[-1] == "conformal":
-                return True
+        # importlib.import_module / __import__ take the module as a string.
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and (node.value == CONFORMAL_MODULE or node.value.endswith(".graders.conformal"))
+        ):
+            return True
     return False
 
 
@@ -55,9 +68,24 @@ def test_the_scan_detects_an_import_when_there_is_one() -> None:
         f"from {CONFORMAL_MODULE} import calibrate_score_threshold",
         "from agentic_evalkit.graders import conformal",
         "from .conformal import ThresholdCertificate",
+        "from . import conformal",
+        "from . import judge, conformal",
+        "from ..graders import conformal",
+        "from ..graders.conformal import ThresholdCertificate",
+        f"importlib.import_module({CONFORMAL_MODULE!r})",
+        f"__import__({CONFORMAL_MODULE!r})",
     ):
         assert _imports_conformal(ast.parse(source)), source
-    assert not _imports_conformal(ast.parse("from agentic_evalkit.graders import judge"))
+    for clean in (
+        "from agentic_evalkit.graders import judge",
+        "from . import judge",
+        "from ..targets import conformal_helpers",
+    ):
+        assert not _imports_conformal(ast.parse(clean)), clean
+
+
+def test_the_scan_reads_the_package_wherever_pytest_starts() -> None:
+    assert (SOURCE_ROOT / "graders" / "conformal.py").is_file()
 
 
 def test_every_certificate_model_is_a_frozen_wire_model() -> None:

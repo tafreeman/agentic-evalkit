@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Integrity audit: `upstream_fetch` now flags a clone, fetch, `git remote add` or
+  archive download of the upstream repository (`exploit`) and a package-index
+  download or install of the instance's own package (`suspect`); a full-length SHA
+  matches a short solution SHA from the context.
+- Conformal calibration: `ThresholdCertificate` recomputes `min_required_samples`
+  from the budget, so a forged floor can no longer make a small calibration set
+  read as `UNAVAILABLE` (or a large one as `ADVISORY`). The ADR-0028 boundary test
+  now catches `from . import conformal`, `from ..graders import conformal`,
+  multi-name imports and `importlib` strings, and finds `src/` from the test file.
 - `compare_runs` no longer treats repeated attempts of one sample as
   independent: with `attempts > 1` it resamples whole `sample_id`s and
   recomputes the pooled mean per draw (cluster bootstrap on the same estimand

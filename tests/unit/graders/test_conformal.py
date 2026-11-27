@@ -314,6 +314,25 @@ class TestCertificateCannotBeForged:
         self._rejects(crc, inflated_empirical_risk={"numerator": 2, "denominator": 1})
         self._rejects(crc, binomial_tail=one_half)
 
+    def test_a_forged_floor_is_rejected(self) -> None:
+        # Review repro: 3 items at alpha 1/20 (real floor 19) validated as UNAVAILABLE,
+        # "enough data but nothing certifiable", once the stored floor was set to 3.
+        advisory = calibrate_score_threshold(_clean(3), alpha=0.05)
+        assert advisory.authority is AuthorityLevel.ADVISORY
+        self._rejects(advisory, authority=AuthorityLevel.UNAVAILABLE, min_required_samples=3)
+        crc = calibrate_score_threshold(_clean(30), alpha=0.1)
+        self._rejects(crc, min_required_samples=1)
+        rcps = calibrate_score_threshold(_clean(80), alpha=0.05, mode=RCPS, delta=0.05)
+        self._rejects(rcps, min_required_samples=1)
+
+    def test_real_certificates_round_trip_after_the_floor_check(self) -> None:
+        for cert in (
+            calibrate_score_threshold(_clean(3), alpha=0.05),
+            calibrate_score_threshold(_clean(30), alpha=0.1),
+            calibrate_score_threshold(_clean(80), alpha=0.05, mode=RCPS, delta=0.05),
+        ):
+            assert ThresholdCertificate.model_validate(cert.model_dump()) == cert
+
     def test_rcps_certificates_reject_inconsistent_evidence(self) -> None:
         rcps = calibrate_score_threshold(_clean(80), alpha=0.05, mode=RCPS, delta=0.05)
         assert rcps.authority is AuthorityLevel.GATING

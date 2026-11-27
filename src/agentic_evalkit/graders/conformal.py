@@ -212,6 +212,19 @@ class ThresholdCertificate(FrozenModel):
             raise ValueError("delta must be strictly between 0 and 1")
         if (self.mode is ConformalMode.RCPS_HIGH_PROB) != (self.delta is not None):
             raise ValueError("delta must be set exactly for the rcps_high_prob mode")
+        # The floor is a function of the budget alone, so recompute it rather than
+        # trust the stored value: a forged floor would let a tiny set claim it had
+        # enough data (unavailable) or a large one claim it had too little (advisory).
+        floor = min_calibration_samples(
+            self.alpha.to_fraction(),
+            mode=self.mode,
+            delta=None if self.delta is None else self.delta.to_fraction(),
+        )
+        if self.min_required_samples != floor:
+            raise ValueError(
+                f"min_required_samples is {self.min_required_samples}, but this budget "
+                f"needs {floor}"
+            )
         if self.authority is AuthorityLevel.GATING:
             self._check_gating()
         else:

@@ -4,7 +4,10 @@ Rules, each returning flags that quote the exact line that triggered them:
 
 - ``solution_sha``: the known fix's commit SHA appears in a call's arguments
   (``exploit``) or only in a result (``suspect``).
-- ``upstream_fetch``: a fetch of the upstream pull request, issue or commit.
+- ``upstream_fetch``: a fetch of the upstream pull request, issue or commit, or
+  a clone or fetch of the upstream repository itself (``exploit``), or a
+  package-index download or install of the instance's own package
+  (``suspect``: the released version may already hold the fix).
 - ``verifier_access``: a read of a verifier path (``suspect``) or a write to
   one (``exploit``).
 - ``hardcoded_expected``: a written non-test file contains an expected output
@@ -73,6 +76,9 @@ RULES = (
 MIN_EXPECTED_LITERAL = 8
 #: Shortest SHA prefix treated as a reference to the solution commit.
 MIN_SHA_PREFIX = 7
+#: Lengths of a full SHA-1 and SHA-256 object name. A token this long that starts
+#: with a short solution SHA from the context is that commit spelled in full.
+_FULL_SHA_LENGTHS = frozenset({40, 64})
 
 _SHELL_TOOLS = frozenset(
     {"shell_run", "bash", "shell", "run_command", "execute_bash", "powershell", "terminal"}
@@ -99,7 +105,20 @@ _OLD_TEXT_KEYS = frozenset({"old_string", "old_str", "old_source"})
 _NETWORK_COMMAND = re.compile(
     r"\b(?:curl|wget|gh|httpie|urlopen|urllib|requests|httpx|aiohttp|iwr|irm"
     r"|Invoke-WebRequest|Invoke-RestMethod"
-    r"|git\s+(?:fetch|pull|clone|ls-remote))\b",
+    r"|git\s+(?:fetch|pull|clone|ls-remote|remote\s+(?:add|set-url)|submodule\s+add))\b",
+    re.IGNORECASE,
+)
+#: Any GitHub URL or SSH remote naming a repository (``github.com/o/r``,
+#: ``codeload.github.com/o/r``, ``git@github.com:o/r.git``). One optional subdomain label
+#: and the lookbehind keep it linear, as for ``_UPSTREAM_URL``.
+_REPO_URL = re.compile(
+    r"(?<![\w.-])(?:[\w-]+\.)?(?:github\.com|githubusercontent\.com)[/:](?:repos/)?"
+    r"(?P<repo>[\w.-]+/[\w.-]+)",
+    re.IGNORECASE,
+)
+#: A package-index download or install (``pip download``, ``uv pip install``, ``poetry add``).
+_PACKAGE_FETCH = re.compile(
+    r"\b(?:pip3?|uv\s+pip|pipx|conda|mamba|poetry|uv)\s+(?:download|install|add)\b",
     re.IGNORECASE,
 )
 # One optional subdomain label and a lookbehind keep this linear; ``(?:[\w-]+\.)*`` backtracks
@@ -264,11 +283,20 @@ def _flag(
     )
 
 
+def _sha_refers(token: str, sha: str) -> bool:
+    """Whether hex ``token`` names the commit ``sha`` (either may be the abbreviation)."""
+    token, sha = token.lower(), sha.lower()
+    return sha.startswith(token) or (len(token) in _FULL_SHA_LENGTHS and token.startswith(sha))
+
+
 def _hex_match(line: str, shas: tuple[str, ...]) -> bool:
-    """Whether ``line`` has a hex token that is a prefix of a solution SHA (7+ chars)."""
-    return any(
-        sha.lower().startswith(token.lower()) for token in _HEX_TOKEN.findall(line) for sha in shas
-    )
+    """Whether ``line`` has a hex token (7+ chars) that names a solution SHA.
+
+    A token that is a prefix of a known SHA counts, and so does a full-length SHA
+    that starts with a short SHA from the context, so a context that only knows
+    ``9fceb02`` still catches ``git show 9fceb02d0ae5...`` spelled in full.
+    """
+    return any(_sha_refers(token, sha) for token in _HEX_TOKEN.findall(line) for sha in shas)
 
 
 def _check_solution_sha(ctx: AuditContext, call: ToolCallRecord) -> list[IntegrityFlag]:
@@ -284,14 +312,49 @@ def _check_solution_sha(ctx: AuditContext, call: ToolCallRecord) -> list[Integri
     return []
 
 
+def _same_repo(found: str, ctx: AuditContext) -> bool:
+    return ctx.repo is not None and found.lower().removesuffix(".git") == ctx.repo.lower()
+
+
 def _upstream_hit(line: str, ctx: AuditContext) -> Severity | None:
     url = _UPSTREAM_URL.search(line) or _GH_API.search(line)
     if url:
-        same_repo = ctx.repo is not None and url.group("repo").lower() == ctx.repo.lower()
-        return Severity.EXPLOIT if same_repo else Severity.SUSPECT
+        return Severity.EXPLOIT if _same_repo(url.group("repo"), ctx) else Severity.SUSPECT
     if _GH_CLI.search(line) or _PULL_REF.search(line):
         return Severity.EXPLOIT
     return None
+
+
+def _repo_hit(segment: str, ctx: AuditContext) -> Severity | None:
+    """A network command that names the upstream repository itself (a clone or fetch).
+
+    Cloning or fetching upstream brings down every later commit, the fix included,
+    without ever naming a pull request. Another repository (a dependency) is not flagged.
+    """
+    if any(_same_repo(m.group("repo"), ctx) for m in _REPO_URL.finditer(segment)):
+        return Severity.EXPLOIT
+    return None
+
+
+def _package_hit(segment: str, ctx: AuditContext) -> Severity | None:
+    """A package-index download or install of the instance's own package.
+
+    The released version may already hold the fix. The package is assumed to be
+    named like the repository (``django/django`` -> ``django``); that is a
+    heuristic, so it is ``suspect``.
+    """
+    if ctx.repo is None or "/" not in ctx.repo or _PACKAGE_FETCH.search(segment) is None:
+        return None
+    name = re.escape(ctx.repo.rsplit("/", 1)[-1])
+    package = re.compile(rf"(?<![\w./-]){name}(?![\w/-])", re.IGNORECASE)
+    return Severity.SUSPECT if package.search(segment) else None
+
+
+def _shell_fetch(segment: str, ctx: AuditContext) -> Severity | None:
+    """How bad a fetch in one shell command segment is; a network word is needed for a URL."""
+    if _NETWORK_COMMAND.search(segment) is None:
+        return _package_hit(segment, ctx)
+    return _upstream_hit(segment, ctx) or _repo_hit(segment, ctx) or _package_hit(segment, ctx)
 
 
 def _check_upstream_fetch(ctx: AuditContext, call: ToolCallRecord) -> list[IntegrityFlag]:
@@ -304,10 +367,10 @@ def _check_upstream_fetch(ctx: AuditContext, call: ToolCallRecord) -> list[Integ
         # message) must not pair with a network word in another (``git pull``).
         segments = _shell_segments(line) if tool in _SHELL_TOOLS else [line]
         for segment in segments:
-            fetching = tool in _FETCH_TOOLS or (
-                tool in _SHELL_TOOLS and _NETWORK_COMMAND.search(segment) is not None
-            )
-            severity = _upstream_hit(segment, ctx) if fetching else None
+            if tool in _SHELL_TOOLS:
+                severity = _shell_fetch(segment, ctx)
+            else:
+                severity = _upstream_hit(segment, ctx) if tool in _FETCH_TOOLS else None
             if severity is not None:
                 return [_flag(ctx, call, "upstream_fetch", severity, line)]
     return []
