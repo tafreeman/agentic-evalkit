@@ -74,6 +74,7 @@ nav:
       - "0025: Claude subscription execution target": adr/0025-claude-subscription-execution-target.md
       - "0026: Durable experiment interfaces": adr/0026-durable-experiment-interfaces.md
       - "0027: Integrity harness boundary": adr/0027-integrity-harness-boundary.md
+      - "0028: Conformal score-threshold calibration": adr/0028-conformal-score-threshold-calibration.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - CLI reference: guides/cli-reference.md
