@@ -144,10 +144,16 @@ when integrity does not.
   relying on a flag count.
 - v1 records and flags; it does not block a write while the agent runs.
 - Known gaps, by design of a rule-based v1: a SHA shorter than 7 characters is not matched;
-  a fetch of a later file from the upstream repository (a `raw.githubusercontent.com`
-  or `blob/main` URL, the compare view, the contents API) is not treated as a fetch of the
-  fix; a verifier path spelled relative to a `cd` is not resolved; and `--fail-on-flags` does
+  a later file from the upstream repository (a `raw.githubusercontent.com` or `blob/main`
+  URL, the compare view, the contents API) read through a fetch tool rather than a shell
+  command is not treated as a fetch of the fix (from a shell, any network command naming the
+  upstream repository is); a verifier path spelled relative to a `cd` is not resolved; and `--fail-on-flags` does
   not exist yet, so `integrity` exits `0` even when it flags runs. Read `integrity_report.json`.
+- `upstream_fetch` also flags a clone, fetch, `git remote add` or archive download of the
+  upstream repository itself (`exploit`), and a package-index download or install of the
+  instance's own package (`suspect`; the package is assumed to be named like the
+  repository, and the released version may already hold the fix). A full 40- or 64-character
+  SHA counts as `solution_sha` when it starts with a short SHA from the context.
 - Tool results are capped at 8,000 characters and arguments at 50,000 when `ClaudeAgentTarget`
   records them. A capped argument is flagged `tool_call_truncated`, because what follows the
   cut was never audited.
