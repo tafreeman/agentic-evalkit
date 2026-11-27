@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path  # noqa: TC003
 
 import pytest
@@ -135,7 +135,7 @@ def _experiment_yaml(directory: Path, **extra: object) -> Path:
         yaml.safe_dump(
             {
                 "name": "swe",
-                "benchmark": {"name": "swe", "reviewed_on": datetime.now(UTC).date().isoformat()},
+                "benchmark": {"name": "swe", "reviewed_on": date.today().isoformat()},
                 "arms": [{"name": "a", "manifest": "a.yaml"}],
                 **extra,
             }
@@ -217,7 +217,7 @@ def _e2e_experiment(directory: Path) -> Path:
     path = directory / "exp.yaml"
     path.write_text(
         "name: e2e\n"
-        f"benchmark: {{name: local, reviewed_on: {datetime.now(UTC).date().isoformat()}}}\n"
+        f"benchmark: {{name: local, reviewed_on: {date.today().isoformat()}}}\n"
         "arms:\n  - {name: a, manifest: arm.yaml}\n"
         "integrity:\n  context: integrity_context.json\n",
         encoding="utf-8",
