@@ -291,6 +291,22 @@ These matter for reading the 48/48 pass rate correctly.
 
 ## Reproducing
 
+### Inspect the published run without rerunning models
+
+From the repository root, regenerate an HTML report from the committed run:
+
+```bash
+uv run --no-dev agentic-evalkit report \
+  scripts/reports/2026-07-26-agent-workflow-eval/e2f77bdddafc4b74b324a57851587317.json \
+  --format html --output inspect-arp-eval.html
+```
+
+Open `inspect-arp-eval.html` in your browser. This renders the historical 48-case
+run. It does not invoke a model, require provider credentials or an ARP checkout,
+or overwrite the committed report. On first use, `uv` may download dependencies.
+
+### Rerun the providers
+
 `agentic-evalkit`'s CLI has a closed component registry — `_KNOWN_ADAPTERS` and
 `_KNOWN_GRADERS` in `cli/runs.py` resolve only the gsm8k / grounded-citation /
 swebench components — so `agentic-evalkit run` cannot name a custom ARP adapter
@@ -328,7 +344,7 @@ Both packages must be importable by one interpreter. ARP's venv plus
 ```bash
 ARP=/path/to/agentic-runtime-platform
 EVK=/path/to/agentic-evalkit
-HARNESS="$EVK/reports/2026-07-26-agent-workflow-eval/harness"
+HARNESS="$EVK/scripts/reports/2026-07-26-agent-workflow-eval/harness"
 
 # 1. Rebuild the case suite from ARP's own run logs
 PYTHONPATH="$EVK/src:$HARNESS" "$ARP/.venv/bin/python" "$HARNESS/build_cases.py" \
