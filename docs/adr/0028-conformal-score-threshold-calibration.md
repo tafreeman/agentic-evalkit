@@ -29,9 +29,15 @@ is being made. They are also easy to over-read. Three misreadings matter here:
 - The expectation form is marginal over the calibration draw. A single
   certificate can be worse than its budget; only the high-probability form says
   otherwise about one certificate.
-- Both assume calibration and deployment items are exchangeable. A changed
-  judge, model, dataset or prompt voids a certificate, and nothing in a
-  certificate can detect that.
+- The two forms assume different things about the data. The expectation form
+  needs calibration and deployment items to be exchangeable. The
+  high-probability form needs them to be independent draws from the deployment
+  distribution, because its binomial tail assumes the number of calibration
+  errors is Binomial; exchangeable but correlated items (one shared random
+  outcome behind every loss, say) break it. Repeated attempts or shared prompts
+  make calibration items correlated in this way.
+- A changed judge, model, dataset or prompt voids a certificate, and nothing in
+  a certificate can detect that, or detect a violated sampling assumption.
 
 A worked proposal for this capability was evaluated (a standalone
 `conformal-eval-bounds` package: exact-rational calibrator, Clopper-Pearson
@@ -62,8 +68,9 @@ grader's gate.
   small values stay plain numbers. Nothing is re-exported from
   `agentic_evalkit.graders`; the module is imported by name.
 - **Two modes, named for what they guarantee.** `CRC_EXPECTATION` keeps
-  `(sum of accepted losses + 1) / (n + 1) <= alpha`. `RCPS_HIGH_PROB` requires
-  binary losses and keeps `P(Binomial(n, alpha) <= observed errors) <= delta`
+  `(sum of accepted losses + 1) / (n + 1) <= alpha` and assumes exchangeable
+  data. `RCPS_HIGH_PROB` requires binary losses and independent calibration
+  draws, and keeps `P(Binomial(n, alpha) <= observed errors) <= delta`
   at every accepted threshold, which is the Clopper-Pearson upper limit staying
   at or below `alpha`, tested exactly instead of through a beta function.
 - **Exact arithmetic.** Budgets, `delta` and losses are `Fraction`s. A float is

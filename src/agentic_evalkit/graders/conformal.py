@@ -19,10 +19,20 @@ What a certificate does and does not say -- read this before relying on one:
 - ``RCPS_HIGH_PROB`` bounds the *true* risk by ``alpha`` with probability at
   least ``1 - delta`` over the calibration draw, for binary losses. It is the
   one to use when a certificate is shown to a reader as evidence.
-- Both require calibration items and deployment items to be exchangeable
-  (drawn the same way). Nothing here can check that; a changed judge, model,
-  dataset or prompt voids a certificate. Callers must pair a certificate
-  with the provenance that produced it (ADR-0008, ADR-0015).
+- The two modes assume different things about the data. ``CRC_EXPECTATION``
+  needs calibration and deployment items to be *exchangeable* (drawn the same
+  way). ``RCPS_HIGH_PROB`` needs more: the items must be *independent* draws
+  from the deployment distribution, because its binomial tail assumes the
+  number of calibration errors is Binomial. Exchangeable but correlated items
+  break it. If every loss were one shared Bernoulli(0.1) coin flip, 59 clean
+  calibration items would occur with probability 0.9 and certify a threshold
+  whose true risk is 0.1 at ``alpha = delta = 0.05``. Calibration sets with
+  repeated attempts, shared prompts or shared contexts are correlated in
+  exactly this way, so use one independent unit per item (ADR-0016 explains
+  why repeated attempts are not independent).
+- Nothing here can check either assumption; a changed judge, model, dataset
+  or prompt also voids a certificate. Callers must pair a certificate with the
+  provenance that produced it (ADR-0008, ADR-0015).
 
 Scores are compared as floats (floats are totally ordered, so ties are exact).
 ``alpha``, ``delta`` and losses are converted to exact rationals, and a float
