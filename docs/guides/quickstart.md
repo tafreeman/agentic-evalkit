@@ -64,7 +64,8 @@ This writes a manifest pinning:
   automatically because no callable/subprocess/HTTP target was supplied.
 
 `zero_target` is a transport/pipeline smoke target — it always answers
-`"0"`, so it always fails GSM8K grading. It exists to prove the pipeline
+`"0"` regardless of the question. A sample passes if its expected answer is
+also `"0"`. It exists to prove the pipeline
 runs end to end before you wire in a real system under test (see
 [the targets guide](targets.md) for how to point `run` at your own
 callable, subprocess, or HTTP target).
@@ -93,8 +94,8 @@ outcomes: total=5 passed=0 failed=5 partial=0 errors=0 timeouts=0 cancelled=0 ab
 report: agentic-evalkit-runs/<run_id>.json
 ```
 
-`passed=0 failed=5` is expected with the demo target — `zero_target` never
-produces the right GSM8K answer. What this run verifies is the *pipeline*:
+`passed=0 failed=5` is a possible result with the demo target; counts depend
+on the sampled answers. What this run verifies is the *pipeline*:
 live dataset resolution, target execution, objective grading, and report
 generation, all through one manifest and no importer code.
 

@@ -50,9 +50,10 @@ through the packaged smoke target, grades them with a normalized exact-match
 grader, and writes a canonical JSON report. No importer code, manual dataset
 download, `datasets`, `pyarrow`, or Docker is required.
 
-The run reports `passed=0 failed=5` — that's expected, not a bug. The
-packaged demo target (`zero_target`) always answers `"0"`, so it always
-fails GSM8K grading; the point of this walkthrough is to verify the
+A run may report `passed=0 failed=5` — that's expected with the demo target.
+The packaged `zero_target` always answers `"0"`, regardless of the question;
+a sample can pass if its expected answer is also `"0"`. The point of this
+walkthrough is to verify the
 *pipeline* — live dataset resolution, target execution, objective grading,
 and report generation — before you wire in a real system under test. See
 [docs/guides/quickstart.md](docs/guides/quickstart.md) for the full
