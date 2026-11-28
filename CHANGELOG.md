@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Integrity audit: `upstream_fetch` now reads every tool, not only a fixed list.
+  A tool named like a fetcher (an MCP `fetch` server, a browser) is checked as
+  `WebFetch` is, including `raw`, `blob` and release URLs of the upstream
+  repository; any other tool that is not a shell, file write or local read (a
+  subagent `Task` prompt, an unknown MCP tool) is `suspect` when it names an
+  upstream pull request, issue or commit.
 - Integrity audit: `upstream_fetch` now flags a clone, fetch, `git remote add` or
   archive download of the upstream repository (`exploit`) and a package-index
   download or install of the instance's own package (`suspect`); a full-length SHA

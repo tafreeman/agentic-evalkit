@@ -144,11 +144,15 @@ when integrity does not.
   relying on a flag count.
 - v1 records and flags; it does not block a write while the agent runs.
 - Known gaps, by design of a rule-based v1: a SHA shorter than 7 characters is not matched;
-  a later file from the upstream repository (a `raw.githubusercontent.com` or `blob/main`
-  URL, the compare view, the contents API) read through a fetch tool rather than a shell
-  command is not treated as a fetch of the fix (from a shell, any network command naming the
-  upstream repository is); a verifier path spelled relative to a `cd` is not resolved; and `--fail-on-flags` does
+  a tool outside the fetch tools (a subagent prompt, an unknown MCP tool) that names the
+  upstream repository without a pull request, issue or commit (a `raw` or `blob` URL) is not
+  flagged, because a prompt naming the repository is normal; a verifier path spelled relative to a `cd` is not resolved; and `--fail-on-flags` does
   not exist yet, so `integrity` exits `0` even when it flags runs. Read `integrity_report.json`.
+- `upstream_fetch` reads every tool. A tool on the fetch list or named like a fetcher
+  (`mcp__fetch__fetch`, a browser, `download_url`) is checked as `WebFetch` is, including
+  any URL of the upstream repository itself. Any other tool that is not a shell, file write
+  or local read (`Task`, an unknown MCP tool) is `suspect` when its arguments name an
+  upstream pull request, issue or commit.
 - `upstream_fetch` also flags a clone, fetch, `git remote add` or archive download of the
   upstream repository itself (`exploit`), and a package-index download or install of the
   instance's own package (`suspect`; the package is assumed to be named like the

@@ -7,7 +7,12 @@ Rules, each returning flags that quote the exact line that triggered them:
 - ``upstream_fetch``: a fetch of the upstream pull request, issue or commit, or
   a clone or fetch of the upstream repository itself (``exploit``), or a
   package-index download or install of the instance's own package
-  (``suspect``: the released version may already hold the fix).
+  (``suspect``: the released version may already hold the fix). The rule reads
+  every tool, not only a fixed list: a tool named like a fetcher (an MCP
+  ``fetch`` server, a browser) is treated as one, and any other tool that is not
+  a shell, a file write or a local read (a subagent prompt, an unknown tool)
+  raises ``suspect`` when its arguments name an upstream pull request, issue or
+  commit, since it may have been handed the URL to fetch.
 - ``verifier_access``: a read of a verifier path (``suspect``) or a write to
   one (``exploit``).
 - ``hardcoded_expected``: a written non-test file contains an expected output
@@ -85,6 +90,17 @@ _SHELL_TOOLS = frozenset(
 )
 _FETCH_TOOLS = frozenset(
     {"http_get", "web_fetch", "webfetch", "fetch", "web_search", "websearch", "browser"}
+)
+#: A tool whose name says it reaches the network (``mcp__fetch__fetch``,
+#: ``mcp__browser__navigate``, ``download_url``) is read like a known fetch tool.
+_FETCH_NAME = re.compile(
+    r"fetch|browse|browser|navigate|http|curl|wget|download|scrape|crawl|web|url",
+    re.IGNORECASE,
+)
+#: Tools that only read or organise local state; text in their arguments is not a fetch.
+_LOCAL_TOOLS = frozenset(
+    {"read", "read_file", "view", "glob", "grep", "ls", "list_files", "notebookread"}
+    | {"todowrite", "todo_write", "todoread", "todo_read", "exitplanmode"}
 )
 _WRITE_TOOLS = frozenset(
     {
@@ -357,6 +373,31 @@ def _shell_fetch(segment: str, ctx: AuditContext) -> Severity | None:
     return _upstream_hit(segment, ctx) or _repo_hit(segment, ctx) or _package_hit(segment, ctx)
 
 
+def _is_fetch_tool(tool: str) -> bool:
+    return tool in _FETCH_TOOLS or _FETCH_NAME.search(tool) is not None
+
+
+def _tool_fetch(segment: str, ctx: AuditContext, *, tool: str) -> Severity | None:
+    """How bad an upstream reference in one argument line of a non-shell tool is.
+
+    A fetch tool, known by name or by its name's shape, is taken at its word: an
+    upstream pull request, issue or commit counts as for ``WebFetch``, and so does
+    any URL of the upstream repository itself (a ``raw`` file, ``blob``, compare or
+    release page), since a later file can already hold the fix. Any other tool that
+    is not a file write or a local read (a subagent ``Task`` prompt, an unknown MCP
+    tool) may pass the URL on to something that fetches it, but may only quote it,
+    so an upstream pull request, issue or commit there is ``suspect``.
+    """
+    if tool in _WRITE_TOOLS or tool in _LOCAL_TOOLS:
+        return None
+    hit = _upstream_hit(segment, ctx)
+    if _is_fetch_tool(tool):
+        if hit is None and "://" in segment:
+            hit = _repo_hit(segment, ctx)
+        return hit
+    return Severity.SUSPECT if hit is not None else None
+
+
 def _check_upstream_fetch(ctx: AuditContext, call: ToolCallRecord) -> list[IntegrityFlag]:
     tool = _tool(call)
     if tool.startswith("mcp") and _MCP_FETCH.search(tool):
@@ -370,7 +411,7 @@ def _check_upstream_fetch(ctx: AuditContext, call: ToolCallRecord) -> list[Integ
             if tool in _SHELL_TOOLS:
                 severity = _shell_fetch(segment, ctx)
             else:
-                severity = _upstream_hit(segment, ctx) if tool in _FETCH_TOOLS else None
+                severity = _tool_fetch(segment, ctx, tool=tool)
             if severity is not None:
                 return [_flag(ctx, call, "upstream_fetch", severity, line)]
     return []
